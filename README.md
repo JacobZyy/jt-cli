@@ -67,9 +67,19 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 ```
 
+## Git hook
+
+Activate repository pre-commit hook once per clone:
+
+```bash
+ln -s ../../.githooks/pre-commit .git/hooks/pre-commit
+```
+
+Every commit runs `cargo test --locked --quiet`. Failed tests abort commit. GitHub CI remains final required check because local hooks can be bypassed.
+
 ## Commit policy
 
-Use Conventional Commits because release-please derives versions and changelog entries from commits on `main`. Client Git hooks are not enforced: they do not travel with clones and can be bypassed. For squash merges, enforce Conventional Commit PR titles with GitHub rules or a server-side PR-title check.
+Use Conventional Commits because release-please derives versions and changelog entries from commits on `main`. Git does not activate repository hooks automatically, and `--no-verify` can bypass them. For squash merges, enforce Conventional Commit PR titles with GitHub rules or a server-side PR-title check.
 
 release-please currently uses built-in `GITHUB_TOKEN`. GitHub suppresses workflows triggered by its Release PR. Repositories requiring PR checks need a bot bypass until optional GitHub App token support is added.
 
