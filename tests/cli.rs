@@ -14,6 +14,7 @@ fn help_lists_new_commands_only() {
     assert!(output.status.success());
     assert!(stdout.contains("jt repo cicd"));
     assert!(stdout.contains("jt node init"));
+    assert!(stdout.contains("jt cli bootstrap"));
     assert!(!stdout.contains("jt release init"));
 }
 
@@ -36,6 +37,20 @@ fn node_init_requires_tty_before_mutating_home() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(!home.path().join(".vite-plus").exists());
+}
+
+#[test]
+fn cli_bootstrap_requires_tty_before_mutating_home() {
+    let home = tempdir().unwrap();
+    let output = jt()
+        .args(["cli", "bootstrap"])
+        .env("HOME", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(home.path().read_dir().unwrap().next().is_none());
 }
 
 #[test]

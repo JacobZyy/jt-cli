@@ -1,3 +1,4 @@
+mod cli;
 mod icon;
 mod node;
 mod release;
@@ -13,11 +14,13 @@ jt — personal CLI for Jacob and Taotao
 Usage:
   jt repo cicd
   jt node init
+  jt cli bootstrap
   jt icon <size|svg> [directory]
 
 Commands:
   repo cicd                    Configure npm release automation in current directory
   node init                    Initialize global Node/pnpm environment with Vite+
+  cli bootstrap                Bootstrap terminal, shell, prompt, and CLI tools
   icon <size|svg> [directory]  Write one JT icon; default directory: ./public
 
 PNG sizes:
@@ -35,6 +38,7 @@ fn main() -> ExitCode {
     match args.as_slice() {
         [command, action] if is(command, "repo") && is(action, "cicd") => repo_cicd(),
         [command, action] if is(command, "node") && is(action, "init") => node_init(),
+        [command, action] if is(command, "cli") && is(action, "bootstrap") => cli_bootstrap(),
         [command, selector] if is(command, "icon") => icon_download(selector, None),
         [command, selector, directory] if is(command, "icon") => {
             icon_download(selector, Some(directory))
@@ -69,6 +73,10 @@ fn repo_cicd() -> ExitCode {
 
 fn node_init() -> ExitCode {
     ExitCode::from(node::init())
+}
+
+fn cli_bootstrap() -> ExitCode {
+    ExitCode::from(cli::bootstrap())
 }
 
 fn icon_download(selector: &OsString, output_directory: Option<&OsString>) -> ExitCode {

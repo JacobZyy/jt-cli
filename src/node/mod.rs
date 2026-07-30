@@ -3,12 +3,12 @@ mod cleanup;
 mod cli;
 mod command;
 mod context;
-mod error;
-mod fs;
+pub(crate) mod error;
+pub(crate) mod fs;
 mod inventory;
 mod model;
 mod nrm;
-mod platform;
+pub(crate) mod platform;
 mod shell;
 
 use std::io::IsTerminal;
