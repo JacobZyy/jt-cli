@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   release:
-    uses: JacobZyy/jt-cli/.github/workflows/npm-release.yml@v0.1.0
+    uses: JacobZyy/jt-cli/.github/workflows/npm-release.yml@v1.0.0
 "#;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -358,6 +358,8 @@ mod tests {
         let path = project.path.join(WORKFLOW_PATH);
         assert_eq!(init(&project.path), Ok(InitStatus::Created(path.clone())));
         assert_eq!(fs::read_to_string(&path).unwrap(), WORKFLOW);
+        assert!(WORKFLOW.contains("@v1.0.0"));
+        assert!(!WORKFLOW.contains("@main"));
         assert_eq!(init(&project.path), Ok(InitStatus::Unchanged(path)));
     }
 

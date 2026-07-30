@@ -1,0 +1,180 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="700"
+  height="700"
+  viewBox="0 0 700 700"
+  fill="none"
+  role="img"
+  aria-labelledby="jt-animated-title"
+>
+  <title id="jt-animated-title">Animated JT monogram — Stand, then reach</title>
+
+  <style>
+    .draw {
+      fill: none;
+      stroke-dasharray: 1 0;
+      stroke-dashoffset: 0;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .j-dot {
+      animation: draw-j-dot 6s ease-in-out infinite;
+    }
+
+    .j-body {
+      animation: draw-j-body 6s ease-in-out infinite;
+    }
+
+    .t-stem {
+      animation: draw-t-stem 6s ease-in-out infinite;
+    }
+
+    .t-cross {
+      animation: draw-t-cross 6s ease-in-out infinite;
+    }
+
+    @keyframes draw-j-dot {
+      0%,
+      2% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+
+      3% {
+        opacity: 1;
+      }
+
+      12%,
+      88% {
+        stroke-dasharray: 1 0;
+        opacity: 1;
+      }
+
+      100% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+    }
+
+    @keyframes draw-j-body {
+      0%,
+      8% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+
+      9% {
+        opacity: 1;
+      }
+
+      38%,
+      88% {
+        stroke-dasharray: 1 0;
+        opacity: 1;
+      }
+
+      100% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+    }
+
+    @keyframes draw-t-stem {
+      0%,
+      36% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+
+      37% {
+        opacity: 1;
+      }
+
+      66%,
+      88% {
+        stroke-dasharray: 1 0;
+        opacity: 1;
+      }
+
+      100% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+    }
+
+    @keyframes draw-t-cross {
+      0%,
+      64% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+
+      65% {
+        opacity: 1;
+      }
+
+      78%,
+      88% {
+        stroke-dasharray: 1 0;
+        opacity: 1;
+      }
+
+      100% {
+        stroke-dasharray: 0 1;
+        opacity: 0;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce), print {
+      .draw {
+        animation: none !important;
+        stroke-dasharray: 1 0 !important;
+        opacity: 1 !important;
+      }
+    }
+  </style>
+
+  <rect width="700" height="700" rx="36" fill="#E7F3E8"/>
+
+  <circle cx="624" cy="98" r="12" fill="#F3C969"/>
+  <circle cx="663" cy="124" r="6" fill="#F3C969"/>
+  <path
+    d="M31 610C49 595 73 594 97 602"
+    stroke="#214B3A"
+    stroke-width="4"
+    stroke-linecap="round"
+    opacity=".28"
+  />
+
+  <g transform="translate(70 60)">
+    <path
+      class="draw j-dot"
+      pathLength="1"
+      d="M151.2 117.6C168 89.6 196 78.4 224 95.2"
+      stroke="#214B3A"
+      stroke-width="25.76"
+    />
+    <path
+      class="draw j-body"
+      pathLength="1"
+      d="M168 179.2C173.6 246.4 173.6 319.2 162.4 380.8C151.2 436.8 123.2 470.4 89.6 448C112 492.8 173.6 509.6 235.2 487.2C280 470.4 308 436.8 324.8 397.6"
+      stroke="#214B3A"
+      stroke-width="28"
+    />
+    <path
+      class="draw t-stem"
+      pathLength="1"
+      d="M380.8 134.4C364 190.4 352.8 252 347.2 313.6C341.6 364 336 403.2 358.4 431.2C386.4 459.2 436.8 442.4 448 403.2"
+      stroke="#3D7658"
+      stroke-width="28"
+    />
+    <path
+      class="draw t-cross"
+      pathLength="1"
+      d="M123.2 190.4C196 184.8 268.8 173.6 336 184.8C392 190.4 442.4 207.2 476 235.2"
+      stroke="#3D7658"
+      stroke-width="26.88"
+    />
+  </g>
+</svg>

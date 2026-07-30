@@ -1,17 +1,27 @@
+mod icon;
+mod node;
 mod release;
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 const HELP: &str = "\
 jt — personal CLI for Jacob and Taotao
 
 Usage:
-  jt release init
+  jt repo cicd
+  jt node init
+  jt icon <size|svg> [directory]
 
 Commands:
-  release init    Configure npm release automation in current directory
+  repo cicd                    Configure npm release automation in current directory
+  node init                    Initialize global Node/pnpm environment with Vite+
+  icon <size|svg> [directory]  Write one JT icon; default directory: ./public
+
+PNG sizes:
+  16, 24, 32, 48, 64, 128, 256, 512, 1024
 ";
 
 fn main() -> ExitCode {
@@ -22,12 +32,21 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    if !matches!(args.as_slice(), [command, action] if is(command, "release") && is(action, "init"))
-    {
-        eprint!("{HELP}");
-        return ExitCode::from(2);
+    match args.as_slice() {
+        [command, action] if is(command, "repo") && is(action, "cicd") => repo_cicd(),
+        [command, action] if is(command, "node") && is(action, "init") => node_init(),
+        [command, selector] if is(command, "icon") => icon_download(selector, None),
+        [command, selector, directory] if is(command, "icon") => {
+            icon_download(selector, Some(directory))
+        }
+        _ => {
+            eprint!("{HELP}");
+            ExitCode::from(2)
+        }
     }
+}
 
+fn repo_cicd() -> ExitCode {
     let result = env::current_dir()
         .map_err(|error| format!("cannot read current directory: {error}"))
         .and_then(|directory| release::init(&directory));
@@ -39,6 +58,39 @@ fn main() -> ExitCode {
         }
         Ok(release::InitStatus::Unchanged(path)) => {
             println!("already configured {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn node_init() -> ExitCode {
+    ExitCode::from(node::init())
+}
+
+fn icon_download(selector: &OsString, output_directory: Option<&OsString>) -> ExitCode {
+    let result = env::current_dir()
+        .map_err(|error| format!("cannot read current directory: {error}"))
+        .and_then(|current_directory| {
+            let directory = output_directory
+                .map(PathBuf::from)
+                .map(|path| {
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        current_directory.join(path)
+                    }
+                })
+                .unwrap_or_else(|| current_directory.join("public"));
+            icon::download(selector, &directory)
+        });
+
+    match result {
+        Ok(path) => {
+            println!("created {}", path.display());
             ExitCode::SUCCESS
         }
         Err(error) => {
