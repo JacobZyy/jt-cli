@@ -1,1 +1,14 @@
 # Changelog
+
+## [1.0.0](https://github.com/JacobZyy/jt-cli/compare/v0.1.0...v1.0.0) (2026-07-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* replace jt release init with jt repo cicd.
+
+### Features
+
+* release jt 1.0 ([7063d40](https://github.com/JacobZyy/jt-cli/commit/7063d402d96e44fd9f9829de5b88114f4f02ec34))
+
+## Changelog
