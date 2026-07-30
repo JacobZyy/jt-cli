@@ -1,0 +1,4 @@
+interface:
+  display_name: "JT Development Workflow"
+  short_description: "Guide safe jt-cli changes through tests and PRs"
+  default_prompt: "Use $jt-development-workflow to make this jt-cli change through its branch, hook, CI, and PR workflow."
