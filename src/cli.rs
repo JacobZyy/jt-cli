@@ -11,8 +11,10 @@ use crate::node::error::{AppError, Result};
 use crate::node::fs::{atomic_write, read_optional};
 use crate::node::platform::HomePaths;
 
-const MANAGED_OPEN: &str = "# >>> jt cli bootstrap >>>";
-const MANAGED_CLOSE: &str = "# <<< jt cli bootstrap <<<";
+const CLI_MANAGED_OPEN: &str = "# >>> jt cli bootstrap >>>";
+const CLI_MANAGED_CLOSE: &str = "# <<< jt cli bootstrap <<<";
+const GHOSTTY_MANAGED_OPEN: &str = "# >>> jt ghostty install >>>";
+const GHOSTTY_MANAGED_CLOSE: &str = "# <<< jt ghostty install <<<";
 const GHOSTTY_CONFIG: &str = include_str!("../assets/cli/ghostty.conf");
 const FISH_CONFIG: &str = include_str!("../assets/cli/bootstrap.fish");
 const FISH_GIT_SHORTCUTS: &str = include_str!("../assets/cli/git-shortcuts.fish");
@@ -26,7 +28,7 @@ const STARSHIP_CONFIG: &str = include_str!("../assets/cli/starship.toml");
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Platform {
     Macos,
-    Debian { wsl: bool },
+    Debian,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +68,25 @@ pub fn bootstrap() -> u8 {
     }
 }
 
+pub fn ghostty_install() -> u8 {
+    if let Err(error) = validate_ghostty_platform(env::consts::OS, env::consts::ARCH) {
+        eprintln!("error: {error}");
+        return 1;
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!("error: jt ghostty install 仅支持交互运行");
+        return 1;
+    }
+
+    match run_ghostty_install() {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("error: {error}");
+            1
+        }
+    }
+}
+
 fn run() -> Result<()> {
     let environment = env::vars_os().collect::<BTreeMap<_, _>>();
     let home = HomePaths::from_environment(&environment)?.home;
@@ -75,7 +96,7 @@ fn run() -> Result<()> {
         .map_err(|error| AppError::io("render intro", None, error))?;
     cliclack::note(
         "终端工具链",
-        "Ghostty + Fish/Zsh + Starship + Maple Mono NF CN\n\
+        "Fish/Zsh + Starship\n\
          bat/eza/fd/ripgrep/fzf/btop/zoxide/jq/tldr/delta/lazygit\n\
          不安装 Node、fnm、pnpm",
     )
@@ -129,26 +150,66 @@ fn run() -> Result<()> {
 
     match platform {
         Platform::Macos => install_macos(shell, install_zellij)?,
-        Platform::Debian { .. } => install_debian(&home, shell, install_zellij)?,
+        Platform::Debian => install_debian(&home, shell, install_zellij)?,
     }
     set_default_shell(shell)?;
-    deploy_configs(&home, platform, shell, auto_proxy)?;
+    deploy_cli_configs(&home, shell, auto_proxy)?;
     configure_delta()?;
 
-    let terminal = match platform {
-        Platform::Macos => "打开 Ghostty",
-        Platform::Debian { wsl: true } => "在 Windows 侧安装 Ghostty 或 Windows Terminal",
-        Platform::Debian { wsl: false } => "按发行版文档安装 Ghostty",
-    };
     cliclack::outro(format!(
-        "完成。{terminal}；新 Shell 生效后运行 `exec {}`",
+        "完成。新 Shell 生效后运行 `exec {}`",
         shell.command()
     ))
     .map_err(|error| AppError::io("render completion", None, error))
 }
 
+fn run_ghostty_install() -> Result<()> {
+    let environment = env::vars_os().collect::<BTreeMap<_, _>>();
+    let home = HomePaths::from_environment(&environment)?.home;
+
+    cliclack::intro("jt ghostty install")
+        .map_err(|error| AppError::io("render intro", None, error))?;
+    cliclack::note(
+        "Ghostty",
+        "安装 Ghostty 和 Maple Mono NF CN\n写入 jt 托管 Ghostty 配置并备份被修改文件",
+    )
+    .map_err(|error| AppError::io("render Ghostty summary", None, error))?;
+    if !cliclack::confirm("继续？")
+        .initial_value(false)
+        .interact()
+        .map_err(|error| AppError::io("read Ghostty confirmation", None, error))?
+    {
+        cliclack::outro_cancel("未改动系统")
+            .map_err(|error| AppError::io("render cancellation", None, error))?;
+        return Ok(());
+    }
+
+    install_macos_ghostty()?;
+    deploy_ghostty_config(&home)?;
+    cliclack::outro("完成。打开 Ghostty")
+        .map_err(|error| AppError::io("render completion", None, error))
+}
+
+fn validate_ghostty_platform(os: &str, architecture: &str) -> Result<()> {
+    if os != "macos" {
+        return Err(AppError::Invalid(
+            "jt ghostty install 仅支持 macOS".to_owned(),
+        ));
+    }
+    if !supported_architecture(architecture) {
+        return Err(AppError::Invalid(format!(
+            "unsupported architecture before mutation: {architecture}"
+        )));
+    }
+    Ok(())
+}
+
+fn supported_architecture(architecture: &str) -> bool {
+    matches!(architecture, "x86_64" | "aarch64")
+}
+
 fn detect_platform() -> Result<Platform> {
-    if !matches!(env::consts::ARCH, "x86_64" | "aarch64") {
+    if !supported_architecture(env::consts::ARCH) {
         return Err(AppError::Invalid(format!(
             "unsupported architecture before mutation: {}",
             env::consts::ARCH
@@ -164,10 +225,7 @@ fn detect_platform() -> Result<Platform> {
                     "jt cli bootstrap 仅支持 Debian/Ubuntu Linux".to_owned(),
                 ));
             }
-            let wsl = fs::read_to_string("/proc/version")
-                .map(|version| version.to_ascii_lowercase().contains("microsoft"))
-                .unwrap_or(false);
-            Ok(Platform::Debian { wsl })
+            Ok(Platform::Debian)
         }
         os => Err(AppError::Invalid(format!(
             "unsupported platform before mutation: {os}/{}",
@@ -190,19 +248,6 @@ fn is_debian_family(os_release: &str) -> bool {
 
 fn install_macos(shell: Shell, install_zellij: bool) -> Result<()> {
     let brew = ensure_homebrew()?;
-    if !Path::new("/Applications/Ghostty.app").exists()
-        && !command_success(&brew, ["list", "--cask", "ghostty"])
-    {
-        run_command(&brew, ["install", "--cask", "ghostty"], "install Ghostty")?;
-    }
-    if !command_success(&brew, ["list", "--cask", "font-maple-mono-nf-cn"]) {
-        run_command(
-            &brew,
-            ["install", "--cask", "font-maple-mono-nf-cn"],
-            "install Maple Mono NF CN",
-        )?;
-    }
-
     let mut packages = vec![
         "bat",
         "eza",
@@ -233,6 +278,23 @@ fn install_macos(shell: Shell, install_zellij: bool) -> Result<()> {
     run_command(&brew, arguments, "install terminal CLI tools")
 }
 
+fn install_macos_ghostty() -> Result<()> {
+    let brew = ensure_homebrew()?;
+    if !Path::new("/Applications/Ghostty.app").exists()
+        && !command_success(&brew, ["list", "--cask", "ghostty"])
+    {
+        run_command(&brew, ["install", "--cask", "ghostty"], "install Ghostty")?;
+    }
+    if !command_success(&brew, ["list", "--cask", "font-maple-mono-nf-cn"]) {
+        run_command(
+            &brew,
+            ["install", "--cask", "font-maple-mono-nf-cn"],
+            "install Maple Mono NF CN",
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_homebrew() -> Result<PathBuf> {
     if let Some(brew) = find_command("brew") {
         return Ok(brew);
@@ -255,8 +317,6 @@ fn install_debian(home: &Path, shell: Shell, install_zellij: bool) -> Result<()>
         "ca-certificates",
         "curl",
         "git",
-        "unzip",
-        "fontconfig",
         "bat",
         "fd-find",
         "ripgrep",
@@ -276,7 +336,6 @@ fn install_debian(home: &Path, shell: Shell, install_zellij: bool) -> Result<()>
             eprintln!("warning: apt 没有 {package}；跳过，请按发行版安装");
         }
     }
-    install_maple_font(home)?;
     install_release_binary(
         home,
         "starship",
@@ -304,78 +363,6 @@ fn linux_architecture() -> &'static str {
         "aarch64" => "aarch64",
         _ => "x86_64",
     }
-}
-
-fn install_maple_font(home: &Path) -> Result<()> {
-    if command_output(
-        "fc-list",
-        std::iter::empty::<&str>(),
-        "inspect installed fonts",
-    )?
-    .stdout
-    .windows("Maple Mono NF CN".len())
-    .any(|window| window == b"Maple Mono NF CN")
-    {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()
-        .map_err(|error| AppError::io("create font temporary directory", None, error))?;
-    let archive = temp.path().join("MapleMono-NF-CN-unhinted.zip");
-    let checksum = temp.path().join("MapleMono-NF-CN-unhinted.sha256");
-    download(
-        "https://github.com/subframe7536/maple-font/releases/latest/download/MapleMono-NF-CN-unhinted.zip",
-        &archive,
-    )?;
-    download(
-        "https://github.com/subframe7536/maple-font/releases/latest/download/MapleMono-NF-CN-unhinted.sha256",
-        &checksum,
-    )?;
-    verify_sha256(&archive, &checksum)?;
-
-    let extracted = temp.path().join("fonts");
-    fs::create_dir(&extracted)
-        .map_err(|error| AppError::io("create font extraction directory", None, error))?;
-    run_command(
-        "unzip",
-        [
-            OsString::from("-q"),
-            OsString::from("-j"),
-            archive.as_os_str().to_os_string(),
-            OsString::from("*.ttf"),
-            OsString::from("-d"),
-            extracted.as_os_str().to_os_string(),
-        ],
-        "extract Maple Mono NF CN",
-    )?;
-
-    let font_directory = home.join(".local/share/fonts/MapleMono-NF-CN");
-    let mut installed = 0;
-    for entry in fs::read_dir(&extracted)
-        .map_err(|error| AppError::io("read extracted fonts", Some(extracted.clone()), error))?
-    {
-        let entry = entry.map_err(|error| AppError::io("read extracted font", None, error))?;
-        if entry.path().extension() != Some(OsStr::new("ttf")) {
-            continue;
-        }
-        let content = fs::read(entry.path())
-            .map_err(|error| AppError::io("read extracted font", Some(entry.path()), error))?;
-        write_managed_file(home, &font_directory.join(entry.file_name()), &content)?;
-        installed += 1;
-    }
-    if installed == 0 {
-        return Err(AppError::Invalid(
-            "Maple Mono archive contained no TTF files".to_owned(),
-        ));
-    }
-    run_command(
-        "fc-cache",
-        [
-            OsString::from("-f"),
-            font_directory.as_os_str().to_os_string(),
-        ],
-        "refresh font cache",
-    )
 }
 
 fn install_release_binary(
@@ -537,7 +524,7 @@ fn append_system_shell(shell: &Path) -> Result<()> {
     }
 }
 
-fn deploy_configs(home: &Path, platform: Platform, shell: Shell, auto_proxy: bool) -> Result<()> {
+fn deploy_cli_configs(home: &Path, shell: Shell, auto_proxy: bool) -> Result<()> {
     let managed = home.join(".config/jt-cli");
     write_managed_file(
         home,
@@ -587,17 +574,20 @@ fn deploy_configs(home: &Path, platform: Platform, shell: Shell, auto_proxy: boo
                 home,
                 &home.join(".zshrc"),
                 "source \"$HOME/.config/jt-cli/cli-bootstrap.zsh\"",
+                CLI_MANAGED_OPEN,
+                CLI_MANAGED_CLOSE,
             )?;
         }
     }
 
-    let ghostty_directory = match platform {
-        Platform::Macos => home.join("Library/Application Support/com.mitchellh.ghostty"),
-        Platform::Debian { .. } => home.join(".config/ghostty"),
-    };
+    Ok(())
+}
+
+fn deploy_ghostty_config(home: &Path) -> Result<()> {
+    let ghostty_directory = home.join("Library/Application Support/com.mitchellh.ghostty");
     write_managed_file(
         home,
-        &ghostty_directory.join("jt-cli-bootstrap.ghostty"),
+        &ghostty_directory.join("jt-ghostty.ghostty"),
         GHOSTTY_CONFIG.as_bytes(),
     )?;
     let current = ghostty_directory.join("config.ghostty");
@@ -607,10 +597,22 @@ fn deploy_configs(home: &Path, platform: Platform, shell: Shell, auto_proxy: boo
     } else {
         legacy
     };
-    write_managed_block(home, &entry, "config-file = jt-cli-bootstrap.ghostty")
+    write_managed_block(
+        home,
+        &entry,
+        "config-file = jt-ghostty.ghostty",
+        GHOSTTY_MANAGED_OPEN,
+        GHOSTTY_MANAGED_CLOSE,
+    )
 }
 
-fn write_managed_block(home: &Path, path: &Path, body: &str) -> Result<()> {
+fn write_managed_block(
+    home: &Path,
+    path: &Path,
+    body: &str,
+    open_marker: &str,
+    close_marker: &str,
+) -> Result<()> {
     let current = read_optional(path)?;
     let current_text = current
         .as_deref()
@@ -624,7 +626,7 @@ fn write_managed_block(home: &Path, path: &Path, body: &str) -> Result<()> {
         })
         .transpose()?
         .unwrap_or_default();
-    let next = upsert_managed_block(&current_text, body)?;
+    let next = upsert_managed_block(&current_text, body, open_marker, close_marker)?;
     if current_text == next {
         return Ok(());
     }
@@ -632,15 +634,20 @@ fn write_managed_block(home: &Path, path: &Path, body: &str) -> Result<()> {
     atomic_write(home, path, current.as_deref(), next.as_bytes())
 }
 
-fn upsert_managed_block(source: &str, body: &str) -> Result<String> {
-    let open_count = source.matches(MANAGED_OPEN).count();
-    let close_count = source.matches(MANAGED_CLOSE).count();
+fn upsert_managed_block(
+    source: &str,
+    body: &str,
+    open_marker: &str,
+    close_marker: &str,
+) -> Result<String> {
+    let open_count = source.matches(open_marker).count();
+    let close_count = source.matches(close_marker).count();
     if open_count > 1 || close_count > 1 || open_count != close_count {
         return Err(AppError::Invalid(
-            "jt cli bootstrap managed block is malformed; refusing to edit".to_owned(),
+            "jt managed block is malformed; refusing to edit".to_owned(),
         ));
     }
-    let block = format!("{MANAGED_OPEN}\n{}\n{MANAGED_CLOSE}", body.trim_end());
+    let block = format!("{open_marker}\n{}\n{close_marker}", body.trim_end());
     if open_count == 0 {
         let separator = if source.is_empty() || source.ends_with('\n') {
             ""
@@ -650,14 +657,14 @@ fn upsert_managed_block(source: &str, body: &str) -> Result<String> {
         let leading = if source.is_empty() { "" } else { "\n" };
         return Ok(format!("{source}{separator}{leading}{block}\n"));
     }
-    let open = source.find(MANAGED_OPEN).expect("count checked");
-    let close = source.find(MANAGED_CLOSE).expect("count checked");
+    let open = source.find(open_marker).expect("count checked");
+    let close = source.find(close_marker).expect("count checked");
     if close < open {
         return Err(AppError::Invalid(
-            "jt cli bootstrap managed block is malformed; refusing to edit".to_owned(),
+            "jt managed block is malformed; refusing to edit".to_owned(),
         ));
     }
-    let close_end = close + MANAGED_CLOSE.len();
+    let close_end = close + close_marker.len();
     Ok(format!(
         "{}{}{}",
         &source[..open],
@@ -812,16 +819,22 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FISH_CONFIG, FISH_GIT_SHORTCUTS, FISH_PROXY_AUTO_OFF, FISH_PROXY_AUTO_ON, FISH_PROXY_OFF,
-        FISH_PROXY_ON, GHOSTTY_CONFIG, MANAGED_CLOSE, MANAGED_OPEN, Platform, STARSHIP_CONFIG,
-        Shell, ZSH_CONFIG, deploy_configs, is_debian_family, upsert_managed_block,
+        CLI_MANAGED_CLOSE, CLI_MANAGED_OPEN, FISH_CONFIG, FISH_GIT_SHORTCUTS, FISH_PROXY_AUTO_OFF,
+        FISH_PROXY_AUTO_ON, FISH_PROXY_OFF, FISH_PROXY_ON, GHOSTTY_CONFIG, GHOSTTY_MANAGED_CLOSE,
+        GHOSTTY_MANAGED_OPEN, STARSHIP_CONFIG, Shell, ZSH_CONFIG, deploy_cli_configs,
+        deploy_ghostty_config, is_debian_family, upsert_managed_block, validate_ghostty_platform,
         write_managed_file,
     };
 
     #[test]
-    fn bootstrap_assets_use_maple_and_have_no_node_setup() {
+    fn ghostty_asset_uses_maple() {
+        assert!(GHOSTTY_CONFIG.contains("Maple Mono NF CN"));
+        assert!(!GHOSTTY_CONFIG.contains("MesloLGS"));
+    }
+
+    #[test]
+    fn cli_assets_have_no_node_or_ghostty_setup() {
         let assets = [
-            GHOSTTY_CONFIG,
             FISH_CONFIG,
             FISH_GIT_SHORTCUTS,
             FISH_PROXY_ON,
@@ -833,29 +846,56 @@ mod tests {
         ]
         .join("\n");
 
-        assert!(assets.contains("Maple Mono NF CN"));
-        for removed in ["MesloLGS", "fnm", "PNPM_HOME", "$nodejs", "[nodejs]"] {
+        for removed in [
+            "Ghostty",
+            "Maple Mono",
+            "MesloLGS",
+            "fnm",
+            "PNPM_HOME",
+            "$nodejs",
+            "[nodejs]",
+        ] {
             assert!(
                 !assets.contains(removed),
-                "found removed Node/font content: {removed}"
+                "found separate terminal/Node content: {removed}"
             );
         }
     }
 
     #[test]
     fn managed_block_is_idempotent_and_preserves_user_content() {
-        let first = upsert_managed_block("before\n", "source managed").unwrap();
-        let second = upsert_managed_block(&first, "source managed").unwrap();
+        let first = upsert_managed_block(
+            "before\n",
+            "source managed",
+            CLI_MANAGED_OPEN,
+            CLI_MANAGED_CLOSE,
+        )
+        .unwrap();
+        let second = upsert_managed_block(
+            &first,
+            "source managed",
+            CLI_MANAGED_OPEN,
+            CLI_MANAGED_CLOSE,
+        )
+        .unwrap();
 
         assert_eq!(first, second);
         assert!(first.starts_with("before\n"));
-        assert!(first.contains(MANAGED_OPEN));
-        assert!(first.contains(MANAGED_CLOSE));
+        assert!(first.contains(CLI_MANAGED_OPEN));
+        assert!(first.contains(CLI_MANAGED_CLOSE));
     }
 
     #[test]
     fn malformed_managed_block_is_rejected() {
-        assert!(upsert_managed_block(MANAGED_OPEN, "managed").is_err());
+        assert!(
+            upsert_managed_block(
+                CLI_MANAGED_OPEN,
+                "managed",
+                CLI_MANAGED_OPEN,
+                CLI_MANAGED_CLOSE
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -876,30 +916,43 @@ mod tests {
     }
 
     #[test]
-    fn deploys_managed_zsh_and_ghostty_config_idempotently() {
+    fn deploys_managed_zsh_without_ghostty() {
         let home = tempdir().unwrap();
         fs::write(home.path().join(".zshrc"), "keep\n").unwrap();
 
-        deploy_configs(home.path(), Platform::Macos, Shell::Zsh, false).unwrap();
-        deploy_configs(home.path(), Platform::Macos, Shell::Zsh, false).unwrap();
+        deploy_cli_configs(home.path(), Shell::Zsh, false).unwrap();
+        deploy_cli_configs(home.path(), Shell::Zsh, false).unwrap();
 
         let zshrc = fs::read_to_string(home.path().join(".zshrc")).unwrap();
         assert!(zshrc.starts_with("keep\n"));
-        assert_eq!(zshrc.matches(MANAGED_OPEN).count(), 1);
+        assert_eq!(zshrc.matches(CLI_MANAGED_OPEN).count(), 1);
         assert!(home.path().join(".config/jt-cli/starship.toml").is_file());
-        assert!(
-            home.path()
-                .join("Library/Application Support/com.mitchellh.ghostty/jt-cli-bootstrap.ghostty")
-                .is_file()
-        );
+        assert!(!home.path().join("Library/Application Support").exists());
+    }
+
+    #[test]
+    fn deploys_managed_ghostty_config_idempotently() {
+        let home = tempdir().unwrap();
+
+        deploy_ghostty_config(home.path()).unwrap();
+        deploy_ghostty_config(home.path()).unwrap();
+
+        let directory = home
+            .path()
+            .join("Library/Application Support/com.mitchellh.ghostty");
+        assert!(directory.join("jt-ghostty.ghostty").is_file());
+        let entry = fs::read_to_string(directory.join("config.ghostty")).unwrap();
+        assert_eq!(entry.matches(GHOSTTY_MANAGED_OPEN).count(), 1);
+        assert!(entry.contains("config-file = jt-ghostty.ghostty"));
+        assert!(entry.contains(GHOSTTY_MANAGED_CLOSE));
     }
 
     #[test]
     fn deploys_fish_shortcuts_and_selected_proxy_autostart() {
         let home = tempdir().unwrap();
 
-        deploy_configs(home.path(), Platform::Macos, Shell::Fish, true).unwrap();
-        deploy_configs(home.path(), Platform::Macos, Shell::Fish, true).unwrap();
+        deploy_cli_configs(home.path(), Shell::Fish, true).unwrap();
+        deploy_cli_configs(home.path(), Shell::Fish, true).unwrap();
 
         let fish = home.path().join(".config/fish");
         assert_eq!(
@@ -919,7 +972,7 @@ mod tests {
             FISH_PROXY_AUTO_ON
         );
 
-        deploy_configs(home.path(), Platform::Macos, Shell::Fish, false).unwrap();
+        deploy_cli_configs(home.path(), Shell::Fish, false).unwrap();
         assert_eq!(
             fs::read_to_string(fish.join("conf.d/jt-cli-proxy-auto.fish")).unwrap(),
             FISH_PROXY_AUTO_OFF
@@ -933,5 +986,13 @@ mod tests {
             "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n"
         ));
         assert!(!is_debian_family("ID=fedora\n"));
+    }
+
+    #[test]
+    fn ghostty_install_supports_macos_only() {
+        assert!(validate_ghostty_platform("macos", "aarch64").is_ok());
+        assert!(validate_ghostty_platform("macos", "x86_64").is_ok());
+        assert!(validate_ghostty_platform("linux", "x86_64").is_err());
+        assert!(validate_ghostty_platform("macos", "riscv64").is_err());
     }
 }

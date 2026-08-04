@@ -15,6 +15,7 @@ fn help_lists_new_commands_only() {
     assert!(stdout.contains("jt repo cicd"));
     assert!(stdout.contains("jt node init"));
     assert!(stdout.contains("jt cli bootstrap"));
+    assert!(stdout.contains("jt ghostty install"));
     assert!(!stdout.contains("jt release init"));
 }
 
@@ -51,6 +52,23 @@ fn cli_bootstrap_requires_tty_before_mutating_home() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(home.path().read_dir().unwrap().next().is_none());
+}
+
+#[test]
+fn ghostty_install_rejects_server_or_requires_tty_before_mutating_home() {
+    let home = tempdir().unwrap();
+    let output = jt()
+        .args(["ghostty", "install"])
+        .env("HOME", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(home.path().read_dir().unwrap().next().is_none());
+    if cfg!(target_os = "linux") {
+        assert!(String::from_utf8_lossy(&output.stderr).contains("仅支持 macOS"));
+    }
 }
 
 #[test]
