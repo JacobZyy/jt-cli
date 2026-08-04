@@ -2,7 +2,30 @@
 
 Personal Rust CLI. Name joins **J**acob and **T**aotao.
 
-First feature configures npm package release automation:
+Bootstrap terminal tooling:
+
+```bash
+jt cli bootstrap
+```
+
+Interactive bootstrap supports macOS, Debian/Ubuntu, and WSL on x86_64 and ARM64. It installs:
+
+- Fish or Zsh and Starship with Catppuccin Mocha.
+- bat, eza, fd, ripgrep, fzf, btop, zoxide, jq, tldr, git-delta, and lazygit.
+- Fish Git abbreviations/functions plus `proxy-on` and `proxy-off`.
+- Zellij when selected.
+
+The command asks before mutation, changes the default shell, writes only jt-managed shell files, backs up replaced files, and configures git-delta globally. Fish users can explicitly enable `proxy-on` at shell startup; this option defaults to No and validates GitHub through `http://127.0.0.1:7890` before exporting proxy variables. Ghostty, fonts, Node.js, fnm, and pnpm stay outside this bootstrap.
+
+Install Ghostty on macOS:
+
+```bash
+jt ghostty install
+```
+
+This separate interactive command installs Ghostty and Maple Mono NF CN through Homebrew, then writes a jt-managed Ghostty configuration. It backs up replaced files and asks before mutation. Linux and WSL servers are rejected without installation.
+
+Configure npm package release automation:
 
 ```bash
 jt repo cicd
