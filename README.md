@@ -87,11 +87,21 @@ The script builds the current source with `cargo build --release --locked`, inst
 JT_INSTALL_DIR=/path/to/bin ./install.sh
 ```
 
-Install released source:
+Install a published release, replacing `vX.Y.Z` with a tag from [GitHub Releases](https://github.com/JacobZyy/jt-cli/releases):
 
 ```bash
-cargo install --git https://github.com/JacobZyy/jt-cli --tag v1.0.0 --locked
+cargo install --git https://github.com/JacobZyy/jt-cli --tag vX.Y.Z --locked --root "$HOME/.local"
 ```
+
+Upgrade an existing user-owned installation:
+
+```bash
+jt upgrade --check
+jt upgrade
+jt upgrade --dry-run --force
+```
+
+`jt upgrade` resolves an exact published GitHub Release and pins its Git commit, asks Cargo to build it in a temporary directory, verifies the staged binary, then atomically replaces `~/.local/bin/jt`. A failed post-install version check restores the previous binary. `--force` reinstalls the current version. The command never runs a shell or `sudo`. Other paths and package-manager shims must use their original installer or manager. Cargo and Git remain required; prebuilt release assets and persistent rollback are not implemented yet.
 
 ## Supported project
 
