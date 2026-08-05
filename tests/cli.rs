@@ -16,7 +16,37 @@ fn help_lists_new_commands_only() {
     assert!(stdout.contains("jt node init"));
     assert!(stdout.contains("jt cli bootstrap"));
     assert!(stdout.contains("jt ghostty install"));
+    assert!(stdout.contains("jt upgrade"));
     assert!(!stdout.contains("jt release init"));
+}
+
+#[test]
+fn version_reports_cargo_package_version() {
+    let output = jt().arg("--version").output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("jt {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn upgrade_help_and_invalid_version_do_not_touch_network() {
+    let help = jt().args(["upgrade", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("--dry-run")
+    );
+
+    let invalid = jt()
+        .args(["upgrade", "latest && rm -rf /"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid jt version"));
 }
 
 #[test]
