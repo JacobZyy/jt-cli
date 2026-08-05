@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/JacobZyy/jt-cli/compare/v1.1.0...v1.2.0) (2026-08-05)
+
+
+### Features
+
+* **cli:** add self-upgrade command ([0b645a4](https://github.com/JacobZyy/jt-cli/commit/0b645a49f1c06fd2cced29ea7265d9fd415343e7))
+
 ## [1.1.0](https://github.com/JacobZyy/jt-cli/compare/v1.0.0...v1.1.0) (2026-08-04)
 
 
