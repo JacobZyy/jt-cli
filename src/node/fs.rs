@@ -20,6 +20,16 @@ pub fn atomic_write(
     expected: Option<&[u8]>,
     content: &[u8],
 ) -> Result<()> {
+    atomic_write_with_permissions(home, path, expected, content, None)
+}
+
+pub fn atomic_write_with_permissions(
+    home: &Path,
+    path: &Path,
+    expected: Option<&[u8]>,
+    content: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> Result<()> {
     if fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
@@ -43,20 +53,25 @@ pub fn atomic_write(
     fs::create_dir_all(parent).map_err(|error| {
         AppError::io("create parent directory", Some(parent.to_path_buf()), error)
     })?;
-    let mode = current
-        .as_ref()
-        .and_then(|_| fs::metadata(path).ok())
-        .map(|metadata| metadata.permissions());
+    let permissions = permissions.or_else(|| {
+        current
+            .as_ref()
+            .and_then(|_| fs::metadata(path).ok())
+            .map(|metadata| metadata.permissions())
+    });
     let temp = unique_temp_path(path)?;
     let mut file = create_new(&temp)?;
+    let default_permissions = file
+        .metadata()
+        .map_err(|error| AppError::io("read temporary file mode", Some(temp.clone()), error))?
+        .permissions();
+    make_private(&temp)?;
     file.write_all(content)
-        .and_then(|_| file.sync_all())
         .map_err(|error| AppError::io("write temporary file", Some(temp.clone()), error))?;
-    if let Some(mode) = mode {
-        fs::set_permissions(&temp, mode).map_err(|error| {
-            AppError::io("preserve file permissions", Some(temp.clone()), error)
-        })?;
-    }
+    fs::set_permissions(&temp, permissions.unwrap_or(default_permissions))
+        .map_err(|error| AppError::io("preserve file permissions", Some(temp.clone()), error))?;
+    file.sync_all()
+        .map_err(|error| AppError::io("sync temporary file", Some(temp.clone()), error))?;
     fs::rename(&temp, path)
         .map_err(|error| AppError::io("replace file", Some(path.to_path_buf()), error))?;
     #[cfg(unix)]
@@ -65,6 +80,19 @@ pub fn atomic_write(
         .map_err(|error| {
             AppError::io("sync parent directory", Some(parent.to_path_buf()), error)
         })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_private(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| AppError::io("protect temporary file", Some(path.to_path_buf()), error))
+}
+
+#[cfg(not(unix))]
+fn make_private(_path: &Path) -> Result<()> {
     Ok(())
 }
 

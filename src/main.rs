@@ -3,6 +3,7 @@ mod icon;
 mod node;
 mod release;
 mod upgrade;
+mod zed;
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -17,6 +18,7 @@ Usage:
   jt node init
   jt cli bootstrap
   jt ghostty install
+  jt zed-conf
   jt upgrade [version] [options]
   jt icon <size|svg> [directory]
 
@@ -25,6 +27,7 @@ Commands:
   node init                    Initialize global Node/pnpm environment with Vite+
   cli bootstrap                Bootstrap shell, shortcuts, prompt, and CLI tools
   ghostty install              Install and configure Ghostty on macOS
+  zed-conf                     Write live Zed config to current Git repository
   upgrade [version]            Upgrade jt from a published GitHub Release
   icon <size|svg> [directory]  Write one JT icon; default directory: ./public
 
@@ -53,6 +56,7 @@ fn main() -> ExitCode {
         [command, action] if is(command, "node") && is(action, "init") => node_init(),
         [command, action] if is(command, "cli") && is(action, "bootstrap") => cli_bootstrap(),
         [command, action] if is(command, "ghostty") && is(action, "install") => ghostty_install(),
+        [command] if is(command, "zed-conf") => ExitCode::from(zed::run()),
         [command, upgrade_args @ ..] if is(command, "upgrade") => {
             ExitCode::from(upgrade::run(upgrade_args))
         }

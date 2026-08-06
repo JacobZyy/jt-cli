@@ -25,6 +25,17 @@ jt ghostty install
 
 This separate interactive command installs Ghostty and Maple Mono NF CN through Homebrew, then writes a jt-managed Ghostty configuration. It backs up replaced files and asks before mutation. Linux and WSL servers are rejected without installation.
 
+Write project Zed settings from the live repository template:
+
+```bash
+jt zed-conf
+```
+
+The command finds the current Git repository root and writes `.zed/settings.json`. Existing
+different content is backed up beside the file before an atomic update. The template is fetched
+over HTTPS from [`templates/zed/settings.json`](templates/zed/settings.json) on `main`, so merging a
+template-only change updates future command runs without releasing a new `jt` version.
+
 Configure npm package release automation:
 
 ```bash
