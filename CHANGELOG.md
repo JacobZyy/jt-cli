@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/JacobZyy/jt-cli/compare/v1.3.0...v1.4.0) (2026-08-06)
+
+
+### Features
+
+* support Node and Rust monorepo releases ([64c6edf](https://github.com/JacobZyy/jt-cli/commit/64c6edf9ef149f8069bcb73eb5195463a255467d))
+
 ## [1.3.0](https://github.com/JacobZyy/jt-cli/compare/v1.2.0...v1.3.0) (2026-08-06)
 
 
