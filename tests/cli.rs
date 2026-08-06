@@ -154,4 +154,11 @@ fn repo_cicd_dispatches_to_release_initializer() {
             .join(".github/workflows/npm-release.yml")
             .is_file()
     );
+    assert!(project.path().join("release-please-config.json").is_file());
+    assert!(
+        project
+            .path()
+            .join(".release-please-manifest.json")
+            .is_file()
+    );
 }
