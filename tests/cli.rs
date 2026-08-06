@@ -16,6 +16,7 @@ fn help_lists_new_commands_only() {
     assert!(stdout.contains("jt node init"));
     assert!(stdout.contains("jt cli bootstrap"));
     assert!(stdout.contains("jt ghostty install"));
+    assert!(stdout.contains("jt zed-conf"));
     assert!(stdout.contains("jt upgrade"));
     assert!(!stdout.contains("jt release init"));
 }

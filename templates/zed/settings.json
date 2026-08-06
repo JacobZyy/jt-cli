@@ -1,0 +1,49 @@
+{
+  "languages": {
+    "JavaScript": {
+      "formatter": {
+        "code_action": "source.fixAll.eslint"
+      },
+      "format_on_save": "on"
+    },
+    "TypeScript": {
+      "formatter": {
+        "code_action": "source.fixAll.eslint"
+      },
+      "format_on_save": "on"
+    },
+    "TSX": {
+      "formatter": {
+        "code_action": "source.fixAll.eslint"
+      },
+      "format_on_save": "on"
+    },
+    "Vue.js": {
+      "formatter": {
+        "code_action": "source.fixAll.eslint"
+      },
+      "format_on_save": "on"
+    },
+    "SCSS": {
+      "language_servers": ["eslint", "..."],
+      "formatter": {
+        "code_action": "source.fixAll.eslint"
+      },
+      "format_on_save": "on"
+    },
+    "JSON": {
+      "language_servers": ["eslint", "..."],
+      "formatter": {
+        "code_action": "source.fixAll.eslint"
+      },
+      "format_on_save": "on"
+    },
+    "JSONC": {
+      "language_servers": ["eslint", "..."],
+      "formatter": {
+        "code_action": "source.fixAll.eslint"
+      },
+      "format_on_save": "on"
+    }
+  }
+}
