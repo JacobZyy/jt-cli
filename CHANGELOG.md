@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/JacobZyy/jt-cli/compare/v1.2.0...v1.3.0) (2026-08-06)
+
+
+### Features
+
+* **cli:** add live Zed config command ([4b475d3](https://github.com/JacobZyy/jt-cli/commit/4b475d3fc146510c146a22c17b3f83eccda1c03a))
+
 ## [1.2.0](https://github.com/JacobZyy/jt-cli/compare/v1.1.0...v1.2.0) (2026-08-05)
 
 
