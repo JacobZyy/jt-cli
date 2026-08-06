@@ -36,19 +36,29 @@ different content is backed up beside the file before an atomic update. The temp
 over HTTPS from [`templates/zed/settings.json`](templates/zed/settings.json) on `main`, so merging a
 template-only change updates future command runs without releasing a new `jt` version.
 
-Configure npm package release automation:
+Configure Node.js and Rust package release automation:
 
 ```bash
 jt repo cicd
 ```
 
-Command operates on current directory. It validates project, then creates only:
+Command operates on the current Git repository root. It discovers publishable Node.js packages
+and Cargo workspace members, then creates:
 
 ```text
 .github/workflows/npm-release.yml
+release-please-config.json
+.release-please-manifest.json
 ```
 
-Generated file calls reusable workflow in this repository. Version changes, `CHANGELOG.md`, Git tags, GitHub Releases, and `npm publish` all run in GitHub Actions. `jt` never runs those release operations locally and never stores `NPM_TOKEN`.
+The generated caller invokes the versioned reusable workflow in this repository. release-please
+owns versions, changelogs, Git tags, and GitHub Releases. npm packages publish through npm Trusted
+Publishing; Rust crates publish to crates.io through Trusted Publishing. `jt` never versions,
+tags, or publishes locally and never stores npm or crates.io tokens.
+
+Existing `release-please-config.json` and `.release-please-manifest.json` files are preserved so a
+repository can own custom release configuration. An existing different caller workflow is never
+overwritten.
 
 Initialize global Node/pnpm environment through Vite+:
 
@@ -114,42 +124,65 @@ jt upgrade --dry-run --force
 
 `jt upgrade` resolves an exact published GitHub Release and pins its Git commit, asks Cargo to build it in a temporary directory, verifies the staged binary, then atomically replaces `~/.local/bin/jt`. A failed post-install version check restores the previous binary. `--force` reinstalls the current version. The command never runs a shell or `sudo`. Other paths and package-manager shims must use their original installer or manager. Cargo and Git remain required; prebuilt release assets and persistent rollback are not implemented yet.
 
-## Supported project
+## Supported repositories
 
-- Single npm package hosted on GitHub, default branch `main`
-- Valid `package.json` with `name`, SemVer `version`, `repository`, `scripts.test`, and `scripts.build`
-- Exactly one `package-lock.json` or `pnpm-lock.yaml`
-- pnpm projects declare an exact `packageManager`, such as `pnpm@10.15.0`
-- npm registry, with `publishConfig.registry` absent or `https://registry.npmjs.org`
-- Publishable package: `private` is absent or `false`
+- GitHub repository containing Node.js packages, Rust crates, or both
+- Standalone package, Turborepo, npm/pnpm workspace, or Cargo workspace
+- Turborepo validation runs `turbo run test build`; Cargo workspace validation also runs directly
+- npm or pnpm; pnpm projects declare an exact `packageManager`, such as `pnpm@10.15.0`
+- Lockfile optional for npm; an explicit `packageManager` resolves repositories with stale or
+  multiple lockfiles
+- Publishable Node.js packages use the npm registry, with `publishConfig.registry` absent or
+  `https://registry.npmjs.org`
+- Publishable Rust packages use crates.io, with Cargo `publish` absent or including only
+  `crates-io`
+- Every publishable package declares the GitHub repository matching Git `origin`
 
-GitLab, workspaces, Yarn, and Bun are rejected explicitly in this first version.
+Private Turborepo roots, private Node.js workspace packages, and Cargo packages with
+`publish = false` are allowed and skipped. Yarn, Bun, Deno, GitLab, non-npm Node registries, other
+Cargo registries, and ecosystems other than Node.js/Rust report an explicit unsupported error.
 
-## One-time GitHub and npm setup
+Turborepo is the monorepo build system supported here. Turbopack is a Next.js bundler, not a
+monorepo manager.
+
+## One-time GitHub, npm, and crates.io setup
 
 1. Run `jt repo cicd`, commit generated workflow on a feature branch, then merge it through a PR.
-2. In GitHub Actions settings, grant workflows read/write permission and allow GitHub Actions to create pull requests.
-3. In npm package settings, add GitHub Actions Trusted Publisher:
+2. In GitHub Actions settings, grant workflows read/write permission and allow GitHub Actions to
+   create pull requests.
+3. For every npm package, add a GitHub Actions Trusted Publisher in npm package settings:
    - organization or user: package repository owner
    - repository: package repository name
    - workflow filename: `npm-release.yml`
    - allowed action: `npm publish`
-4. Use Conventional Commits on `main`, for example `feat: add export command`.
+4. Publish every new crate manually once, then configure its crates.io Trusted Publisher for the
+   same repository and `.github/workflows/npm-release.yml`. crates.io cannot use Trusted Publishing
+   for a crate's first release.
+5. Use Conventional Commits on the repository default branch, for example
+   `feat: add export command`.
 
-npm validates caller workflow in consuming repository, not central reusable workflow. Trusted Publishing also requires `package.json.repository` to match GitHub repository. Workflow uses GitHub-hosted runner, Node.js 24, npm OIDC, and no publish token.
+npm and crates.io authenticate through OIDC on GitHub-hosted runners. npm validates the caller
+workflow in the consuming repository, not the central reusable workflow. The workflow uses Node.js
+24 and no persistent publish token.
 
 Release flow:
 
-1. Merge a Conventional Commit PR into `main`.
-2. Install, test, build.
-3. release-please creates or updates Release PR from Conventional Commits.
+1. Merge a Conventional Commit PR into the default branch.
+2. Install, test, and build every detected ecosystem. Turborepo orchestrates Node.js workspace
+   tasks; Cargo validates the Rust workspace.
+3. release-please creates or updates one manifest Release PR for all changed packages.
 4. Merge Release PR.
-5. Same workflow validates again; release-please creates version, `CHANGELOG.md`, tag, and GitHub Release.
-6. `release_created` publishes package to npm through Trusted Publishing.
+5. Same workflow validates again; release-please creates versions, `CHANGELOG.md` files, tags, and
+   GitHub Releases.
+6. Released npm packages publish to npm. Released Cargo workspace packages publish to crates.io in
+   dependency order through release-plz.
 
-Validation produces package tarball before release. Only isolated publish job receives OIDC permission; package lifecycle scripts are disabled during publish. If npm publish fails after GitHub Release creation, use **Re-run failed jobs** so publish reuses same release output and tarball.
+Validation produces npm tarballs before release. Only isolated publish jobs receive OIDC
+permission; npm package lifecycle scripts are disabled during packing and publishing. If registry
+publishing fails after GitHub Release creation, use **Re-run failed jobs**.
 
-Generated workflow pins reusable workflow to `@v1.0.0`; consuming repositories never execute mutable `main` with write and OIDC permissions.
+Generated workflow pins reusable workflow to `@v1.4.0`; consuming repositories never execute
+mutable `main` with write and OIDC permissions.
 
 ## Releasing jt
 

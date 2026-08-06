@@ -1,19 +1,22 @@
-name: npm release
+name: package release
 
 on:
   workflow_call:
 
 concurrency:
-  group: npm-release-${{ github.repository }}
+  group: package-release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      has_node: ${{ steps.project.outputs.has_node }}
+      has_rust: ${{ steps.project.outputs.has_rust }}
 
     steps:
       - name: Checkout
@@ -21,71 +24,162 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Detect package manager
-        id: package-manager
+      - name: Detect project
+        id: project
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -f yarn.lock || -f bun.lock || -f bun.lockb || -f deno.lock ]]; then
-            echo "::error::Unsupported package manager lockfile"
-            exit 1
-          elif [[ -f package-lock.json && -f pnpm-lock.yaml ]]; then
-            echo "::error::Expected exactly one supported lockfile"
-            exit 1
-          elif [[ -f package-lock.json ]]; then
-            echo "name=npm" >> "$GITHUB_OUTPUT"
-          elif [[ -f pnpm-lock.yaml ]]; then
-            echo "name=pnpm" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Expected package-lock.json or pnpm-lock.yaml"
-            exit 1
-          fi
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const hasNode = fs.existsSync("package.json");
+          const hasRust = fs.existsSync("Cargo.toml");
+          let manager = "";
+          if (hasNode) {
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const declared = pkg.packageManager;
+            if (declared) {
+              manager = declared.slice(0, declared.indexOf("@"));
+            } else if (fs.existsSync("pnpm-lock.yaml")) {
+              throw new Error("pnpm projects require packageManager, for example pnpm@10.15.0");
+            } else if (fs.existsSync("yarn.lock") || fs.existsSync("bun.lock") || fs.existsSync("bun.lockb")) {
+              throw new Error("Node package manager is not supported yet; supported: npm, pnpm");
+            } else {
+              manager = "npm";
+            }
+            if (!new Set(["npm", "pnpm"]).has(manager)) {
+              throw new Error(`Node package manager ${manager} is not supported yet; supported: npm, pnpm`);
+            }
+          }
+          if (!hasNode && !hasRust) {
+            throw new Error("unsupported project; expected package.json or Cargo.toml");
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_node=${hasNode}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_rust=${hasRust}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `manager=${manager}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `turbo=${fs.existsSync("turbo.json")}\n`);
+          NODE
 
       - name: Set up pnpm
-        if: steps.package-manager.outputs.name == 'pnpm'
+        if: steps.project.outputs.manager == 'pnpm'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
 
       - name: Set up Node.js
+        if: steps.project.outputs.has_node == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - name: Install
+      - name: Install Node dependencies
+        if: steps.project.outputs.has_node == 'true'
         shell: bash
         run: |
-          case "${{ steps.package-manager.outputs.name }}" in
-            npm) npm ci ;;
-            pnpm) pnpm install --frozen-lockfile ;;
+          set -euo pipefail
+          case "${{ steps.project.outputs.manager }}" in
+            npm)
+              if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
+              ;;
+            pnpm)
+              if [[ -f pnpm-lock.yaml ]]; then
+                pnpm install --frozen-lockfile
+              else
+                pnpm install --no-frozen-lockfile
+              fi
+              ;;
           esac
 
-      - name: Test
+      - name: Test and build Turborepo
+        if: steps.project.outputs.turbo == 'true'
         shell: bash
         run: |
-          case "${{ steps.package-manager.outputs.name }}" in
-            npm) npm test ;;
-            pnpm) pnpm run test ;;
+          set -euo pipefail
+          case "${{ steps.project.outputs.manager }}" in
+            npm) npm exec -- turbo run test build ;;
+            pnpm) pnpm exec turbo run test build ;;
           esac
 
-      - name: Build
+      - name: Test and build Node package
+        if: steps.project.outputs.has_node == 'true' && steps.project.outputs.turbo != 'true'
         shell: bash
         run: |
-          case "${{ steps.package-manager.outputs.name }}" in
-            npm) npm run build ;;
-            pnpm) pnpm run build ;;
-          esac
+          set -euo pipefail
+          has_script() {
+            node -e 'process.exit(require("./package.json").scripts?.[process.argv[1]] ? 0 : 1)' "$1"
+          }
+          if has_script test; then
+            case "${{ steps.project.outputs.manager }}" in
+              npm) npm test ;;
+              pnpm) pnpm run test ;;
+            esac
+          fi
+          if has_script build; then
+            case "${{ steps.project.outputs.manager }}" in
+              npm) npm run build ;;
+              pnpm) pnpm run build ;;
+            esac
+          fi
 
-      - name: Pack
+      - name: Set up Rust
+        if: steps.project.outputs.has_rust == 'true'
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: rustfmt
+
+      - name: Test and build Cargo workspace
+        if: steps.project.outputs.has_rust == 'true'
+        shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/npm-package"
-          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/npm-package"
+          set -euo pipefail
+          locked=()
+          if [[ -f Cargo.lock ]]; then locked=(--locked); fi
+          cargo fmt --all --check
+          cargo test "${locked[@]}" --workspace --all-targets
+          cargo build "${locked[@]}" --workspace --release
 
-      - name: Store package
+      - name: Pack npm packages
+        shell: bash
+        env:
+          PACKAGE_DIRECTORY: ${{ runner.temp }}/npm-packages
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { spawnSync } = require("node:child_process");
+
+          const output = process.env.PACKAGE_DIRECTORY;
+          fs.mkdirSync(output, { recursive: true });
+          const config = JSON.parse(fs.readFileSync("release-please-config.json", "utf8"));
+          const manifest = {};
+          for (const [packagePath, options] of Object.entries(config.packages)) {
+            if (options["release-type"] !== "node") continue;
+            const directory = packagePath === "." ? process.cwd() : path.resolve(packagePath);
+            const pkg = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8"));
+            if (pkg.private === true) continue;
+            const result = spawnSync(
+              "npm",
+              ["pack", "--ignore-scripts", "--json", "--pack-destination", output],
+              { cwd: directory, encoding: "utf8" },
+            );
+            if (result.status !== 0) {
+              process.stderr.write(result.stderr);
+              process.exit(result.status ?? 1);
+            }
+            const packed = JSON.parse(result.stdout);
+            if (packed.length !== 1) throw new Error(`Expected one tarball for ${packagePath}`);
+            manifest[packagePath] = packed[0].filename;
+          }
+          fs.writeFileSync(path.join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Store npm packages
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: npm-package
-          path: ${{ runner.temp }}/npm-package/*.tgz
+          name: npm-packages
+          path: ${{ runner.temp }}/npm-packages
           if-no-files-found: error
           overwrite: true
 
@@ -98,19 +192,19 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      paths_released: ${{ steps.release.outputs.paths_released }}
 
     steps:
       - name: Release Please
         id: release
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
-          release-type: node
           token: ${{ github.token }}
 
-  publish:
+  publish-npm:
     needs: release
-    if: needs.release.outputs.release_created == 'true'
+    if: needs.release.outputs.releases_created == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -125,19 +219,93 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - name: Restore package
+      - name: Restore npm packages
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          name: npm-package
-          path: ${{ runner.temp }}/npm-package
+          name: npm-packages
+          path: ${{ runner.temp }}/npm-packages
 
-      - name: Publish to npm
+      - name: Publish released npm packages
+        env:
+          PACKAGE_DIRECTORY: ${{ runner.temp }}/npm-packages
+          RELEASED_PATHS: ${{ needs.release.outputs.paths_released }}
         shell: bash
         run: |
-          shopt -s nullglob
-          packages=("$RUNNER_TEMP"/npm-package/*.tgz)
-          if [[ ${#packages[@]} -ne 1 ]]; then
-            echo "::error::Expected exactly one package tarball"
-            exit 1
-          fi
-          npm publish "${packages[0]}" --ignore-scripts
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { spawnSync } = require("node:child_process");
+
+          const directory = process.env.PACKAGE_DIRECTORY;
+          const released = new Set(JSON.parse(process.env.RELEASED_PATHS || "[]"));
+          const packages = JSON.parse(fs.readFileSync(path.join(directory, "manifest.json"), "utf8"));
+          for (const [packagePath, filename] of Object.entries(packages)) {
+            if (!released.has(packagePath)) continue;
+            const result = spawnSync(
+              "npm",
+              ["publish", path.join(directory, filename), "--ignore-scripts"],
+              { stdio: "inherit" },
+            );
+            if (result.status !== 0) process.exit(result.status ?? 1);
+          }
+          NODE
+
+  publish-crates:
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect released crates
+        id: crates
+        env:
+          RELEASED_PATHS: ${{ needs.release.outputs.paths_released }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const released = new Set(JSON.parse(process.env.RELEASED_PATHS || "[]"));
+          const config = JSON.parse(fs.readFileSync("release-please-config.json", "utf8"));
+          const needed = Object.entries(config.packages).some(
+            ([packagePath, options]) => options["release-type"] === "rust" && released.has(packagePath),
+          );
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `needed=${needed}\n`);
+          NODE
+
+      - name: Set up Rust
+        if: steps.crates.outputs.needed == 'true'
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Configure crates.io-only publishing
+        if: steps.crates.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '[workspace]'
+            echo 'changelog_update = false'
+            echo 'git_release_enable = false'
+            echo 'git_tag_enable = false'
+          } > "$RUNNER_TEMP/release-plz.toml"
+
+      - name: Publish released crates
+        if: steps.crates.outputs.needed == 'true'
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        with:
+          command: release
+          config: ${{ runner.temp }}/release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

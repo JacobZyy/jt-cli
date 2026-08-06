@@ -23,7 +23,7 @@ Usage:
   jt icon <size|svg> [directory]
 
 Commands:
-  repo cicd                    Configure npm release automation in current directory
+  repo cicd                    Configure Node.js/Rust release automation in current directory
   node init                    Initialize global Node/pnpm environment with Vite+
   cli bootstrap                Bootstrap shell, shortcuts, prompt, and CLI tools
   ghostty install              Install and configure Ghostty on macOS
@@ -77,12 +77,16 @@ fn repo_cicd() -> ExitCode {
         .and_then(|directory| release::init(&directory));
 
     match result {
-        Ok(release::InitStatus::Created(path)) => {
-            println!("created {}", path.display());
+        Ok(release::InitStatus::Created(paths)) => {
+            for path in paths {
+                println!("created {}", path.display());
+            }
             ExitCode::SUCCESS
         }
-        Ok(release::InitStatus::Unchanged(path)) => {
-            println!("already configured {}", path.display());
+        Ok(release::InitStatus::Unchanged(paths)) => {
+            for path in paths {
+                println!("already configured {}", path.display());
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
