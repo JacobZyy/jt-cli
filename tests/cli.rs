@@ -162,3 +162,36 @@ fn repo_cicd_dispatches_to_release_initializer() {
             .is_file()
     );
 }
+
+#[test]
+fn repo_cicd_missing_origin_requires_tty_without_mutation() {
+    let project = tempdir().unwrap();
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{
+  "name": "@acme/demo",
+  "version": "1.0.0",
+  "repository": "https://github.com/acme/demo.git"
+}"#,
+    )
+    .unwrap();
+
+    let output = jt()
+        .args(["repo", "cicd"])
+        .current_dir(project.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+    assert!(!project.path().join(".git").exists());
+    assert!(!project.path().join(".github").exists());
+    assert!(!project.path().join("release-please-config.json").exists());
+    assert!(
+        !project
+            .path()
+            .join(".release-please-manifest.json")
+            .exists()
+    );
+}

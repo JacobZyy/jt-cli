@@ -42,8 +42,19 @@ Configure Node.js and Rust package release automation:
 jt repo cicd
 ```
 
-Command operates on the current Git repository root. It discovers publishable Node.js packages
-and Cargo workspace members, then creates:
+Command operates on current project root. It discovers and validates publishable Node.js packages
+and Cargo workspace members before making changes. With an existing GitHub `origin`, behavior stays
+non-interactive. When Git or `origin` is missing, an interactive terminal can create one public
+GitHub repository through an installed, authenticated GitHub CLI (`gh`). Run `gh auth login` first
+when needed.
+
+Repository creation asks twice, defaults both confirmations to **No**, and validates selected
+`OWNER/REPO` against package metadata. It runs `git init` only after final confirmation and only
+when needed, then calls `gh repo create` without committing or pushing. A failed creation or later
+initialization keeps any local Git repository, GitHub repository, and `origin` already created so
+re-running command can continue safely.
+
+After origin validation, command creates:
 
 ```text
 .github/workflows/npm-release.yml
@@ -136,7 +147,8 @@ jt upgrade --dry-run --force
   `https://registry.npmjs.org`
 - Publishable Rust packages use crates.io, with Cargo `publish` absent or including only
   `crates-io`
-- Every publishable package declares the GitHub repository matching Git `origin`
+- Every publishable package declares same GitHub repository, matching existing `origin` or selected
+  `OWNER/REPO`
 
 Private Turborepo roots, private Node.js workspace packages, and Cargo packages with
 `publish = false` are allowed and skipped. Yarn, Bun, Deno, GitLab, non-npm Node registries, other

@@ -6,7 +6,7 @@
 
 - stdout: help, version, created/already-configured paths, successful progress, and final success summaries.
 - stderr: `error:` messages, warnings, partial-failure details, and invalid-usage help.
-- `cliclack`: interactive prompts, notes, spinners, cancellation, and completion for TTY-only workflows (`src/cli.rs`, `src/node/cli.rs`).
+- `cliclack`: interactive prompts, notes, spinners, cancellation, and completion for TTY-only workflows (`src/cli.rs`, `src/node/cli.rs`, `src/release.rs`).
 - subprocess output: node commands capture it through `src/node/command.rs`; long-running bootstrap and upgrade installers intentionally inherit terminal output, while probes capture or discard output.
 
 ```rust

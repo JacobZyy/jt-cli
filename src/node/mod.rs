@@ -1,7 +1,7 @@
 mod aggressive;
 mod cleanup;
 mod cli;
-mod command;
+pub(crate) mod command;
 mod context;
 pub(crate) mod error;
 pub(crate) mod fs;

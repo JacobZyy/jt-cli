@@ -26,7 +26,7 @@ pub enum AppError {
 - Convert I/O failures where they occur, keeping action and path context with `AppError::io`.
 - Represent validation and trust-boundary refusal explicitly with `Invalid` or `UnsafePath`.
 - Route subprocess failures through `CommandResult::require_success` when using `src/node/command.rs`. It keeps status plus last non-empty stderr/stdout line and redacts sensitive values.
-- Model partial multi-stage work explicitly. Node cleanup uses stage outcomes and a final incomplete summary instead of claiming success or attempting unsafe blanket rollback.
+- Model partial multi-stage work explicitly. Node cleanup uses stage outcomes and a final incomplete summary. GitHub repository bootstrap reports retained Git/GitHub state after partial failure. Neither path attempts unsafe blanket rollback.
 
 ## CLI Boundary
 

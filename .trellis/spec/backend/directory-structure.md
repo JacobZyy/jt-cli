@@ -9,7 +9,7 @@ src/
 ├── main.rs             # Argument matching, help text, exit-code boundary
 ├── cli.rs              # Interactive terminal and Ghostty bootstrap
 ├── icon.rs             # Embedded icon output
-├── release.rs          # npm release-workflow initialization
+├── release.rs          # GitHub repository and package release initialization
 ├── upgrade.rs          # jt self-upgrade
 ├── zed.rs              # Repository-local Zed configuration
 └── node/

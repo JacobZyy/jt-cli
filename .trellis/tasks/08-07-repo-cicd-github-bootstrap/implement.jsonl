@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Rust CLI backend conventions entrypoint"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Filesystem mutation and partial-state safety"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Subprocess and CLI boundary errors"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Prompt and output channel conventions"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Required tests and Rust gates"}
