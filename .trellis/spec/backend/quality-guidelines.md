@@ -32,7 +32,7 @@ cargo test --locked
 - Use existing injectable boundaries such as `Runner` and `Prompter` instead of invoking real package managers or prompting in unit tests.
 - Add one regression test for non-trivial branches, parsers, destructive paths, money/security paths, or a fixed bug. Avoid test scaffolding for trivial one-line changes.
 
-Current baseline: 113 unit tests and 8 CLI integration tests.
+Current baseline: 124 unit tests and 9 CLI integration tests.
 
 ## Review Checklist
 

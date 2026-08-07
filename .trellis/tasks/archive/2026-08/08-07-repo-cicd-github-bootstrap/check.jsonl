@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Rust CLI quality entrypoint"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify mutation and partial-state safety"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify error propagation and exit status"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify prompt and stderr behavior"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify tests and required gates"}
