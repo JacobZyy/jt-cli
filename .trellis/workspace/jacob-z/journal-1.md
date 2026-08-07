@@ -25,3 +25,24 @@ Added Trellis and Codex project workflow files, repository-local skills, and sou
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: Interactive GitHub repository bootstrap
+
+**Date**: 2026-08-07
+**Task**: Interactive GitHub repository bootstrap
+**Branch**: `codex/repo-cicd-github-bootstrap`
+
+### Summary
+
+Added safe missing-origin questionnaire for jt repo cicd, public GitHub repository creation through authenticated gh, retained-state recovery, documentation, specs, and regression coverage. Verified fmt, Clippy, 124 unit tests, and 9 CLI tests.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a5b0d34` | (see git log) |
+
+### Status
+
+[OK] **Completed**
