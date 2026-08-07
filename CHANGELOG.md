@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/JacobZyy/jt-cli/compare/v1.4.0...v1.5.0) (2026-08-07)
+
+
+### Features
+
+* add interactive GitHub repository bootstrap ([#13](https://github.com/JacobZyy/jt-cli/issues/13)) ([f8391e2](https://github.com/JacobZyy/jt-cli/commit/f8391e2de13a1b06f261bd9dce34c5aef90e15df))
+
 ## [1.4.0](https://github.com/JacobZyy/jt-cli/compare/v1.3.0...v1.4.0) (2026-08-06)
 
 
