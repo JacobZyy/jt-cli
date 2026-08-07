@@ -1,0 +1,4 @@
+interface:
+  display_name: "JT Monogram Design"
+  short_description: "Design and evolve meaningful one-stroke JT icons"
+  default_prompt: "Use $jt-monogram-design to design a meaningful one-stroke JT icon while preserving existing variants."
