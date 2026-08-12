@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.0](https://github.com/JacobZyy/jt-cli/compare/v1.4.0...v1.5.0) (2026-08-12)
+
+
+### Features
+
+* add interactive GitHub repository bootstrap ([#13](https://github.com/JacobZyy/jt-cli/issues/13)) ([f8391e2](https://github.com/JacobZyy/jt-cli/commit/f8391e2de13a1b06f261bd9dce34c5aef90e15df))
+* add shell completions ([df709ba](https://github.com/JacobZyy/jt-cli/commit/df709ba3fd1c01fc655b5e2cc85e5290bbe78b21))
+* add Vitest Codex hook ([#16](https://github.com/JacobZyy/jt-cli/issues/16)) ([28eaa4b](https://github.com/JacobZyy/jt-cli/commit/28eaa4bd40cb22570ac4b2f353c5f256005ada9c))
+
 ## [1.4.0](https://github.com/JacobZyy/jt-cli/compare/v1.3.0...v1.4.0) (2026-08-06)
 
 
