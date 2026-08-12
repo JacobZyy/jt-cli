@@ -24,7 +24,7 @@ fn init_git(path: &Path) {
 fn write_vitest_package(path: &Path) {
     fs::write(
         path.join("package.json"),
-        r#"{"devDependencies":{"vitest":"^4.0.0"}}"#,
+        r#"{"devDependencies":{"tsx":"^4.0.0","vitest":"^4.0.0"}}"#,
     )
     .unwrap();
 }
@@ -121,6 +121,27 @@ fn vitest_ai_hook_requires_root_dependency_without_mutation() {
 }
 
 #[test]
+fn vitest_ai_hook_requires_tsx_without_mutation() {
+    let project = tempdir().unwrap();
+    init_git(project.path());
+    fs::write(
+        project.path().join("package.json"),
+        r#"{"devDependencies":{"vitest":"^4.0.0"}}"#,
+    )
+    .unwrap();
+
+    let output = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not declare tsx"));
+    assert!(!project.path().join(".codex").exists());
+}
+
+#[test]
 fn vitest_ai_hook_defers_claude_without_mutation() {
     let project = tempdir().unwrap();
 
@@ -151,10 +172,7 @@ fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
     "Start": [{"hooks": [{"type": "command", "command": "echo start"}]}],
     "Stop": [
       {"matcher": "keep", "hooks": [{"type": "command", "command": "echo stop"}]},
-      {"label": "owned", "hooks": [
-        {"type": "command", "command": "jt __vitest-hook", "timeout": 1},
-        {"type": "command", "command": "echo neighbor"}
-      ]}
+      {"hooks": [{"type": "command", "command": "jt __vitest-hook", "timeout": 1}]}
     ]
   }
 }
@@ -172,6 +190,14 @@ fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
 
     let path = project.path().join(".codex/hooks.json");
     let first_bytes = fs::read(&path).unwrap();
+    let installed_text = String::from_utf8(first_bytes.clone()).unwrap();
+    assert!(
+        installed_text.find("\"project\"").unwrap() < installed_text.find("\"hooks\"").unwrap()
+    );
+    assert!(installed_text.contains("\"matcher\": \"keep\",\n        \"hooks\""));
+    assert!(
+        installed_text.contains("\"type\": \"command\",\n            \"command\": \"echo start\"")
+    );
     let installed: serde_json::Value = serde_json::from_slice(&first_bytes).unwrap();
     assert_eq!(installed["project"]["keep"], true);
     assert_eq!(
@@ -181,22 +207,51 @@ fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
     let stop = installed["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(stop[0]["matcher"], "keep");
     assert_eq!(stop[0]["hooks"][0]["command"], "echo stop");
-    assert_eq!(stop[1]["label"], "owned");
-    assert_eq!(stop[1]["hooks"][1]["command"], "echo neighbor");
-    let owned = stop
-        .iter()
-        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
-        .find(|handler| handler["command"] == "jt __vitest-hook")
-        .unwrap();
+    let owned = &stop[1]["hooks"][0];
     assert_eq!(
         owned,
         &serde_json::json!({
-            "type": "command",
-            "command": "jt __vitest-hook",
+            "command": "pnpm --dir \"$(git rev-parse --show-toplevel)\" exec tsx .codex/hooks/jt-vitest/stop.ts codex",
+            "statusMessage": "Running related Vitest suites",
             "timeout": 150,
-            "statusMessage": "Running Vitest"
+            "type": "command"
         })
     );
+    for (event, file, matcher) in [
+        ("PreToolUse", "pre-tool-use.ts", Some("Edit|Write")),
+        ("PostToolUse", "post-tool-use.ts", Some("Edit|Write")),
+        ("Stop", "stop.ts", None),
+    ] {
+        let group = installed["hooks"][event]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|group| {
+                group["hooks"][0]["command"]
+                    .as_str()
+                    .is_some_and(|command| {
+                        command.contains(&format!(".codex/hooks/jt-vitest/{file}"))
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            group.get("matcher").and_then(|value| value.as_str()),
+            matcher
+        );
+    }
+    for file in [
+        "files.ts",
+        "post-tool-use.ts",
+        "pre-tool-use.ts",
+        "protocol.ts",
+        "runtime.ts",
+        "stop.ts",
+        "vitest.ts",
+    ] {
+        let source =
+            fs::read_to_string(project.path().join(".codex/hooks/jt-vitest").join(file)).unwrap();
+        assert!(source.contains("jt-vitest-ai-hook"));
+    }
 
     let second = jt()
         .args(["vitest", "ai-hook", "--codex"])
@@ -206,6 +261,28 @@ fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
     assert!(second.status.success());
     assert!(String::from_utf8_lossy(&second.stdout).contains("already configured"));
     assert_eq!(fs::read(path).unwrap(), first_bytes);
+}
+
+#[test]
+fn vitest_ai_hook_refuses_to_replace_unowned_template() {
+    let project = tempdir().unwrap();
+    init_git(project.path());
+    write_vitest_package(project.path());
+    let hook_dir = project.path().join(".codex/hooks/jt-vitest");
+    fs::create_dir_all(&hook_dir).unwrap();
+    let path = hook_dir.join("stop.ts");
+    fs::write(&path, "custom stop hook\n").unwrap();
+
+    let output = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unowned"));
+    assert_eq!(fs::read_to_string(path).unwrap(), "custom stop hook\n");
+    assert!(!project.path().join(".codex/hooks.json").exists());
 }
 
 #[test]

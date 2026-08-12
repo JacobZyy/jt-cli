@@ -10,6 +10,7 @@ src/
 ├── cli.rs              # Interactive terminal and Ghostty bootstrap
 ├── icon.rs             # Embedded icon output
 ├── release.rs          # GitHub repository and package release initialization
+├── vitest.rs           # Vitest AI-hook template installation
 ├── upgrade.rs          # jt self-upgrade
 ├── zed.rs              # Repository-local Zed configuration
 └── node/
@@ -29,6 +30,7 @@ src/
 tests/cli.rs            # End-to-end CLI process tests
 assets/cli/             # Embedded shell and terminal configuration
 templates/zed/          # Embedded Zed JSON template
+templates/vitest-ai-hook/ # Embedded project-local TypeScript hook runtime
 jt-icon/                # Embedded icon source files
 ```
 

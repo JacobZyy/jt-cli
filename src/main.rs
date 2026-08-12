@@ -79,8 +79,6 @@ enum Commands {
         #[command(subcommand)]
         command: VitestCommand,
     },
-    #[command(name = "__vitest-hook", hide = true)]
-    VitestHook,
     #[command(name = "upgrade", about = "Upgrade jt from a published GitHub Release")]
     Upgrade(UpgradeArgs),
     #[command(name = "icon", about = "Write one JT icon")]
@@ -214,7 +212,6 @@ fn main() -> ExitCode {
             };
             ExitCode::from(vitest::install(&target))
         }
-        Commands::VitestHook => ExitCode::from(vitest::run_hook()),
         Commands::Upgrade(args) => upgrade(args),
         Commands::Icon(args) => icon_download(&args.selector, args.directory.as_ref()),
         Commands::Completions(args) => completions(args.shell),
