@@ -926,6 +926,8 @@ mod tests {
         let zshrc = fs::read_to_string(home.path().join(".zshrc")).unwrap();
         assert!(zshrc.starts_with("keep\n"));
         assert_eq!(zshrc.matches(CLI_MANAGED_OPEN).count(), 1);
+        let zsh = fs::read_to_string(home.path().join(".config/jt-cli/cli-bootstrap.zsh")).unwrap();
+        assert!(zsh.contains("source <(command jt completions zsh 2>/dev/null)"));
         assert!(home.path().join(".config/jt-cli/starship.toml").is_file());
         assert!(!home.path().join("Library/Application Support").exists());
     }
@@ -955,6 +957,11 @@ mod tests {
         deploy_cli_configs(home.path(), Shell::Fish, true).unwrap();
 
         let fish = home.path().join(".config/fish");
+        assert!(
+            fs::read_to_string(fish.join("conf.d/jt-cli-bootstrap.fish"))
+                .unwrap()
+                .contains("command jt completions fish 2>/dev/null | source")
+        );
         assert_eq!(
             fs::read_to_string(fish.join("conf.d/jt-cli-git-shortcuts.fish")).unwrap(),
             FISH_GIT_SHORTCUTS

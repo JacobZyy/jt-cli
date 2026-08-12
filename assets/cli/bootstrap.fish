@@ -7,6 +7,9 @@ else if test -d /usr/local/Homebrew
 else if test -d /home/linuxbrew/.linuxbrew
     fish_add_path /home/linuxbrew/.linuxbrew/bin
 end
+if status is-interactive; and command -q jt
+    command jt completions fish 2>/dev/null | source
+end
 
 set -gx STARSHIP_CONFIG "$HOME/.config/jt-cli/starship.toml"
 if command -q starship

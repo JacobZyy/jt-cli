@@ -30,6 +30,9 @@ elif [[ -d /usr/share/zsh-completions ]]; then
     fpath=(/usr/share/zsh-completions $fpath)
 fi
 autoload -Uz compinit && compinit
+if command -v jt >/dev/null 2>&1; then
+    source <(command jt completions zsh 2>/dev/null)
+fi
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|=*' 'l:|=*'
 
 HISTSIZE=50000

@@ -18,7 +18,26 @@ fn help_lists_new_commands_only() {
     assert!(stdout.contains("jt ghostty install"));
     assert!(stdout.contains("jt zed-conf"));
     assert!(stdout.contains("jt upgrade"));
+    assert!(stdout.contains("completions"));
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("help "))
+    );
     assert!(!stdout.contains("jt release init"));
+}
+
+#[test]
+fn no_arguments_prints_help_and_exits_two() {
+    let output = jt().output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("Usage: jt <COMMAND>"));
 }
 
 #[test]
@@ -30,6 +49,24 @@ fn version_reports_cargo_package_version() {
         String::from_utf8(output.stdout).unwrap().trim(),
         format!("jt {}", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn completions_generate_fish_and_zsh_scripts() {
+    for (shell, marker) in [("fish", "complete -c jt"), ("zsh", "#compdef jt")] {
+        let output = jt().args(["completions", shell]).output().unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(String::from_utf8(output.stdout).unwrap().contains(marker));
+    }
+}
+
+#[test]
+fn completions_reject_unknown_shell() {
+    let output = jt().args(["completions", "bash"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
@@ -48,6 +85,18 @@ fn upgrade_help_and_invalid_version_do_not_touch_network() {
         .unwrap();
     assert_eq!(invalid.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid jt version"));
+
+    for flag in ["--check", "--dry-run", "--force"] {
+        let flag_shaped_version = jt()
+            .args(["upgrade", "--", flag])
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert_eq!(flag_shaped_version.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&flag_shaped_version.stderr).contains("invalid jt version")
+        );
+    }
 }
 
 #[test]
