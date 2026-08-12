@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/JacobZyy/jt-cli/compare/v1.5.0...v1.5.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* install project-local Vitest AI hooks ([#18](https://github.com/JacobZyy/jt-cli/issues/18)) ([50aa11e](https://github.com/JacobZyy/jt-cli/commit/50aa11e47ff44bc8f7f864363e55c668940c6761))
+
 ## [1.5.0](https://github.com/JacobZyy/jt-cli/compare/v1.4.0...v1.5.0) (2026-08-12)
 
 
