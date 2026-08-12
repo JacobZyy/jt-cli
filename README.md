@@ -17,6 +17,16 @@ Interactive bootstrap supports macOS, Debian/Ubuntu, and WSL on x86_64 and ARM64
 
 The command asks before mutation, changes the default shell, writes only jt-managed shell files, backs up replaced files, and configures git-delta globally. Fish users can explicitly enable `proxy-on` at shell startup; this option defaults to No and validates GitHub through `http://127.0.0.1:7890` before exporting proxy variables. Ghostty, fonts, Node.js, fnm, and pnpm stay outside this bootstrap.
 
+Bootstrap automatically loads `jt` completions in interactive Fish and Zsh shells when `jt` is on `PATH`. Load them manually when needed:
+
+```fish
+jt completions fish | source
+```
+
+```zsh
+source <(jt completions zsh)
+```
+
 Install Ghostty on macOS:
 
 ```bash

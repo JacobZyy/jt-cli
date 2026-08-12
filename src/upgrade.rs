@@ -180,7 +180,7 @@ fn parse_options(arguments: &[OsString]) -> Result<ParsedOptions> {
     Ok(ParsedOptions::Run(options))
 }
 
-fn parse_version(value: &str) -> Result<Version> {
+pub(crate) fn parse_version(value: &str) -> Result<Version> {
     let value = value.strip_prefix('v').unwrap_or(value);
     Version::parse(value).map_err(|error| AppError::Invalid(format!("invalid jt version: {error}")))
 }
