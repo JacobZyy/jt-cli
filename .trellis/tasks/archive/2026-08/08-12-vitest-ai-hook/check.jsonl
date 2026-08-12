@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "jt Rust CLI review scope"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "verify error and exit-code contracts"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "verify safe config mutation"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "verify bounded hook feedback"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verify tests and full Rust gates"}
+{"file": ".trellis/tasks/08-12-vitest-ai-hook/research/implementation-contracts.md", "reason": "Codex Stop and Vitest JSON runtime contracts"}
+{"file": ".trellis/spec/backend/ai-hook-contract.md", "reason": "Verify Codex Stop hook and Vitest normalization contract"}

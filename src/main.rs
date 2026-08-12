@@ -3,6 +3,7 @@ mod icon;
 mod node;
 mod release;
 mod upgrade;
+mod vitest;
 mod zed;
 
 use std::env;
@@ -28,6 +29,8 @@ Examples:
   jt cli bootstrap
   jt ghostty install
   jt zed-conf
+  jt vitest ai-hook --codex
+  jt vitest ai-hook --claude
   jt upgrade [version] [options]
   jt icon <size|svg> [directory]
 
@@ -71,6 +74,13 @@ enum Commands {
         about = "Write live Zed config to current Git repository"
     )]
     ZedConf,
+    #[command(name = "vitest", about = "Configure Vitest automation")]
+    Vitest {
+        #[command(subcommand)]
+        command: VitestCommand,
+    },
+    #[command(name = "__vitest-hook", hide = true)]
+    VitestHook,
     #[command(name = "upgrade", about = "Upgrade jt from a published GitHub Release")]
     Upgrade(UpgradeArgs),
     #[command(name = "icon", about = "Write one JT icon")]
@@ -114,6 +124,29 @@ enum CliCommand {
 enum GhosttyCommand {
     #[command(name = "install", about = "Install and configure Ghostty on macOS")]
     Install,
+}
+
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum VitestCommand {
+    #[command(name = "ai-hook", about = "Install Vitest AI hook")]
+    AiHook(VitestAiHookArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("environment")
+        .required(true)
+        .multiple(false)
+        .args(["codex", "claude"])
+))]
+struct VitestAiHookArgs {
+    /// Install Codex Stop hook
+    #[arg(long)]
+    codex: bool,
+    /// Claude hook support is reserved
+    #[arg(long)]
+    claude: bool,
 }
 
 #[derive(Debug, Args)]
@@ -171,6 +204,17 @@ fn main() -> ExitCode {
             command: GhosttyCommand::Install,
         } => ghostty_install(),
         Commands::ZedConf => ExitCode::from(zed::run()),
+        Commands::Vitest {
+            command: VitestCommand::AiHook(args),
+        } => {
+            let target = match (args.codex, args.claude) {
+                (true, false) => OsString::from("--codex"),
+                (false, true) => OsString::from("--claude"),
+                _ => unreachable!("clap requires exactly one Vitest hook environment"),
+            };
+            ExitCode::from(vitest::install(&target))
+        }
+        Commands::VitestHook => ExitCode::from(vitest::run_hook()),
         Commands::Upgrade(args) => upgrade(args),
         Commands::Icon(args) => icon_download(&args.selector, args.directory.as_ref()),
         Commands::Completions(args) => completions(args.shell),

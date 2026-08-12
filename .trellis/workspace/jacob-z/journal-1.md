@@ -46,3 +46,24 @@ Added safe missing-origin questionnaire for jt repo cicd, public GitHub reposito
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: Vitest Codex hook
+
+**Date**: 2026-08-12
+**Task**: Vitest Codex hook
+**Branch**: `codex/vitest-ai-hook`
+
+### Summary
+
+Added jt vitest ai-hook --codex with safe hook merge, semantic Vitest JSON/TAP/terminal reporting, coverage line ranges, and one-retry loop guard. Added CLI/unit coverage, README guidance, and AI-hook contract spec.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `99840ab` | (see git log) |
+
+### Status
+
+[OK] **Completed**
