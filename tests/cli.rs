@@ -1,9 +1,32 @@
-use std::process::{Command, Stdio};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use tempfile::tempdir;
 
 fn jt() -> Command {
     Command::new(env!("CARGO_BIN_EXE_jt"))
+}
+
+fn init_git(path: &Path) {
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+fn write_vitest_package(path: &Path) {
+    fs::write(
+        path.join("package.json"),
+        r#"{"devDependencies":{"vitest":"^4.0.0"}}"#,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -17,6 +40,8 @@ fn help_lists_new_commands_only() {
     assert!(stdout.contains("jt cli bootstrap"));
     assert!(stdout.contains("jt ghostty install"));
     assert!(stdout.contains("jt zed-conf"));
+    assert!(stdout.contains("jt vitest ai-hook --codex"));
+    assert!(stdout.contains("jt vitest ai-hook --claude"));
     assert!(stdout.contains("jt upgrade"));
     assert!(stdout.contains("completions"));
     assert!(
@@ -38,6 +63,198 @@ fn no_arguments_prints_help_and_exits_two() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output_text.contains("Usage: jt <COMMAND>"));
+}
+
+#[test]
+fn vitest_ai_hook_rejects_invalid_argument_shapes_without_mutation() {
+    let project = tempdir().unwrap();
+    for args in [
+        &["vitest", "ai-hook"][..],
+        &["vitest", "ai-hook", "--unknown"][..],
+        &["vitest", "ai-hook", "--codex", "--claude"][..],
+    ] {
+        let output = jt()
+            .args(args)
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
+    assert!(!project.path().join(".codex").exists());
+}
+
+#[test]
+fn vitest_ai_hook_requires_git_without_mutation() {
+    let project = tempdir().unwrap();
+    write_vitest_package(project.path());
+
+    let output = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not inside a Git repository"));
+    assert!(!project.path().join(".codex").exists());
+}
+
+#[test]
+fn vitest_ai_hook_requires_root_dependency_without_mutation() {
+    let project = tempdir().unwrap();
+    init_git(project.path());
+    fs::write(
+        project.path().join("package.json"),
+        r#"{"devDependencies":{"vite":"^7.0.0"}}"#,
+    )
+    .unwrap();
+
+    let output = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not declare vitest"));
+    assert!(!project.path().join(".codex").exists());
+}
+
+#[test]
+fn vitest_ai_hook_defers_claude_without_mutation() {
+    let project = tempdir().unwrap();
+
+    let output = jt()
+        .args(["vitest", "ai-hook", "--claude"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Claude support is not implemented"));
+    assert!(!project.path().join(".codex").exists());
+}
+
+#[test]
+fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
+    let project = tempdir().unwrap();
+    init_git(project.path());
+    write_vitest_package(project.path());
+    let nested = project.path().join("packages/demo");
+    fs::create_dir_all(&nested).unwrap();
+    fs::create_dir(project.path().join(".codex")).unwrap();
+    fs::write(
+        project.path().join(".codex/hooks.json"),
+        r#"{
+  "project": {"keep": true},
+  "hooks": {
+    "Start": [{"hooks": [{"type": "command", "command": "echo start"}]}],
+    "Stop": [
+      {"matcher": "keep", "hooks": [{"type": "command", "command": "echo stop"}]},
+      {"label": "owned", "hooks": [
+        {"type": "command", "command": "jt __vitest-hook", "timeout": 1},
+        {"type": "command", "command": "echo neighbor"}
+      ]}
+    ]
+  }
+}
+"#,
+    )
+    .unwrap();
+
+    let first = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    assert!(String::from_utf8_lossy(&first.stdout).contains("/hooks"));
+
+    let path = project.path().join(".codex/hooks.json");
+    let first_bytes = fs::read(&path).unwrap();
+    let installed: serde_json::Value = serde_json::from_slice(&first_bytes).unwrap();
+    assert_eq!(installed["project"]["keep"], true);
+    assert_eq!(
+        installed["hooks"]["Start"][0]["hooks"][0]["command"],
+        "echo start"
+    );
+    let stop = installed["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stop[0]["matcher"], "keep");
+    assert_eq!(stop[0]["hooks"][0]["command"], "echo stop");
+    assert_eq!(stop[1]["label"], "owned");
+    assert_eq!(stop[1]["hooks"][1]["command"], "echo neighbor");
+    let owned = stop
+        .iter()
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .find(|handler| handler["command"] == "jt __vitest-hook")
+        .unwrap();
+    assert_eq!(
+        owned,
+        &serde_json::json!({
+            "type": "command",
+            "command": "jt __vitest-hook",
+            "timeout": 150,
+            "statusMessage": "Running Vitest"
+        })
+    );
+
+    let second = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert!(String::from_utf8_lossy(&second.stdout).contains("already configured"));
+    assert_eq!(fs::read(path).unwrap(), first_bytes);
+}
+
+#[test]
+fn vitest_ai_hook_rejects_invalid_existing_json_without_mutation() {
+    let project = tempdir().unwrap();
+    init_git(project.path());
+    write_vitest_package(project.path());
+    fs::create_dir(project.path().join(".codex")).unwrap();
+    let path = project.path().join(".codex/hooks.json");
+    let original = b"{not json\n";
+    fs::write(&path, original).unwrap();
+
+    let output = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid"));
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn vitest_ai_hook_rejects_symlinked_file_without_mutating_target() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    init_git(project.path());
+    write_vitest_package(project.path());
+    fs::create_dir(project.path().join(".codex")).unwrap();
+    let target = external.path().join("hooks.json");
+    let original = b"{\"external\":true}\n";
+    fs::write(&target, original).unwrap();
+    let link = project.path().join(".codex/hooks.json");
+    symlink(&target, &link).unwrap();
+
+    let output = jt()
+        .args(["vitest", "ai-hook", "--codex"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symlinked file"));
+    assert_eq!(fs::read(target).unwrap(), original);
+    assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
 }
 
 #[test]
@@ -168,14 +385,7 @@ fn repo_cicd_dispatches_to_release_initializer() {
     )
     .unwrap();
     std::fs::write(project.path().join("package-lock.json"), "{}\n").unwrap();
-    assert!(
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(project.path())
-            .status()
-            .unwrap()
-            .success()
-    );
+    init_git(project.path());
     assert!(
         Command::new("git")
             .args([

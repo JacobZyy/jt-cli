@@ -46,6 +46,32 @@ different content is backed up beside the file before an atomic update. The temp
 over HTTPS from [`templates/zed/settings.json`](templates/zed/settings.json) on `main`, so merging a
 template-only change updates future command runs without releasing a new `jt` version.
 
+Install a project-local Codex Stop hook for Vitest:
+
+```bash
+jt vitest ai-hook --codex
+```
+
+Run this inside a Git repository whose root `package.json` directly declares `vitest` in
+`dependencies`, `devDependencies`, `peerDependencies`, or `optionalDependencies`. The command does
+not install Vitest, Node.js, or repository dependencies. Workspace-package-only Vitest setups are
+not supported.
+
+Installation merges jt's owned handler into `.codex/hooks.json` without replacing unrelated hooks;
+re-running it is idempotent. Review and trust the project hook with `/hooks`. Keep `jt` available on
+the hook `PATH`.
+
+Once trusted, Codex automatically runs the repository-local `node_modules/.bin/vitest run` from the
+Git root when stopping. Passing tests add no test output. Failures return a bounded report containing
+repository-relative files, tests, locations, root causes, and concise expected/actual values; raw
+Vitest output, logs, stacks, code frames, and diffs are excluded. The first failure allows one repair
+continuation. A repeated failure warns and stops instead of looping.
+
+The hook does not enable coverage or change Vitest configuration. When project-enabled coverage
+fails a threshold, the report includes actual and required coverage and uncovered line ranges when
+Vitest provides them. Run `vitest run` directly for full local output. Claude support is deferred;
+`jt vitest ai-hook --claude` exits without changing files.
+
 Configure Node.js and Rust package release automation:
 
 ```bash

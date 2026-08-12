@@ -11,6 +11,7 @@
 | [Error Handling](./error-handling.md) | Typed errors, propagation, exit status | Documented |
 | [Quality Guidelines](./quality-guidelines.md) | Rust gates, tests, safety review | Documented |
 | [User Output and Logging](./logging-guidelines.md) | stdout/stderr, prompts, redaction | Documented |
+| [AI Hook Contract](./ai-hook-contract.md) | Codex Stop hooks and Vitest result normalization | Documented |
 
 ## Usage
 
