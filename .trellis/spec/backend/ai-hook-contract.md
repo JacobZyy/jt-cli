@@ -1,90 +1,85 @@
 # AI Hook Contract
 
-> Executable contract for project-local Codex hooks maintained by `jt`.
+> Executable contract for project-local Codex hooks installed by `jt`.
 
 ## 1. Scope / Trigger
 
-Apply this contract when adding or changing `jt vitest ai-hook`, its installed `.codex/hooks.json` handler, or hidden hook runtime. Hook input, subprocess output, and existing repository configuration are trust boundaries.
+Apply this contract when changing `jt vitest ai-hook`, installed `.codex/hooks.json` groups, or
+TypeScript templates under `templates/vitest-ai-hook/`. Hook input, patch paths, existing repository
+configuration, state files, and subprocess output are trust boundaries.
 
-## 2. Signatures
+## 2. Ownership Boundary
 
 ```text
-jt vitest ai-hook --codex   # install/update Codex hook
+jt vitest ai-hook --codex   # install/update templates and Codex config
 jt vitest ai-hook --claude  # explicit unsupported error; no mutation
-jt __vitest-hook            # hidden Stop runtime; JSON stdin/stdout
 ```
 
-Installed handler:
-
-```json
-{
-  "type": "command",
-  "command": "jt __vitest-hook",
-  "timeout": 150,
-  "statusMessage": "Running Vitest"
-}
-```
-
-Vitest execution uses repository-local `node_modules/.bin/vitest` once:
+`jt` installs only. Runtime lives in target repository:
 
 ```text
-run --reporter=json --reporter=tap-flat --reporter=default --silent --no-color --outputFile.json=<temporary-file>
+.codex/hooks/jt-vitest/
+├── pre-tool-use.ts
+├── post-tool-use.ts
+├── stop.ts
+└── supporting TypeScript modules
 ```
 
-## 3. Contracts
+Every owned template contains `jt-vitest-ai-hook`. Installer may replace marked files, but must reject
+an unmarked collision. Runtime commands use project-local `tsx`; they never call back into `jt`.
 
-- Install from any Git subdirectory; resolve Git root before reading or writing.
-- Root `package.json` must directly declare `vitest` in a dependency field. Never install dependencies.
-- Merge only handler command `jt __vitest-hook`; preserve unrelated top-level fields, events, groups, and sibling handlers. Write atomically; reject symlinked targets/parents and concurrent changes.
-- Stop input is bounded JSON. Read `cwd` and `stop_hook_active`.
-- Process status is final verdict. Reporter `success` is descriptive only; unhandled errors and coverage thresholds can leave it `true` while process exits nonzero.
-- Merge JSON totals/suites/coverage, TAP test/message/location/expected/actual, and recognized terminal fallback blocks. Never return raw stdout/stderr, stacks, code frames, diffs, or console logs.
-- Coverage stays controlled by target config. Report coverageMap uncovered lines only when current terminal output proves a threshold failure.
-- First failure returns `{"decision":"block","reason":"..."}`. When `stop_hook_active=true`, return `{"continue":true,"systemMessage":"...retry limit..."}`.
-- Passing run returns `{"continue":true}`. Model-visible text stays within 8,000 Unicode characters and drops whole diagnostics with an omitted count.
+## 3. Three-Stage Flow
 
-## 4. Validation & Error Matrix
+1. `PreToolUse`: for Codex `apply_patch`, parse candidate paths and store pre-edit fingerprints.
+2. `PostToolUse`: compare fingerprints; record only files whose content or existence changed.
+3. `Stop`: gather all records for current repository/session/turn and invoke Vitest once.
+
+State lives under `/tmp`, expires after 24 hours, and is keyed by repository, session, turn, and tool
+use. Reject paths outside Git root and paths resolving through outside symlinks. Deleted files remain
+eligible because they can affect related tests.
+
+## 4. Vitest Contract
+
+Resolve target repository's installed `vitest` package, then run:
+
+```text
+vitest related <all AI-edited files> --run --reporter=agent --silent --no-color --passWithNoTests
+```
+
+- Pass every changed file in one invocation.
+- Run complete related test files; never filter individual test names.
+- Exclude unrelated pre-existing working-tree changes.
+- Use Vitest's native `agent` reporter; do not maintain a custom Vitest report parser.
+- Do not force coverage, mutate Vitest config, or install dependencies.
+- Bound captured output and process time.
+
+## 5. Stop Results
 
 | Condition | Result |
 |-----------|--------|
-| Outside Git / root Vitest absent | Exit `1`; no `.codex` mutation |
-| Missing/combined/unknown target flag | Exit `2`; no mutation |
-| `--claude` | Exit `1`; explicit deferred message; no mutation |
-| Invalid hooks JSON / symlink path / concurrent change | Exit `1`; preserve original data |
-| Vitest exit `0` | Continue silently, regardless of stale reporter metadata |
-| Assertion/suite/snapshot/timeout/unhandled/coverage failure | One semantic grouped report |
-| Report missing/invalid/oversized or process timeout | Classified bounded setup/runtime report |
-| Repeated Stop failure | Continue with warning; never block twice |
+| No files recorded | `{"continue":true}`; no Vitest process |
+| Vitest unavailable | Continue with visible setup warning; clear turn state |
+| Vitest exit `0` | `{"continue":true}`; clear turn state |
+| First test/runtime failure | `{"decision":"block","reason":"..."}`; retain state for repair |
+| Failure with `stop_hook_active=true` | Continue with retry-limit warning; clear turn state |
 
-## 5. Good / Base / Bad Cases
+## 6. Installer Contract
 
-- Good: `test/cart.test.ts:42 合计金额: expected 100; received 99`.
-- Base: passing suite returns only `{"continue":true}`.
-- Bad: copying full Vitest stdout, dependency stacks, snapshots, or diffs into `reason`.
-- Bad: trusting JSON `success=true` when process status is nonzero.
-- Bad: forcing `--coverage` or rewriting target Vitest config.
+- Resolve Git root from any subdirectory.
+- Root `package.json` must directly declare `vitest` and `tsx`.
+- Sync every owned template before merging three config groups.
+- Migrate legacy `jt __vitest-hook` Stop group.
+- Preserve unrelated top-level fields, events, and groups.
+- Preserve existing JSON key order; write atomically; reject invalid JSON, symlinked paths, and
+  concurrent changes.
+- Re-running unchanged installation must be byte-stable.
 
-## 6. Tests Required
+## 7. Required Checks
 
-- CLI: help, invalid shapes, non-Git, missing root dependency, deferred Claude, nested-directory install, preservation, idempotence, invalid JSON, symlink refusal.
-- Formatter fixtures: assertion expected/received, suite/setup, timeout placeholder repaired from TAP, snapshot, unhandled error with repository frame, coverage threshold plus compact uncovered ranges.
-- Safety: process-status authority, bounded input/report/reason, Unicode boundary, single retry, no raw stack/dependency path.
-- Full gates: `cargo fmt --check`, Clippy with warnings denied, `cargo test --locked`, `git diff --check`.
-
-## 7. Wrong vs Correct
-
-Wrong:
-
-```rust
-if report["success"] == true { continue_run() }
-return block(raw_stdout);
-```
-
-Correct:
-
-```rust
-if process_status.success() { continue_run() }
-return block(render(join(json, tap, recognized_terminal_blocks)));
-```
-
-Reason: JSON omits some timeout detail, unhandled errors, and final coverage-threshold status. Structured multi-source normalization preserves cause without context explosion.
+- CLI: invalid arguments, non-Git root, missing tooling, deferred Claude, nested install,
+  three-stage config, legacy migration, template sync, preservation, idempotence, invalid JSON,
+  unowned collision, symlink refusal.
+- Runtime fixture: no-op patch skip, changed-file collection, related full-suite invocation, passing
+  cleanup, failure/repair retention, retry-limit cleanup, missing Vitest, outside-root rejection.
+- Full Rust gates: `cargo fmt --check`, Clippy with warnings denied, `cargo test --locked`,
+  `git diff --check`.
