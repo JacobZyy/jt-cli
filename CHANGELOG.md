@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/JacobZyy/jt-cli/compare/v1.6.0...v1.6.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **vitest:** honor project coverage filters ([#22](https://github.com/JacobZyy/jt-cli/issues/22)) ([fedd54d](https://github.com/JacobZyy/jt-cli/commit/fedd54d42d7b60335a4f08f3d226e2dfab2f6bb3))
+
 ## [1.6.0](https://github.com/JacobZyy/jt-cli/compare/v1.5.1...v1.6.0) (2026-08-13)
 
 
