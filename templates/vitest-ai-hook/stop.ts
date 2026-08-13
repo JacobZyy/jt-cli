@@ -7,7 +7,7 @@ import { relative } from 'node:path'
 import { safeFilePath } from './files'
 import { isRecord, writeOutput } from './protocol'
 import { runStage } from './runtime'
-import { boundedOutput, executeVitest, resolveVitest } from './vitest'
+import { boundedOutput, executeVitest, resolveVitest, selectCoverageFiles } from './vitest'
 
 runStage('Stop', (runtime) => {
   const collectedFiles = (identity: StateIdentity): string[] => {
@@ -56,7 +56,16 @@ runStage('Stop', (runtime) => {
     return
   }
 
-  const result = executeVitest(vitestBin, runtime.cwd, files)
+  const coverage = selectCoverageFiles(runtime.cwd, files)
+  const coverageFiles = coverage.files.map(file => relative(runtime.cwd, file))
+  const excludedCoverageFiles = coverage.excludedFiles.map(file => relative(runtime.cwd, file))
+  runtime.writeLog('coverage-files-selected', {
+    excludedFiles: excludedCoverageFiles,
+    files: coverageFiles,
+    warning: coverage.warning,
+  })
+
+  const result = executeVitest(vitestBin, runtime.cwd, files, coverage.files)
   const detail = boundedOutput(result.stdout, result.stderr)
   if (result.status === 0) {
     runtime.writeLog('passed', {
@@ -64,11 +73,13 @@ runStage('Stop', (runtime) => {
       files: relativeFiles,
       output: detail.slice(0, 4000),
     })
+    const summary = coverage.files.length > 0
+      ? '[jt-vitest-ai-hook] Related Vitest suites and coverage passed.'
+      : '[jt-vitest-ai-hook] Related Vitest suites passed; no AI-edited files matched project coverage rules.'
+    const messages = [coverage.warning, detail].filter(Boolean)
     finish(identity, {
       continue: true,
-      ...(detail
-        ? { systemMessage: `[jt-vitest-ai-hook] Related Vitest suites and coverage passed.\n${detail}` }
-        : {}),
+      systemMessage: [summary, ...messages].join('\n'),
     }, true)
     return
   }
@@ -79,6 +90,7 @@ runStage('Stop', (runtime) => {
       ? '[jt-vitest-ai-hook] Vitest could not complete for AI-edited files.'
       : '[jt-vitest-ai-hook] Related Vitest suites or coverage checks failed for AI-edited files.',
     `Changed files: ${relativeFiles.join(', ')}`,
+    ...(coverage.warning ? [coverage.warning] : []),
     `Log: ${runtime.logPath}`,
     detail || String(result.error?.message || 'Vitest exited without output.'),
   ].join('\n')

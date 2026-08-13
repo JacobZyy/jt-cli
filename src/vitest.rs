@@ -17,7 +17,11 @@ const STOP_FILE: &str = ".codex/hooks/jt-vitest/stop.ts";
 const OWNED_MARKER: &str = "jt-vitest-ai-hook";
 const LEGACY_COMMAND: &str = "jt __vitest-hook";
 
-const RUNTIME_FILES: [(&str, &[u8]); 7] = [
+const RUNTIME_FILES: [(&str, &[u8]); 8] = [
+    (
+        "coverage.ts",
+        include_bytes!("../templates/vitest-ai-hook/coverage.ts"),
+    ),
     (
         "files.ts",
         include_bytes!("../templates/vitest-ai-hook/files.ts"),

@@ -44,7 +44,7 @@ Resolve target repository's installed `vitest` package, then run:
 
 ```text
 vitest related <all AI-edited files> --run --reporter=agent --coverage.enabled \
-  --coverage.include=<each AI-edited file> --coverage.reporter=text \
+  --coverage.include=<each eligible AI-edited file> --coverage.reporter=text \
   --silent --no-color --passWithNoTests
 ```
 
@@ -52,11 +52,15 @@ vitest related <all AI-edited files> --run --reporter=agent --coverage.enabled \
 - Run complete related test files; never filter individual test names.
 - Exclude unrelated pre-existing working-tree changes.
 - Use Vitest's native `agent` reporter; do not maintain a custom Vitest report parser.
-- Force coverage for the AI-edited files and return the text report without creating report files.
+- Resolve project Vitest config, then select `AI-edited files ∩ coverage.include − coverage.exclude`.
+  Test-file and default Vitest coverage exclusions apply through resolved config. If no file remains,
+  run related tests with `--coverage.enabled=false`.
+- Force coverage for eligible AI-edited files and return the text report without creating report files.
 - Inherit project coverage provider, exclusions, and thresholds. Do not pass `skipFull`; leave project
   configuration and Vitest's AI-agent default intact. A threshold failure blocks through Vitest's
   non-zero exit. Do not hard-code coverage policy or install dependencies.
 - Bound captured output and process time.
+- Resolve coverage rules in an isolated process so project config output cannot corrupt hook JSON.
 
 ## 5. Stop Results
 

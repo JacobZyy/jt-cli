@@ -63,9 +63,11 @@ idempotent. Review and trust project hooks with `/hooks`. `jt` is not needed whe
 
 `Stop` invokes repository Vitest once with `related`, the native `agent` test reporter, and coverage
 limited to AI-edited files. Coverage uses the terminal-only `text` reporter. The hook enables
-coverage and supplies its dynamic `include`; provider, exclusions, and thresholds come from project
-Vitest configuration. The hook does not pass `skipFull`, leaving project configuration and Vitest's
-AI-agent default intact. Threshold failures block through Vitest's exit status.
+coverage only for AI-edited files matching project `coverage.include` and not matching resolved
+`coverage.exclude`; when none remain, related tests run without coverage. Provider, exclusions, and
+thresholds come from project Vitest configuration. The hook does not pass `skipFull`, leaving project
+configuration and Vitest's AI-agent default intact. Threshold failures block through Vitest's exit
+status.
 
 Vitest runs every test in each related test file; unrelated working-tree edits are excluded. Passing
 test-case noise stays hidden while bounded coverage text is returned. Failures allow one repair

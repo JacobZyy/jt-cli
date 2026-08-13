@@ -260,6 +260,7 @@ fn vitest_ai_hook_install_upgrades_owned_files_preserves_hooks_and_is_byte_stabl
         );
     }
     for file in [
+        "coverage.ts",
         "files.ts",
         "post-tool-use.ts",
         "pre-tool-use.ts",
@@ -276,13 +277,24 @@ fn vitest_ai_hook_install_upgrades_owned_files_preserves_hooks_and_is_byte_stabl
     for expected in [
         "--reporter=agent",
         "--coverage.enabled",
+        "--coverage.enabled=false",
         "--coverage.include=",
         "--coverage.reporter=text",
+        "selectCoverageFiles",
     ] {
         assert!(vitest_source.contains(expected), "missing {expected}");
     }
     assert!(!vitest_source.contains("--coverage.skipFull"));
     assert!(!vitest_source.contains("stale owned template"));
+    let coverage_source = fs::read_to_string(hook_dir.join("coverage.ts")).unwrap();
+    for expected in [
+        "resolveConfig",
+        "coverage.include",
+        "coverage.exclude",
+        "picomatch",
+    ] {
+        assert!(coverage_source.contains(expected), "missing {expected}");
+    }
 
     let second = jt()
         .args(["vitest", "ai-hook", "--codex"])
