@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "jt"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clap",
  "clap_complete",
