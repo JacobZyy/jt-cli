@@ -61,16 +61,17 @@ merges three handlers into `.codex/hooks.json`: `PreToolUse` fingerprints candid
 that Codex turn. Existing unrelated hooks remain. Re-running upgrades owned templates and is
 idempotent. Review and trust project hooks with `/hooks`. `jt` is not needed when hooks run.
 
-`Stop` invokes repository Vitest once with
-`vitest related <AI-edited-files...> --run --reporter=agent --silent --no-color --passWithNoTests`.
-Vitest runs every test in each related test file; unrelated working-tree edits are excluded. Passing
-tests stay silent. Failures use Vitest's native agent report and allow one repair continuation; a
-second failure reports the retry limit and stops instead of looping. Hook state and bounded logs live
-under `/tmp` and are isolated by repository, session, and turn.
+`Stop` invokes repository Vitest once with `related`, the native `agent` test reporter, and coverage
+limited to AI-edited files. Coverage uses the terminal-only `text` reporter. The hook enables
+coverage and supplies its dynamic `include`; provider, exclusions, and thresholds come from project
+Vitest configuration. The hook does not pass `skipFull`, leaving project configuration and Vitest's
+AI-agent default intact. Threshold failures block through Vitest's exit status.
 
-The hook does not enable coverage or change Vitest configuration. Run the generated command directly
-for full local investigation. Claude support is deferred; `jt vitest ai-hook --claude` exits without
-changing files.
+Vitest runs every test in each related test file; unrelated working-tree edits are excluded. Passing
+test-case noise stays hidden while bounded coverage text is returned. Failures allow one repair
+continuation; a second failure reports the retry limit and stops instead of looping. Hook state and
+logs live under `/tmp` and are isolated by repository, session, and turn. Claude support is deferred;
+`jt vitest ai-hook --claude` exits without changing files.
 
 Configure Node.js and Rust package release automation:
 
