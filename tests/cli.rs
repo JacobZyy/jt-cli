@@ -157,22 +157,35 @@ fn vitest_ai_hook_defers_claude_without_mutation() {
 }
 
 #[test]
-fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
+fn vitest_ai_hook_install_upgrades_owned_files_preserves_hooks_and_is_byte_stable() {
     let project = tempdir().unwrap();
     init_git(project.path());
     write_vitest_package(project.path());
     let nested = project.path().join("packages/demo");
     fs::create_dir_all(&nested).unwrap();
-    fs::create_dir(project.path().join(".codex")).unwrap();
+    let hook_dir = project.path().join(".codex/hooks/jt-vitest");
+    fs::create_dir_all(&hook_dir).unwrap();
+    fs::write(
+        hook_dir.join("vitest.ts"),
+        "// jt-vitest-ai-hook\n// stale owned template\n",
+    )
+    .unwrap();
     fs::write(
         project.path().join(".codex/hooks.json"),
         r#"{
   "project": {"keep": true},
   "hooks": {
     "Start": [{"hooks": [{"type": "command", "command": "echo start"}]}],
+    "PreToolUse": [
+      {"matcher": "keep", "hooks": [{"type": "command", "command": "echo pre"}]},
+      {"matcher": "old", "hooks": [{"type": "command", "command": "pnpm exec tsx .codex/hooks/jt-vitest/pre-tool-use.ts codex", "timeout": 1}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "old", "hooks": [{"type": "command", "command": "pnpm exec tsx .codex/hooks/jt-vitest/post-tool-use.ts codex", "timeout": 1}]}
+    ],
     "Stop": [
       {"matcher": "keep", "hooks": [{"type": "command", "command": "echo stop"}]},
-      {"hooks": [{"type": "command", "command": "jt __vitest-hook", "timeout": 1}]}
+      {"hooks": [{"type": "command", "command": "pnpm exec tsx .codex/hooks/jt-vitest/stop.ts codex", "timeout": 1}]}
     ]
   }
 }
@@ -203,6 +216,13 @@ fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
     assert_eq!(
         installed["hooks"]["Start"][0]["hooks"][0]["command"],
         "echo start"
+    );
+    let pre = installed["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 2);
+    assert_eq!(pre[0]["hooks"][0]["command"], "echo pre");
+    assert_eq!(
+        installed["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        1
     );
     let stop = installed["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(stop[0]["matcher"], "keep");
@@ -252,6 +272,17 @@ fn vitest_ai_hook_install_preserves_hooks_and_is_byte_stable() {
             fs::read_to_string(project.path().join(".codex/hooks/jt-vitest").join(file)).unwrap();
         assert!(source.contains("jt-vitest-ai-hook"));
     }
+    let vitest_source = fs::read_to_string(hook_dir.join("vitest.ts")).unwrap();
+    for expected in [
+        "--reporter=agent",
+        "--coverage.enabled",
+        "--coverage.include=",
+        "--coverage.reporter=text",
+    ] {
+        assert!(vitest_source.contains(expected), "missing {expected}");
+    }
+    assert!(!vitest_source.contains("--coverage.skipFull"));
+    assert!(!vitest_source.contains("stale owned template"));
 
     let second = jt()
         .args(["vitest", "ai-hook", "--codex"])

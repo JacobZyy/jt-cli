@@ -43,14 +43,19 @@ eligible because they can affect related tests.
 Resolve target repository's installed `vitest` package, then run:
 
 ```text
-vitest related <all AI-edited files> --run --reporter=agent --silent --no-color --passWithNoTests
+vitest related <all AI-edited files> --run --reporter=agent --coverage.enabled \
+  --coverage.include=<each AI-edited file> --coverage.reporter=text \
+  --silent --no-color --passWithNoTests
 ```
 
 - Pass every changed file in one invocation.
 - Run complete related test files; never filter individual test names.
 - Exclude unrelated pre-existing working-tree changes.
 - Use Vitest's native `agent` reporter; do not maintain a custom Vitest report parser.
-- Do not force coverage, mutate Vitest config, or install dependencies.
+- Force coverage for the AI-edited files and return the text report without creating report files.
+- Inherit project coverage provider, exclusions, and thresholds. Do not pass `skipFull`; leave project
+  configuration and Vitest's AI-agent default intact. A threshold failure blocks through Vitest's
+  non-zero exit. Do not hard-code coverage policy or install dependencies.
 - Bound captured output and process time.
 
 ## 5. Stop Results
@@ -59,7 +64,7 @@ vitest related <all AI-edited files> --run --reporter=agent --silent --no-color 
 |-----------|--------|
 | No files recorded | `{"continue":true}`; no Vitest process |
 | Vitest unavailable | Continue with visible setup warning; clear turn state |
-| Vitest exit `0` | `{"continue":true}`; clear turn state |
+| Vitest exit `0` | Continue with bounded coverage text; clear turn state |
 | First test/runtime failure | `{"decision":"block","reason":"..."}`; retain state for repair |
 | Failure with `stop_hook_active=true` | Continue with retry-limit warning; clear turn state |
 

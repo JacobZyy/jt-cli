@@ -1,5 +1,5 @@
 // jt-vitest-ai-hook
-// Runs complete Vitest suites related to files changed during this AI turn.
+// Runs complete Vitest suites and coverage related to files changed during this AI turn.
 
 import type { StateIdentity } from './runtime'
 import { relative } from 'node:path'
@@ -59,8 +59,17 @@ runStage('Stop', (runtime) => {
   const result = executeVitest(vitestBin, runtime.cwd, files)
   const detail = boundedOutput(result.stdout, result.stderr)
   if (result.status === 0) {
-    runtime.writeLog('passed', { exitCode: result.status, files: relativeFiles })
-    finish(identity, { continue: true }, true)
+    runtime.writeLog('passed', {
+      exitCode: result.status,
+      files: relativeFiles,
+      output: detail.slice(0, 4000),
+    })
+    finish(identity, {
+      continue: true,
+      ...(detail
+        ? { systemMessage: `[jt-vitest-ai-hook] Related Vitest suites and coverage passed.\n${detail}` }
+        : {}),
+    }, true)
     return
   }
 
@@ -68,7 +77,7 @@ runStage('Stop', (runtime) => {
   const reason = [
     runtimeFailure
       ? '[jt-vitest-ai-hook] Vitest could not complete for AI-edited files.'
-      : '[jt-vitest-ai-hook] Related Vitest suites failed for AI-edited files.',
+      : '[jt-vitest-ai-hook] Related Vitest suites or coverage checks failed for AI-edited files.',
     `Changed files: ${relativeFiles.join(', ')}`,
     `Log: ${runtime.logPath}`,
     detail || String(result.error?.message || 'Vitest exited without output.'),

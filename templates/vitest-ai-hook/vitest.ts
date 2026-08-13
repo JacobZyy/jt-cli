@@ -4,7 +4,7 @@ import type { SpawnSyncReturns } from 'node:child_process'
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import process from 'node:process'
 
 export function resolveVitest(cwd: string): string | null {
@@ -24,6 +24,10 @@ export function executeVitest(
   cwd: string,
   files: string[],
 ): SpawnSyncReturns<string> {
+  const coverageIncludes = files.map(file =>
+    `--coverage.include=${relative(cwd, file).split(sep).join('/')}`,
+  )
+
   return spawnSync(
     process.execPath,
     [
@@ -32,6 +36,9 @@ export function executeVitest(
       ...files,
       '--run',
       '--reporter=agent',
+      '--coverage.enabled',
+      ...coverageIncludes,
+      '--coverage.reporter=text',
       '--silent',
       '--no-color',
       '--passWithNoTests',
