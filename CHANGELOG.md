@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/JacobZyy/jt-cli/compare/v1.5.1...v1.6.0) (2026-08-13)
+
+
+### Features
+
+* **vitest:** report coverage for AI edits ([bb40032](https://github.com/JacobZyy/jt-cli/commit/bb40032337e863cdd9bac1a1c27e74013a7b3820))
+
 ## [1.5.1](https://github.com/JacobZyy/jt-cli/compare/v1.5.0...v1.5.1) (2026-08-12)
 
 
