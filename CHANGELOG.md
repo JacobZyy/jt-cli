@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/JacobZyy/jt-cli/compare/v1.6.1...v1.6.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **vitest:** keep successful hook runs silent ([#24](https://github.com/JacobZyy/jt-cli/issues/24)) ([be02b0f](https://github.com/JacobZyy/jt-cli/commit/be02b0f841479dc707828c87c39f1ad7a0a4c165))
+
 ## [1.6.1](https://github.com/JacobZyy/jt-cli/compare/v1.6.0...v1.6.1) (2026-08-13)
 
 
