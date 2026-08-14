@@ -70,10 +70,11 @@ configuration and Vitest's AI-agent default intact. Threshold failures block thr
 status.
 
 Vitest runs every test in each related test file; unrelated working-tree edits are excluded. Passing
-test-case noise stays hidden while bounded coverage text is returned. Failures allow one repair
-continuation; a second failure reports the retry limit and stops instead of looping. Hook state and
-logs live under `/tmp` and are isolated by repository, session, and turn. Claude support is deferred;
-`jt vitest ai-hook --claude` exits without changing files.
+runs return no model-visible result; bounded agent and coverage output remains in the `/tmp` log.
+Failures return the bounded result and allow one repair continuation; a second failure reports the
+retry limit and stops instead of looping. Coverage-filter setup warnings remain visible. Hook state
+and logs are isolated by repository, session, and turn. Claude support is deferred; `jt vitest
+ai-hook --claude` exits without changing files.
 
 Configure Node.js and Rust package release automation:
 

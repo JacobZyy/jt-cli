@@ -71,16 +71,14 @@ runStage('Stop', (runtime) => {
     runtime.writeLog('passed', {
       exitCode: result.status,
       files: relativeFiles,
-      output: detail.slice(0, 4000),
+      output: detail,
     })
-    const summary = coverage.files.length > 0
-      ? '[jt-vitest-ai-hook] Related Vitest suites and coverage passed.'
-      : '[jt-vitest-ai-hook] Related Vitest suites passed; no AI-edited files matched project coverage rules.'
-    const messages = [coverage.warning, detail].filter(Boolean)
-    finish(identity, {
-      continue: true,
-      systemMessage: [summary, ...messages].join('\n'),
-    }, true)
+    finish(identity, coverage.warning
+      ? {
+          continue: true,
+          systemMessage: `[jt-vitest-ai-hook] ${coverage.warning} Log: ${runtime.logPath}`,
+        }
+      : { continue: true }, true)
     return
   }
 
