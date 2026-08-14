@@ -55,7 +55,8 @@ vitest related <all AI-edited files> --run --reporter=agent --coverage.enabled \
 - Resolve project Vitest config, then select `AI-edited files ∩ coverage.include − coverage.exclude`.
   Test-file and default Vitest coverage exclusions apply through resolved config. If no file remains,
   run related tests with `--coverage.enabled=false`.
-- Force coverage for eligible AI-edited files and return the text report without creating report files.
+- Force coverage for eligible AI-edited files and capture the text report without creating report files.
+  Keep passing output in the bounded hook log; return it to the model only when Vitest fails.
 - Inherit project coverage provider, exclusions, and thresholds. Do not pass `skipFull`; leave project
   configuration and Vitest's AI-agent default intact. A threshold failure blocks through Vitest's
   non-zero exit. Do not hard-code coverage policy or install dependencies.
@@ -68,7 +69,8 @@ vitest related <all AI-edited files> --run --reporter=agent --coverage.enabled \
 |-----------|--------|
 | No files recorded | `{"continue":true}`; no Vitest process |
 | Vitest unavailable | Continue with visible setup warning; clear turn state |
-| Vitest exit `0` | Continue with bounded coverage text; clear turn state |
+| Vitest exit `0` | Continue silently; keep bounded result in log; clear turn state |
+| Coverage-filter fallback with Vitest exit `0` | Continue with visible setup warning; clear turn state |
 | First test/runtime failure | `{"decision":"block","reason":"..."}`; retain state for repair |
 | Failure with `stop_hook_active=true` | Continue with retry-limit warning; clear turn state |
 

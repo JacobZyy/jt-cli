@@ -295,6 +295,15 @@ fn vitest_ai_hook_install_upgrades_owned_files_preserves_hooks_and_is_byte_stabl
     ] {
         assert!(coverage_source.contains(expected), "missing {expected}");
     }
+    let stop_source = fs::read_to_string(hook_dir.join("stop.ts")).unwrap();
+    assert!(stop_source.contains("output: detail,"));
+    assert!(stop_source.contains("${coverage.warning} Log: ${runtime.logPath}"));
+    for unexpected in [
+        "Related Vitest suites and coverage passed.",
+        "Related Vitest suites passed; no AI-edited files matched project coverage rules.",
+    ] {
+        assert!(!stop_source.contains(unexpected), "unexpected {unexpected}");
+    }
 
     let second = jt()
         .args(["vitest", "ai-hook", "--codex"])
