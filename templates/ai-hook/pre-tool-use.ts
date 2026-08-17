@@ -1,4 +1,4 @@
-// jt-vitest-ai-hook
+// jt-ai-hook
 // Captures file fingerprints before an AI patch runs.
 
 import { relative } from 'node:path'

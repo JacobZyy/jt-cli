@@ -1,4 +1,4 @@
-// jt-vitest-ai-hook
+// jt-ai-hook
 // Resolves project coverage rules in an isolated process, keeping hook stdout protocol-safe.
 
 import { createRequire } from 'node:module'
@@ -31,7 +31,10 @@ function isWithinRoot(root: string, file: string): boolean {
   )
 }
 
-async function selectFiles(cwd: string, files: string[]): Promise<string[]> {
+async function selectCoverage(cwd: string, files: string[]): Promise<{
+  files: string[]
+  skipFull: boolean
+}> {
   const requireFromProject = createRequire(join(cwd, 'package.json'))
   const vitestPackageJson = requireFromProject.resolve('vitest/package.json')
   const requireFromVitest = createRequire(vitestPackageJson)
@@ -61,16 +64,19 @@ async function selectFiles(cwd: string, files: string[]): Promise<string[]> {
   if (typeof isMatch !== 'function')
     throw new TypeError('Vitest picomatch dependency does not export isMatch')
 
-  return files.filter((file) => {
-    const absoluteFile = resolve(file)
-    if (coverage.allowExternal !== true && !isWithinRoot(root, absoluteFile))
-      return false
-    return isMatch(slash(absoluteFile), include, {
-      contains: true,
-      dot: true,
-      ignore: exclude,
-    }) === true
-  })
+  return {
+    files: files.filter((file) => {
+      const absoluteFile = resolve(file)
+      if (coverage.allowExternal !== true && !isWithinRoot(root, absoluteFile))
+        return false
+      return isMatch(slash(absoluteFile), include, {
+        contains: true,
+        dot: true,
+        ignore: exclude,
+      }) === true
+    }),
+    skipFull: coverage.skipFull === true,
+  }
 }
 
 async function main(): Promise<void> {
@@ -78,8 +84,8 @@ async function main(): Promise<void> {
   try {
     if (!cwd)
       throw new TypeError('missing project root')
-    const selected = await selectFiles(cwd, files)
-    process.stdout.write(`${OUTPUT_MARKER}${JSON.stringify({ files: selected, ok: true })}\n`)
+    const coverage = await selectCoverage(cwd, files)
+    process.stdout.write(`${OUTPUT_MARKER}${JSON.stringify({ ...coverage, ok: true })}\n`)
   }
   catch (error) {
     const message = error instanceof Error ? error.message : String(error)

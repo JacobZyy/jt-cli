@@ -1,4 +1,4 @@
-// jt-vitest-ai-hook
+// jt-ai-hook
 
 import { readSync } from 'node:fs'
 import process from 'node:process'
