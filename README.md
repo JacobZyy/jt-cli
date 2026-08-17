@@ -70,7 +70,9 @@ handler into each `.codex/hooks.json` stage. `PreToolUse` fingerprints candidate
 `stop/runner/`, sorts them, and executes all concurrently. Built-in `vitest.ts` and `eslint.ts`
 runners can be attached independently; custom runner files remain untouched. Existing unrelated
 handlers remain, including handlers sharing a group with migrated entries. Old `jt-vitest` and
-`nlab-eslint` handlers are replaced, preventing duplicate execution. Re-running is idempotent.
+`nlab-eslint` handlers are replaced, preventing duplicate execution. Known legacy files bearing
+their ownership markers are removed; unmarked, custom, and symlinked files remain. Empty legacy
+directories are removed. Re-running is idempotent.
 Review and trust project hooks with `/hooks`. Runtime does not call `jt`.
 
 The Stop entry launches each tool through asynchronous child processes with `shell: false`. Both

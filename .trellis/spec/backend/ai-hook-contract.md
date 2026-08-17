@@ -97,6 +97,8 @@ vitest related <all AI-edited files> --run --reporter=agent --coverage.enabled \
 - Merge one shared PreToolUse, PostToolUse, and Stop group.
 - Remove old `.codex/hooks/jt-vitest`, `jt __vitest-hook`, and
   `.codex/hooks/nlab-eslint` handlers at handler level. Preserve unrelated handlers in mixed groups.
+- Remove known legacy files only when they contain `jt-vitest-ai-hook` or `nlab-eslint-ai-hook`.
+  Preserve unmarked, custom, and symlinked files; remove legacy directories only when empty.
 - Reject invalid JSON, symlinked paths, unowned target collisions, and concurrent changes.
 - Preserve unrelated top-level fields/events and JSON key order. Re-run must be byte-stable.
 
@@ -107,5 +109,5 @@ vitest related <all AI-edited files> --run --reporter=agent --coverage.enabled \
 - Runner attach/detach, custom-runner preservation, template ownership, idempotence.
 - Async `spawn`, `shell: false`, `Promise.allSettled`, both runner environments.
 - Structured Vitest coverage, project filtering/`skipFull`, compact failure output, temp cleanup.
-- Invalid JSON, unowned collision, symlink refusal.
+- Invalid JSON, unowned collision, symlink refusal, marker-owned legacy cleanup.
 - `cargo fmt --check`, Clippy warnings denied, `cargo test --locked`, `git diff --check`.
