@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/JacobZyy/jt-cli/compare/v1.7.0...v1.7.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **ai-hook:** clean marker-owned legacy files ([#28](https://github.com/JacobZyy/jt-cli/issues/28)) ([d7342d4](https://github.com/JacobZyy/jt-cli/commit/d7342d403b22f9be0b699027b7a83f869750c2c5))
+
 ## [1.7.0](https://github.com/JacobZyy/jt-cli/compare/v1.6.2...v1.7.0) (2026-08-17)
 
 
