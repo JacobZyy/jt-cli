@@ -46,35 +46,48 @@ different content is backed up beside the file before an atomic update. The temp
 over HTTPS from [`templates/zed/settings.json`](templates/zed/settings.json) on `main`, so merging a
 template-only change updates future command runs without releasing a new `jt` version.
 
-Install project-local Codex AI-edit hooks for Vitest:
+Configure project-local AI-edit hooks:
 
 ```bash
-jt vitest ai-hook --codex
+jt ai-hook
 ```
 
-Run this inside a Git repository whose root `package.json` directly declares `vitest` and `tsx`.
-The command does not install Node.js or dependencies. Workspace-package-only tooling is unsupported.
+The questionnaire selects checks (`Vitest`, `ESLint`) and agent terminals (`Codex`). Re-running shows
+the installed selection; deselecting a check removes its maintained runner. Automation can provide
+the final selection without a TTY:
 
-Installation writes maintained TypeScript runtime templates under `.codex/hooks/jt-vitest/`, then
-merges three handlers into `.codex/hooks.json`: `PreToolUse` fingerprints candidate patch files,
-`PostToolUse` records only files whose content changed, and `Stop` validates files collected during
-that Codex turn. Existing unrelated hooks remain. Re-running upgrades owned templates and is
-idempotent. Review and trust project hooks with `/hooks`. `jt` is not needed when hooks run.
+```bash
+jt ai-hook --checks vitest,eslint --agents codex
+```
 
-`Stop` invokes repository Vitest once with `related`, the native `agent` test reporter, and coverage
-limited to AI-edited files. Coverage uses the terminal-only `text` reporter. The hook enables
-coverage only for AI-edited files matching project `coverage.include` and not matching resolved
-`coverage.exclude`; when none remain, related tests run without coverage. Provider, exclusions, and
-thresholds come from project Vitest configuration. The hook does not pass `skipFull`, leaving project
-configuration and Vitest's AI-agent default intact. Threshold failures block through Vitest's exit
-status.
+Run inside a Git repository whose root `package.json` directly declares `tsx` and each selected
+tool. The command installs nothing. Workspace-package-only tooling is unsupported. `jt vitest` is a
+reserved placeholder; old `jt vitest ai-hook` arguments are removed.
 
-Vitest runs every test in each related test file; unrelated working-tree edits are excluded. Passing
-runs return no model-visible result; bounded agent and coverage output remains in the `/tmp` log.
-Failures return the bounded result and allow one repair continuation; a second failure reports the
-retry limit and stops instead of looping. Coverage-filter setup warnings remain visible. Hook state
-and logs are isolated by repository, session, and turn. Claude support is deferred; `jt vitest
-ai-hook --claude` exits without changing files.
+Installation writes maintained TypeScript runtime under `.codex/hooks/jt-ai-hook/`, then merges one
+handler into each `.codex/hooks.json` stage. `PreToolUse` fingerprints candidate patches.
+`PostToolUse` records content changes. `Stop` discovers direct `.ts` plugins under
+`stop/runner/`, sorts them, and executes all concurrently. Built-in `vitest.ts` and `eslint.ts`
+runners can be attached independently; custom runner files remain untouched. Existing unrelated
+handlers remain, including handlers sharing a group with migrated entries. Old `jt-vitest` and
+`nlab-eslint` handlers are replaced, preventing duplicate execution. Re-running is idempotent.
+Review and trust project hooks with `/hooks`. Runtime does not call `jt`.
+
+The Stop entry launches each tool through asynchronous child processes with `shell: false`. Both
+runners receive `isInAIHook=true` and `NO_COLOR=1`; process, environment, exit state, Vite server,
+and logger state stay isolated. One slow runner does not delay starting another.
+
+Vitest runs `related` once over all AI-edited files with its native `agent` reporter. Coverage is
+limited to edited files matching resolved project `coverage.include` and not matching
+`coverage.exclude`; no match disables coverage. Provider, thresholds, and `skipFull` stay project
+owned. A temporary `coverage-summary.json` is parsed into one Markdown table, then deleted. Raw
+coverage output never reaches the model. ESLint checks only supported existing edited files and
+returns at most 50 error diagnostics.
+
+All runners finish before one combined result is produced. Success stays model-silent. Failures use
+stable runner order and combine ESLint diagnostics with Vitest test/coverage sections. Coverage-only
+failure returns the table and concise threshold conclusions. First failure blocks for repair; retry
+continues once to prevent a Stop loop. Bounded details remain in `/tmp/jt-ai-hook-<repo>.jsonl`.
 
 Configure Node.js and Rust package release automation:
 

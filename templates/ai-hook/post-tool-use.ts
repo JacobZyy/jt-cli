@@ -1,4 +1,4 @@
-// jt-vitest-ai-hook
+// jt-ai-hook
 // Records files whose content changed after an AI patch.
 
 import { relative } from 'node:path'

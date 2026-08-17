@@ -1,4 +1,4 @@
-// jt-vitest-ai-hook
+// jt-ai-hook
 
 import type { Fingerprint } from './runtime'
 import { execFileSync } from 'node:child_process'

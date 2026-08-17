@@ -1,4 +1,4 @@
-// jt-vitest-ai-hook
+// jt-ai-hook
 
 import { createHash } from 'node:crypto'
 import {
@@ -56,10 +56,11 @@ export class RuntimeContext {
     this.cwd = resolveGitRoot(this.inputCwd)
 
     const repoId = hashKey(this.cwd).slice(0, 12)
-    this.stateDir = join('/tmp', `jt-vitest-ai-hook-state-${repoId}`)
-    this.logPath = process.env.JT_VITEST_AI_HOOK_LOG
-      ? resolve(this.cwd, process.env.JT_VITEST_AI_HOOK_LOG)
-      : join('/tmp', `jt-vitest-ai-hook-${repoId}.jsonl`)
+    this.stateDir = join('/tmp', `jt-ai-hook-state-${repoId}`)
+    const configuredLog = process.env.JT_AI_HOOK_LOG || process.env.JT_VITEST_AI_HOOK_LOG
+    this.logPath = configuredLog
+      ? resolve(this.cwd, configuredLog)
+      : join('/tmp', `jt-ai-hook-${repoId}.jsonl`)
   }
 
   writeLog(status: string, details: Record<string, unknown> = {}): void {
@@ -174,31 +175,37 @@ export class RuntimeContext {
   }
 }
 
-export function runStage(event: HookEventName, handler: (runtime: RuntimeContext) => void): void {
-  if (process.argv[2] !== 'codex') {
-    writeOutput({
-      continue: true,
-      systemMessage: '[jt-vitest-ai-hook] Missing or unsupported AI client id; validation was skipped.',
-    })
-    return
-  }
-
-  const runtime = new RuntimeContext(readInput())
-  try {
-    runtime.cleanupExpiredState()
-    if (runtime.input.hook_event_name !== event) {
-      runtime.writeLog('skipped-unexpected-event', { expectedEvent: event })
-      writeOutput({ continue: true })
+export function runStage(
+  event: HookEventName,
+  handler: (runtime: RuntimeContext) => Promise<void> | void,
+): void {
+  void (async () => {
+    if (process.argv[2] !== 'codex') {
+      writeOutput({
+        continue: true,
+        systemMessage: '[jt-ai-hook] Missing or unsupported AI client id; validation was skipped.',
+      })
       return
     }
-    handler(runtime)
-  }
-  catch (error) {
-    const detail = error instanceof Error ? error.stack || error.message : String(error)
-    runtime.writeLog('hook-runtime-error', { error: detail.slice(0, 4000) })
-    writeOutput({
-      continue: true,
-      systemMessage: `[jt-vitest-ai-hook] Hook runtime error; validation was skipped. Log: ${runtime.logPath}`,
-    })
-  }
+
+    let runtime: RuntimeContext | null = null
+    try {
+      runtime = new RuntimeContext(readInput())
+      runtime.cleanupExpiredState()
+      if (runtime.input.hook_event_name !== event) {
+        runtime.writeLog('skipped-unexpected-event', { expectedEvent: event })
+        writeOutput({ continue: true })
+        return
+      }
+      await handler(runtime)
+    }
+    catch (error) {
+      const detail = error instanceof Error ? error.stack || error.message : String(error)
+      runtime?.writeLog('hook-runtime-error', { error: detail.slice(0, 4000) })
+      writeOutput({
+        continue: true,
+        systemMessage: `[jt-ai-hook] Hook runtime error; validation was skipped.${runtime ? ` Log: ${runtime.logPath}` : ''}`,
+      })
+    }
+  })()
 }
