@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/JacobZyy/jt-cli/compare/v1.6.2...v1.7.0) (2026-08-17)
+
+
+### Features
+
+* **ai-hook:** unify Vitest and ESLint runners ([#26](https://github.com/JacobZyy/jt-cli/issues/26)) ([c67a3b7](https://github.com/JacobZyy/jt-cli/commit/c67a3b7debf04e0c7e3a0545bbe8269e7a0f43ed))
+
 ## [1.6.2](https://github.com/JacobZyy/jt-cli/compare/v1.6.1...v1.6.2) (2026-08-14)
 
 
