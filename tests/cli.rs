@@ -179,6 +179,16 @@ fn ai_hook_install_migrates_old_hooks_preserves_unrelated_hooks_and_is_byte_stab
         "// jt-ai-hook\n// stale owned template\n",
     )
     .unwrap();
+    let old_vitest_dir = project.path().join(".codex/hooks/jt-vitest");
+    fs::create_dir_all(&old_vitest_dir).unwrap();
+    fs::write(old_vitest_dir.join("stop.ts"), "// jt-vitest-ai-hook\n").unwrap();
+    fs::write(old_vitest_dir.join("runtime.ts"), "// custom runtime\n").unwrap();
+    fs::write(old_vitest_dir.join("custom.ts"), "// custom hook\n").unwrap();
+    let old_eslint_dir = project.path().join(".codex/hooks/nlab-eslint");
+    fs::create_dir_all(&old_eslint_dir).unwrap();
+    fs::write(old_eslint_dir.join("stop.ts"), "// nlab-eslint-ai-hook\n").unwrap();
+    let old_eslint_leaf = project.path().join(".codex/hooks/nlab-eslint-stop.mjs");
+    fs::write(&old_eslint_leaf, "// nlab-eslint-ai-hook\n").unwrap();
     fs::write(
         project.path().join(".codex/hooks.json"),
         r#"{
@@ -323,6 +333,17 @@ fn ai_hook_install_migrates_old_hooks_preserves_unrelated_hooks_and_is_byte_stab
     assert!(!vitest_source.contains("--coverage.skipFull"));
     assert!(!vitest_source.contains("stale owned template"));
     assert!(vitest_source.contains("isInAIHook: 'true'"));
+    assert!(!old_vitest_dir.join("stop.ts").exists());
+    assert_eq!(
+        fs::read_to_string(old_vitest_dir.join("runtime.ts")).unwrap(),
+        "// custom runtime\n"
+    );
+    assert_eq!(
+        fs::read_to_string(old_vitest_dir.join("custom.ts")).unwrap(),
+        "// custom hook\n"
+    );
+    assert!(!old_eslint_dir.exists());
+    assert!(!old_eslint_leaf.exists());
     let coverage_source =
         fs::read_to_string(hook_dir.join("stop/support/vitest-coverage.ts")).unwrap();
     for expected in [
@@ -421,6 +442,10 @@ fn ai_hook_rejects_invalid_existing_json_without_mutation() {
     init_git(project.path());
     write_ai_hook_package(project.path());
     fs::create_dir(project.path().join(".codex")).unwrap();
+    let legacy = project.path().join(".codex/hooks/jt-vitest/stop.ts");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let legacy_original = b"// jt-vitest-ai-hook\n";
+    fs::write(&legacy, legacy_original).unwrap();
     let path = project.path().join(".codex/hooks.json");
     let original = b"{not json\n";
     fs::write(&path, original).unwrap();
@@ -434,6 +459,7 @@ fn ai_hook_rejects_invalid_existing_json_without_mutation() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid"));
     assert_eq!(fs::read(path).unwrap(), original);
+    assert_eq!(fs::read(legacy).unwrap(), legacy_original);
 }
 
 #[cfg(unix)]
@@ -460,6 +486,34 @@ fn ai_hook_rejects_symlinked_file_without_mutating_target() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("symlinked file"));
+    assert_eq!(fs::read(target).unwrap(), original);
+    assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn ai_hook_legacy_cleanup_preserves_symlinked_file_and_target() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    init_git(project.path());
+    write_ai_hook_package(project.path());
+    let old_dir = project.path().join(".codex/hooks/jt-vitest");
+    fs::create_dir_all(&old_dir).unwrap();
+    let target = external.path().join("stop.ts");
+    let original = b"// jt-vitest-ai-hook\n";
+    fs::write(&target, original).unwrap();
+    let link = old_dir.join("stop.ts");
+    symlink(&target, &link).unwrap();
+
+    let output = jt()
+        .args(["ai-hook", "--checks", "vitest", "--agents", "codex"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
     assert_eq!(fs::read(target).unwrap(), original);
     assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
 }

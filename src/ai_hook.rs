@@ -16,6 +16,8 @@ const PRE_TOOL_USE_FILE: &str = ".codex/hooks/jt-ai-hook/pre-tool-use.ts";
 const POST_TOOL_USE_FILE: &str = ".codex/hooks/jt-ai-hook/post-tool-use.ts";
 const STOP_ENTRY_FILE: &str = ".codex/hooks/jt-ai-hook/stop-entry.ts";
 const OWNED_MARKER: &str = "jt-ai-hook";
+const LEGACY_VITEST_MARKER: &str = "jt-vitest-ai-hook";
+const LEGACY_ESLINT_MARKER: &str = "nlab-eslint-ai-hook";
 
 const COMMON_FILES: [(&str, &[u8]); 9] = [
     ("files.ts", include_bytes!("../templates/ai-hook/files.ts")),
@@ -77,7 +79,50 @@ const OWNED_HANDLER_TOKENS: [&str; 8] = [
     "jt __vitest-hook",
 ];
 
+const LEGACY_HOOK_GROUPS: [(Check, &str, &[&str], &str); 3] = [
+    (
+        Check::Vitest,
+        ".codex/hooks/jt-vitest",
+        &[
+            "coverage.ts",
+            "files.ts",
+            "post-tool-use.ts",
+            "pre-tool-use.ts",
+            "protocol.ts",
+            "runtime.ts",
+            "stop.ts",
+            "vitest.ts",
+        ],
+        LEGACY_VITEST_MARKER,
+    ),
+    (
+        Check::Eslint,
+        ".codex/hooks/nlab-eslint",
+        &[
+            "eslint.ts",
+            "files.ts",
+            "post-tool-use.ts",
+            "pre-tool-use.ts",
+            "profiles.ts",
+            "protocol.ts",
+            "runtime.ts",
+            "stop.ts",
+            "types.ts",
+        ],
+        LEGACY_ESLINT_MARKER,
+    ),
+    (
+        Check::Eslint,
+        ".codex/hooks",
+        &["nlab-eslint-stop.ts", "nlab-eslint-stop.mjs"],
+        LEGACY_ESLINT_MARKER,
+    ),
+];
+
+const LEGACY_HOOK_DIRS: [&str; 2] = [".codex/hooks/jt-vitest", ".codex/hooks/nlab-eslint"];
+
 type WritePlan = (PathBuf, Option<Vec<u8>>, Vec<u8>);
+type RemovalPlan = (PathBuf, Vec<u8>);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
 pub enum Check {
@@ -222,6 +267,15 @@ fn install(
             plan_owned_removal(root, name, &mut removals)?;
         }
     }
+    let mut legacy_removals = Vec::new();
+    for (_, directory, names, marker) in LEGACY_HOOK_GROUPS {
+        for name in names {
+            let relative = Path::new(directory).join(name);
+            if let Some(current) = read_owned_legacy_hook(root, &relative, marker)? {
+                legacy_removals.push((root.join(relative), current));
+            }
+        }
+    }
 
     let config_path = root.join(".codex/hooks.json");
     let current_config = read_install_file(root, &config_path)?;
@@ -239,10 +293,11 @@ fn install(
         writes.push((config_path.clone(), current_config.clone(), next));
     }
 
-    let changed = writes
+    let mut changed = writes
         .iter()
         .any(|(_, current, next)| current.as_deref() != Some(next.as_slice()))
-        || !removals.is_empty();
+        || !removals.is_empty()
+        || !legacy_removals.is_empty();
     for (path, current, next) in writes.iter().filter(|(path, _, _)| path != &config_path) {
         if current.as_deref() != Some(next.as_slice()) {
             atomic_write(root, path, current.as_deref(), next)
@@ -250,23 +305,17 @@ fn install(
         }
     }
     for (path, expected) in removals {
-        let current = fs::read(&path).map_err(|error| {
-            format!("cannot re-read {} before removal: {error}", path.display())
-        })?;
-        if current != expected {
-            return Err(format!(
-                "refuse to remove concurrently changed hook runner: {}",
-                path.display()
-            ));
-        }
-        fs::remove_file(&path)
-            .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+        remove_planned_file(root, &path, &expected)?;
     }
     if let Some((path, current, next)) = writes.iter().find(|(path, _, _)| path == &config_path)
         && current.as_deref() != Some(next.as_slice())
     {
         atomic_write(root, path, current.as_deref(), next).map_err(|error| error.to_string())?;
     }
+    for (path, expected) in legacy_removals {
+        remove_planned_file(root, &path, &expected)?;
+    }
+    changed |= remove_empty_legacy_directories(root)?;
     Ok(changed)
 }
 
@@ -294,7 +343,7 @@ fn plan_owned_write(
 fn plan_owned_removal(
     root: &Path,
     name: &str,
-    removals: &mut Vec<(PathBuf, Vec<u8>)>,
+    removals: &mut Vec<RemovalPlan>,
 ) -> Result<(), String> {
     let path = root.join(HOOK_DIR).join(name);
     let Some(current) = read_install_file(root, &path)? else {
@@ -310,6 +359,85 @@ fn plan_owned_removal(
     Ok(())
 }
 
+fn read_owned_legacy_hook(
+    root: &Path,
+    relative: &Path,
+    marker: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let path = root.join(relative);
+    if reject_symlink_path(root, &path).is_err() {
+        return Ok(None);
+    }
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+    };
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    let current =
+        fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    Ok(String::from_utf8_lossy(&current)
+        .contains(marker)
+        .then_some(current))
+}
+
+fn remove_planned_file(root: &Path, path: &Path, expected: &[u8]) -> Result<(), String> {
+    reject_symlink_path(root, path)?;
+    let current = fs::read(path)
+        .map_err(|error| format!("cannot re-read {} before removal: {error}", path.display()))?;
+    if current != expected {
+        return Err(format!(
+            "refuse to remove concurrently changed hook file: {}",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|error| format!("cannot remove {}: {error}", path.display()))
+}
+
+fn remove_empty_legacy_directories(root: &Path) -> Result<bool, String> {
+    let mut changed = false;
+    for relative in LEGACY_HOOK_DIRS {
+        let path = root.join(relative);
+        if reject_symlink_path(root, &path).is_err() {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        match fs::remove_dir(&path) {
+            Ok(()) => changed = true,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => return Err(format!("cannot remove {}: {error}", path.display())),
+        }
+    }
+    Ok(changed)
+}
+
 fn detect_selection(root: &Path) -> Result<CurrentSelection, String> {
     let mut current = CurrentSelection::default();
     for (check, name, _) in RUNNER_FILES {
@@ -318,15 +446,15 @@ fn detect_selection(root: &Path) -> Result<CurrentSelection, String> {
             current.configured = true;
         }
     }
-    if root.join(".codex/hooks/jt-vitest").exists() {
-        current.checks.insert(Check::Vitest);
-        current.agents.insert(Agent::Codex);
-        current.configured = true;
-    }
-    if root.join(".codex/hooks/nlab-eslint").exists() {
-        current.checks.insert(Check::Eslint);
-        current.agents.insert(Agent::Codex);
-        current.configured = true;
+    for (check, directory, names, marker) in LEGACY_HOOK_GROUPS {
+        for name in names {
+            let relative = Path::new(directory).join(name);
+            if read_owned_legacy_hook(root, &relative, marker)?.is_some() {
+                current.checks.insert(check);
+                current.agents.insert(Agent::Codex);
+                current.configured = true;
+            }
+        }
     }
 
     let config_path = root.join(".codex/hooks.json");
