@@ -37,6 +37,7 @@ fn help_lists_new_commands_only() {
     assert!(output.status.success());
     assert!(stdout.contains("jt repo cicd"));
     assert!(stdout.contains("jt node init"));
+    assert!(stdout.contains("jt nlab-api generate --help"));
     assert!(stdout.contains("jt cli bootstrap"));
     assert!(stdout.contains("jt ghostty install"));
     assert!(stdout.contains("jt zed-conf"));
@@ -52,6 +53,47 @@ fn help_lists_new_commands_only() {
             .any(|line| line.trim_start().starts_with("help "))
     );
     assert!(!stdout.contains("jt release init"));
+}
+
+#[test]
+fn nlab_api_help_and_invalid_repo_are_non_mutating() {
+    let group_help = jt().args(["nlab-api", "--help"]).output().unwrap();
+    assert!(group_help.status.success());
+    let group_help = String::from_utf8(group_help.stdout).unwrap();
+    for command in ["init", "generate", "routes", "migrate", "mock", "accept"] {
+        assert!(group_help.contains(command), "missing nlab-api {command}");
+    }
+
+    let init_help = jt().args(["nlab-api", "init", "--help"]).output().unwrap();
+    assert!(init_help.status.success());
+    let init_help = String::from_utf8(init_help.stdout).unwrap();
+    assert!(init_help.contains("--project"));
+    assert!(init_help.contains("--repo-path"));
+    assert!(init_help.contains("--layout"));
+
+    let help = jt()
+        .args(["nlab-api", "generate", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--project"));
+    assert!(help.contains("--timeout-seconds"));
+
+    let root = tempdir().unwrap();
+    let result = jt()
+        .args([
+            "nlab-api",
+            "generate",
+            "--project",
+            root.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("read nlab-api config"));
+    assert!(!root.path().join(".nlab").exists());
 }
 
 #[test]

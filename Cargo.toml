@@ -13,9 +13,19 @@ publish = false
 unsafe_code = "forbid"
 
 [dependencies]
+anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.9"
 cliclack = "0.5.4"
+ignore = "0.4.25"
+rand = "0.9.2"
+rand_chacha = "0.9.0"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+regex = "1.12.3"
 semver = "1"
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10.9"
 tempfile = "3.20.0"
+tree-sitter = "0.26.12"
+tree-sitter-java = "0.23.5"
