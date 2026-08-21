@@ -91,6 +91,75 @@ stable runner order and combine ESLint diagnostics with Vitest test/coverage sec
 failure returns the table and concise threshold conclusions. First failure blocks for repair; retry
 continues once to prevent a Stop loop. Bounded details remain in `/tmp/jt-ai-hook-<repo>.jsonl`.
 
+Initialize one frontend project from its real build, TypeScript, request, response-envelope, output,
+and backend Facade layout:
+
+```bash
+jt nlab-api init \
+  --project /path/to/frontend \
+  --repo-path /path/to/backend \
+  --branch feature-branch \
+  --app-name service_name
+
+jt nlab-api generate --project /path/to/frontend
+```
+
+`init` writes `.nlab/nlab-api.config.json`, then adds idempotent build-tool and TypeScript aliases. Current
+support targets Vite projects with an exported `nlabRequest` adapter. Vitest configs that merge the
+Vite config inherit those aliases without a duplicate edit. Existing `src/api` or `src/service`
+layout selects the matching preset; `--layout` overrides it.
+
+`generate` loads that config, runs `codegraph init` or `codegraph sync` once, reads the resulting
+SQLite index in read-only mode, parses Java with Tree-sitter, and builds one deterministic contract
+IR. Rust generates Draft OpenAPI 3.1, TypeScript DTO files, separate enum files, and API clients that
+reuse the detected request adapter. It does not invoke Bun, Node.js, Orval, Python, ZGateway, Mock
+generation, or business-source migration. A DTO field becomes a strict enum only when response
+provenance closes its full domain, or its Javadoc names one indexed Java enum whose value accessor
+can be projected completely; comment-only value lists remain non-strict metadata.
+
+Generated output includes:
+
+```text
+src/service/**/*.ts
+src/types/service-type/**/*.ts
+src/types/service-enums/**/*.ts
+.nlab/nlab-api.config.json
+.nlab/contract-ir.json
+.nlab/openapi.pending.json
+.nlab/frontend-manifest.json
+```
+
+The backend must remain on the configured branch; uncommitted Java or `pom.xml` changes stop
+generation. The frontend must remain outside the backend repository. Existing non-generated files,
+symlink path escapes, config drift, incomplete CodeGraph state, branch movement, ambiguous Facade
+overloads, and incomplete schema references stop the run. A legacy bridge manifest marked
+`service-paths` permits its owned generated files to be replaced during the first Facade-layout
+generation. stdout contains one JSON result; progress and diagnostics use stderr. The overall
+deadline defaults to 1200 seconds.
+
+Post-processing remains explicit and independently repeatable:
+
+```bash
+jt nlab-api routes --project /path/to/generated-output
+jt nlab-api migrate --project /path/to/new-output --legacy /path/to/old-output
+jt nlab-api mock --project /path/to/generated-output
+jt nlab-api accept \
+  --project /path/to/generated-output \
+  --repo-path /path/to/backend \
+  --mock generated
+```
+
+`routes` queries published testserver ZGateway routes through `zzcli`, updates contract IR and
+pending OpenAPI, then regenerates owned API clients. Transport failure may reuse a matching
+`.nlab/route-manifest.json` as explicit cached evidence; a successful zero-route response never
+falls back. Online lookup additionally requires `--allow-online`. `migrate` writes
+`.nlab/replacement-map.json`; with `--source-root` it reports only removed exports still imported by
+business code, and `--apply` rewrites proven path/name moves while preserving local symbol names.
+`mock` creates deterministic static JSON plus Whistle rules using the response envelope detected by
+`init`, protecting unmanaged or manually modified files through hashes. `accept` verifies backend
+commit identity, route state, migration/OpenAPI identity, Mock/OpenAPI identity, and the explicit
+Mock decision before promoting pending OpenAPI to `.nlab/openapi.json`.
+
 Configure Node.js and Rust package release automation:
 
 ```bash

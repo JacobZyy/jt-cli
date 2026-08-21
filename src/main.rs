@@ -1,6 +1,7 @@
 mod ai_hook;
 mod cli;
 mod icon;
+mod nlab_api;
 mod node;
 mod release;
 mod upgrade;
@@ -26,6 +27,7 @@ use semver::Version;
 Examples:
   jt repo cicd
   jt node init
+  jt nlab-api generate --help
   jt cli bootstrap
   jt ghostty install
   jt zed-conf
@@ -56,6 +58,14 @@ enum Commands {
     Node {
         #[command(subcommand)]
         command: NodeCommand,
+    },
+    #[command(
+        name = "nlab-api",
+        about = "Generate frontend contracts from NLab Java APIs"
+    )]
+    NlabApi {
+        #[command(subcommand)]
+        command: NlabApiCommand,
     },
     #[command(
         name = "cli",
@@ -105,6 +115,35 @@ enum NodeCommand {
         about = "Initialize global Node/pnpm environment with Vite+"
     )]
     Init,
+}
+
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum NlabApiCommand {
+    #[command(
+        name = "init",
+        about = "Inspect and configure a frontend project for nlab-api generation"
+    )]
+    Init(nlab_api::InitArgs),
+    #[command(
+        name = "generate",
+        about = "Generate placeholder OpenAPI, TypeScript types, and API clients"
+    )]
+    Generate(nlab_api::GenerateArgs),
+    #[command(name = "routes", about = "Resolve placeholder paths through ZGateway")]
+    Routes(nlab_api::RoutesArgs),
+    #[command(name = "migrate", about = "Map old generated APIs to a new snapshot")]
+    Migrate(nlab_api::MigrateArgs),
+    #[command(
+        name = "mock",
+        about = "Generate deterministic mock JSON and Whistle rules"
+    )]
+    Mock(nlab_api::MockArgs),
+    #[command(
+        name = "accept",
+        about = "Promote a verified pending contract snapshot"
+    )]
+    Accept(nlab_api::AcceptArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -172,6 +211,24 @@ fn main() -> ExitCode {
         Commands::Node {
             command: NodeCommand::Init,
         } => node_init(),
+        Commands::NlabApi {
+            command: NlabApiCommand::Init(args),
+        } => ExitCode::from(nlab_api::init(args)),
+        Commands::NlabApi {
+            command: NlabApiCommand::Generate(args),
+        } => ExitCode::from(nlab_api::generate(args)),
+        Commands::NlabApi {
+            command: NlabApiCommand::Routes(args),
+        } => ExitCode::from(nlab_api::routes(args)),
+        Commands::NlabApi {
+            command: NlabApiCommand::Migrate(args),
+        } => ExitCode::from(nlab_api::migrate(args)),
+        Commands::NlabApi {
+            command: NlabApiCommand::Mock(args),
+        } => ExitCode::from(nlab_api::mock(args)),
+        Commands::NlabApi {
+            command: NlabApiCommand::Accept(args),
+        } => ExitCode::from(nlab_api::accept(args)),
         Commands::Cli {
             command: CliCommand::Bootstrap,
         } => cli_bootstrap(),

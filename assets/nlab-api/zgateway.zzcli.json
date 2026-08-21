@@ -1,0 +1,46 @@
+{
+  "id": "zgateway",
+  "version": "1.0.0",
+  "metadata": {
+    "read_timeout_in_ms": 15000,
+    "routing": {
+      "domainMappings": {
+        "zgatewayconsole": {
+          "type": "custom",
+          "scheme": "https",
+          "envs": {
+            "testserver": "zgatewayconsole.test.zhuanspirit.com",
+            "online": "zgatewayconsole.zhuanspirit.com"
+          },
+          "defaultEnv": "testserver",
+          "supportedEnvs": ["testserver", "online"]
+        }
+      }
+    }
+  },
+  "commands": {
+    "zgateway": {
+      "type": "group",
+      "description": "ZGateway HttpToScfFilter route query",
+      "children": {
+        "query": {
+          "type": "command",
+          "description": "Query published routes by SCF service",
+          "routing": { "domainMapping": "zgatewayconsole" },
+          "output_renderer": "json",
+          "http_request_metadata": {
+            "method": "GET",
+            "path": "/api/http-to-scf/routes-by-scf-service",
+            "querySchema": {
+              "appName": {
+                "type": "string",
+                "realName": "scfServiceName",
+                "required": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
