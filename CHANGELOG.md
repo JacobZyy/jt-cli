@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/JacobZyy/jt-cli/compare/v1.7.1...v1.8.0) (2026-08-21)
+
+
+### Features
+
+* **nlab-api:** add Rust contract generator ([#30](https://github.com/JacobZyy/jt-cli/issues/30)) ([94d27c7](https://github.com/JacobZyy/jt-cli/commit/94d27c70dba5d74ba16782c8a304738b7eb14f0d))
+
 ## [1.7.1](https://github.com/JacobZyy/jt-cli/compare/v1.7.0...v1.7.1) (2026-08-17)
 
 
