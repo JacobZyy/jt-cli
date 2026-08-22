@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/JacobZyy/jt-cli/compare/v1.9.0...v1.9.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* **nlab-api:** skip missing legacy enums ([#34](https://github.com/JacobZyy/jt-cli/issues/34)) ([0190bcb](https://github.com/JacobZyy/jt-cli/commit/0190bcbddfa6cee9ada97489864379aaae0d279c))
+
 ## [1.9.0](https://github.com/JacobZyy/jt-cli/compare/v1.8.0...v1.9.0) (2026-08-22)
 
 
