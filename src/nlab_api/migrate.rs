@@ -9,6 +9,8 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::naming::upper_camel;
+
 #[derive(Clone, Debug, Args)]
 pub struct MigrateArgs {
     /// New generated artifact directory
@@ -94,6 +96,56 @@ pub fn run(args: MigrateArgs) -> u8 {
     }
 }
 
+pub(crate) fn snapshot_legacy(project: &Path) -> Result<Option<tempfile::TempDir>> {
+    let manifest_path = project.join(".nlab/frontend-manifest.json");
+    let stable_openapi = project.join(".nlab/openapi.json");
+    if !manifest_path.is_file() || !stable_openapi.is_file() {
+        return Ok(None);
+    }
+    let manifest = read_manifest(project)?;
+    let snapshot = tempfile::tempdir().context("create legacy generation snapshot")?;
+    fs::create_dir_all(snapshot.path().join(".nlab"))?;
+    fs::copy(
+        &manifest_path,
+        snapshot.path().join(".nlab/frontend-manifest.json"),
+    )?;
+    fs::copy(&stable_openapi, snapshot.path().join(".nlab/openapi.json"))?;
+    for relative in manifest
+        .api_files
+        .iter()
+        .chain(&manifest.type_files)
+        .chain(&manifest.enum_files)
+    {
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            bail!("unsafe legacy generated path: {relative}");
+        }
+        let source = project.join(relative_path);
+        if !source.is_file() {
+            continue;
+        }
+        let target = snapshot.path().join(relative_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, target)?;
+    }
+    Ok(Some(snapshot))
+}
+
+pub(crate) fn automatic(project: &Path, legacy: &Path, source_root: &Path) -> Result<Value> {
+    run_inner(MigrateArgs {
+        project: project.to_owned(),
+        legacy: legacy.to_owned(),
+        source_root: Some(source_root.to_owned()),
+        apply: true,
+    })
+}
+
 fn run_inner(args: MigrateArgs) -> Result<Value> {
     let project = args
         .project
@@ -127,7 +179,6 @@ fn run_inner(args: MigrateArgs) -> Result<Value> {
                 new_export: String::new(),
                 status: ReplacementStatus::Removed,
             });
-            unresolved.push(format!("removed operation requires decision: {key}"));
             continue;
         };
         let moved = old.file != new.file;
@@ -175,7 +226,7 @@ fn run_inner(args: MigrateArgs) -> Result<Value> {
         &new_type_files,
         &inferred_names,
     )?;
-    let mut enum_members = enum_replacements(&old_openapi, &new_openapi, &mut unresolved);
+    let mut enum_members = enum_replacements(&old_openapi, &new_openapi);
     enum_members.extend(generated_enum_replacements(
         &legacy,
         &old_type_files,
@@ -296,6 +347,72 @@ fn inferred_type_names(
         new_root,
         new_type_files,
     )?);
+    inferred.extend(linked_field_enum_type_names(
+        old_openapi,
+        new_openapi,
+        new_root,
+        new_type_files,
+        &inferred,
+    )?);
+    Ok(inferred)
+}
+
+fn linked_field_enum_type_names(
+    old_openapi: &Value,
+    new_openapi: &Value,
+    new_root: &Path,
+    new_files: &[String],
+    inferred_schemas: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let new_enums = enum_exports(new_root, new_files)?;
+    let mut inferred = BTreeMap::new();
+    for (old_schema_name, new_schema_name) in inferred_schemas {
+        let Some(old_properties) = old_openapi
+            .pointer(&format!("/components/schemas/{old_schema_name}/properties"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let Some(new_properties) = new_openapi
+            .pointer(&format!("/components/schemas/{new_schema_name}/properties"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for (field, old_property) in old_properties {
+            if old_property.get("enum").and_then(Value::as_array).is_none() {
+                continue;
+            }
+            let Some(enum_fqn) = new_properties
+                .get(field)
+                .and_then(|property| property.pointer("/x-nlab-linked-enum/enumFqn"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let enum_name = enum_fqn
+                .rsplit('.')
+                .next()
+                .unwrap_or(enum_fqn)
+                .trim_end_matches("Enum");
+            let mut candidates = new_enums
+                .keys()
+                .map(|candidate| (enum_name_score(enum_name, candidate), candidate))
+                .filter(|(score, _)| *score > 0)
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| right.cmp(left));
+            if let Some((best_score, best_name)) = candidates.first()
+                && candidates
+                    .get(1)
+                    .is_none_or(|(score, _)| score < best_score)
+            {
+                inferred.insert(
+                    format!("{old_schema_name}{}", upper_camel(field)),
+                    (*best_name).clone(),
+                );
+            }
+        }
+    }
     Ok(inferred)
 }
 
@@ -714,11 +831,7 @@ fn exported_symbols(root: &Path, files: &[String]) -> Result<BTreeMap<String, Ve
     Ok(symbols)
 }
 
-fn enum_replacements(
-    old: &Value,
-    new: &Value,
-    unresolved: &mut Vec<String>,
-) -> Vec<EnumMemberReplacement> {
+fn enum_replacements(old: &Value, new: &Value) -> Vec<EnumMemberReplacement> {
     let old = enum_targets(old);
     let new = enum_targets(new);
     let mut output = Vec::new();
@@ -727,16 +840,13 @@ fn enum_replacements(
             continue;
         };
         for (wire, old_member) in old_values {
-            match new_values.get(&wire) {
-                Some(new_member) => output.push(EnumMemberReplacement {
+            if let Some(new_member) = new_values.get(&wire) {
+                output.push(EnumMemberReplacement {
                     target: target.clone(),
                     wire_value: wire,
                     old_member,
                     new_member: new_member.clone(),
-                }),
-                None => unresolved.push(format!(
-                    "enum wire value removed: {target} {wire} ({old_member})"
-                )),
+                });
             }
         }
     }
@@ -1199,6 +1309,48 @@ mod tests {
         assert_eq!(
             enum_name_score("CreateRecycleOrderReqModelType", "TodayCountTypeCode"),
             0
+        );
+    }
+
+    #[test]
+    fn linked_field_enum_mapping_uses_java_enum_identity() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("reservationModelType.ts"),
+            "export const ReservationModelType = { SPECIFIC: 1, UNKNOWN: 2, OTHER: 3, } as const;\n",
+        )
+        .unwrap();
+        let old = serde_json::json!({
+            "components": { "schemas": { "CreateReq": { "properties": {
+                "modelType": { "type": "number", "enum": [1, 2, 3] }
+            } } } }
+        });
+        let new = serde_json::json!({
+            "components": { "schemas": { "CreateReq": { "properties": {
+                "modelType": {
+                    "type": "number",
+                    "enum": [1, 2, 3],
+                    "x-nlab-linked-enum": {
+                        "enumFqn": "p.ReservationModelTypeEnum",
+                        "accessor": "getType"
+                    }
+                }
+            } } } }
+        });
+        let schemas = BTreeMap::from([("CreateReq".to_owned(), "CreateReq".to_owned())]);
+
+        let inferred = linked_field_enum_type_names(
+            &old,
+            &new,
+            root.path(),
+            &["reservationModelType.ts".to_owned()],
+            &schemas,
+        )
+        .unwrap();
+
+        assert_eq!(
+            inferred.get("CreateReqModelType").map(String::as_str),
+            Some("ReservationModelType")
         );
     }
 

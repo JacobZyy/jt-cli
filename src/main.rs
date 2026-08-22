@@ -125,23 +125,30 @@ enum NlabApiCommand {
         about = "Inspect and configure a frontend project for nlab-api generation"
     )]
     Init(nlab_api::InitArgs),
-    #[command(
-        name = "generate",
-        about = "Generate placeholder OpenAPI, TypeScript types, and API clients"
-    )]
+    #[command(name = "generate", about = "Run complete frontend API generation")]
     Generate(nlab_api::GenerateArgs),
-    #[command(name = "routes", about = "Resolve placeholder paths through ZGateway")]
+    #[command(
+        name = "routes",
+        about = "Resolve placeholder paths through ZGateway",
+        hide = true
+    )]
     Routes(nlab_api::RoutesArgs),
-    #[command(name = "migrate", about = "Map old generated APIs to a new snapshot")]
+    #[command(
+        name = "migrate",
+        about = "Map old generated APIs to a new snapshot",
+        hide = true
+    )]
     Migrate(nlab_api::MigrateArgs),
     #[command(
         name = "mock",
-        about = "Generate deterministic mock JSON and Whistle rules"
+        about = "Generate deterministic mock JSON and Whistle rules",
+        hide = true
     )]
     Mock(nlab_api::MockArgs),
     #[command(
         name = "accept",
-        about = "Promote a verified pending contract snapshot"
+        about = "Promote a verified pending contract snapshot",
+        hide = true
     )]
     Accept(nlab_api::AcceptArgs),
 }

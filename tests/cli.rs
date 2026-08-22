@@ -60,8 +60,14 @@ fn nlab_api_help_and_invalid_repo_are_non_mutating() {
     let group_help = jt().args(["nlab-api", "--help"]).output().unwrap();
     assert!(group_help.status.success());
     let group_help = String::from_utf8(group_help.stdout).unwrap();
-    for command in ["init", "generate", "routes", "migrate", "mock", "accept"] {
+    for command in ["init", "generate"] {
         assert!(group_help.contains(command), "missing nlab-api {command}");
+    }
+    for command in ["routes", "migrate", "mock", "accept"] {
+        assert!(
+            !group_help.contains(command),
+            "visible debug command {command}"
+        );
     }
 
     let init_help = jt().args(["nlab-api", "init", "--help"]).output().unwrap();

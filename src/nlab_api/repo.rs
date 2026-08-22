@@ -53,18 +53,6 @@ pub fn inspect(repo: &Path, requested_branch: &str) -> Result<RepositoryTarget> 
         bail!("backend branch HEAD mismatch: {commit} != {requested_commit}");
     }
 
-    let status = git_bytes(
-        &root,
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
-    let dirty_contract_files = contract_changes(&status);
-    if !dirty_contract_files.is_empty() {
-        bail!(
-            "backend has uncommitted Java or pom.xml changes: {}",
-            dirty_contract_files.join(", ")
-        );
-    }
-
     Ok(RepositoryTarget {
         root,
         branch,
@@ -84,7 +72,7 @@ pub fn sync_codegraph(target: &RepositoryTarget, deadline: Instant) -> Result<()
         .arg(&target.root)
         .current_dir(&target.root)
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::null());
     let status = run_until(&mut command, deadline)
         .with_context(|| format!("codegraph {action} {}", target.root.display()))?;
     if !status.success() {
@@ -155,40 +143,4 @@ where
         bail!("Git failed with status {}: {detail}", output.status);
     }
     Ok(output.stdout)
-}
-
-fn contract_changes(status: &[u8]) -> Vec<String> {
-    let mut result = status
-        .split(|byte| *byte == 0)
-        .filter(|entry| entry.len() > 3)
-        .filter_map(|entry| std::str::from_utf8(&entry[3..]).ok())
-        .filter(|path| is_contract_path(path))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    result.sort();
-    result.dedup();
-    result
-}
-
-fn is_contract_path(path: &str) -> bool {
-    path.ends_with(".java")
-        || path == "pom.xml"
-        || path
-            .rsplit_once('/')
-            .is_some_and(|(_, name)| name == "pom.xml")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::contract_changes;
-
-    #[test]
-    fn clean_check_ignores_codegraph_but_keeps_contract_changes() {
-        let status =
-            b"?? .codegraph/codegraph.db\0 M service/A.java\0?? docs/readme.md\0 M pom.xml\0";
-        assert_eq!(
-            contract_changes(status),
-            vec!["pom.xml".to_owned(), "service/A.java".to_owned()]
-        );
-    }
 }

@@ -3,6 +3,7 @@ use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
+use super::coded_values;
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, nearest_usage_directory, type_output_path};
 use super::model::{
@@ -106,7 +107,7 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<FrontendArtif
 
     let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
     for operation in &ir.operations {
-        let relative = api_output_path(operation, &config.backend.contract_root)?;
+        let relative = api_output_path(operation, &config.backend.contract_roots)?;
         grouped
             .entry(join_path(
                 &config.frontend.layout.implementation_dir,
@@ -143,7 +144,7 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<FrontendArtif
 
 fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
     let base_names = schema_names(&ir.schemas);
-    let usage_directories = schema_usage_directories(ir, &config.backend.contract_root)?;
+    let usage_directories = schema_usage_directories(ir, &config.backend.contract_roots)?;
     let base = ir
         .schemas
         .keys()
@@ -200,7 +201,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
     let mut patch_enums = HashMap::<String, String>::new();
     let mut field_enums = HashMap::<String, String>::new();
     for operation in &ir.operations {
-        let directory = type_output_path(operation, &config.backend.contract_root)?;
+        let directory = type_output_path(operation, &config.backend.contract_roots)?;
         for patch in operation
             .semantic_patches
             .iter()
@@ -224,20 +225,33 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
     }
     for (fqn, schema) in &ir.schemas {
         for field in &schema.fields {
-            let Some(linked) = &field.linked_enum else {
+            let specification = if let Some(linked) = &field.linked_enum {
+                Some((
+                    format!("{}#{}", linked.enum_fqn, linked.accessor),
+                    linked.values.clone(),
+                    enum_seed_from_parts(&linked.enum_fqn, &linked.accessor, &field.name),
+                ))
+            } else {
+                field.declared_values.as_ref().map(|declared| {
+                    (
+                        format!("comment:{fqn}#{}", field.name),
+                        coded_values::with_fallback_keys(&field.name, &declared.values),
+                        enum_seed_from_parts(fqn, &field.name, &field.name),
+                    )
+                })
+            };
+            let Some((identity, values, seed)) =
+                specification.filter(|(_, values, _)| !values.is_empty())
+            else {
                 continue;
             };
-            let identity = format!("{}#{}", linked.enum_fqn, linked.accessor);
             if let Some(existing) = enum_values.get(&identity) {
-                if existing != &linked.values {
+                if existing != &values {
                     bail!("linked enum evidence changed for {identity} within one snapshot");
                 }
             } else {
-                enum_values.insert(identity.clone(), linked.values.clone());
-                seeds.insert(
-                    enum_symbol(&identity),
-                    enum_seed_from_parts(&linked.enum_fqn, &linked.accessor, &field.name),
-                );
+                enum_values.insert(identity.clone(), values);
+                seeds.insert(enum_symbol(&identity), seed);
             }
             enum_usages
                 .entry(identity.clone())
@@ -255,7 +269,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
         };
         let directory = join_path(
             &config.frontend.layout.types_dir,
-            &type_output_path(operation, &config.backend.contract_root)?,
+            &type_output_path(operation, &config.backend.contract_roots)?,
         );
         aliases.insert(
             operation.key.clone(),
@@ -280,7 +294,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
             let name = names[&data_symbol(&operation.key)].clone();
             let directory = join_path(
                 &config.frontend.layout.types_dir,
-                &type_output_path(operation, &config.backend.contract_root)?,
+                &type_output_path(operation, &config.backend.contract_roots)?,
             );
             Ok((
                 operation.key.clone(),
@@ -327,11 +341,11 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
 
 fn schema_usage_directories(
     ir: &ContractIr,
-    contract_root: &str,
+    contract_roots: &[String],
 ) -> Result<HashMap<String, BTreeSet<String>>> {
     let mut usages = HashMap::<String, BTreeSet<String>>::new();
     for operation in &ir.operations {
-        let directory = type_output_path(operation, contract_root)?;
+        let directory = type_output_path(operation, contract_roots)?;
         let mut schemas = reachable_schemas(&operation.response, &ir.schemas);
         if let Some(request) = &operation.request {
             schemas.extend(reachable_schemas(request, &ir.schemas));
@@ -916,6 +930,7 @@ fn enum_key(value: &WireValue) -> String {
             .to_ascii_uppercase()
             .replace(|character: char| !character.is_ascii_alphanumeric(), "_"),
         WireValue::Number(value) => format!("VALUE_{value}"),
+        WireValue::Decimal(value) => format!("VALUE_{}", value.to_string().replace('.', "_")),
     }
 }
 
@@ -923,6 +938,7 @@ fn wire_literal(value: &WireValue) -> String {
     match value {
         WireValue::String(value) => ts_string(value),
         WireValue::Number(value) => value.to_string(),
+        WireValue::Decimal(value) => value.to_string(),
     }
 }
 
@@ -1019,59 +1035,124 @@ mod tests {
     }
 
     #[test]
-    fn declared_values_do_not_create_strict_shared_enum() {
-        let schema = Schema {
-            fqn: "p.BizButton".to_owned(),
-            name: "BizButton".to_owned(),
-            source_path: "BizButton.java".to_owned(),
-            description: None,
-            fields: vec![super::super::model::Field {
-                name: "actionCode".to_owned(),
-                java_type: TypeRef {
-                    name: "String".to_owned(),
-                    arguments: vec![],
-                    array_depth: 0,
-                },
-                optional: false,
-                description: None,
-                declared_values: Some(super::super::model::CodedValues {
-                    name: "ActionCodeValues".to_owned(),
-                    source: super::super::model::CodedValueSource::Comment,
-                    values: vec![super::super::model::CodedValue {
-                        value: WireValue::String("wrong".to_owned()),
-                        key: None,
-                        label: "注释值".to_owned(),
-                    }],
-                }),
-                linked_enum: None,
-            }],
+    fn declared_values_create_const_map() {
+        let integer = TypeRef {
+            name: "Integer".to_owned(),
+            arguments: vec![],
+            array_depth: 0,
         };
-        let target = TypeTarget {
-            name: "BizButton".to_owned(),
-            path: "types/bizButton.ts".to_owned(),
-        };
-
-        let base_targets = HashMap::new();
-        let aliases = HashMap::new();
-        let enum_targets = HashMap::new();
-        let field_enum_targets = HashMap::new();
-        let config = config();
-        let source = render_interface(
-            &schema,
-            &target,
-            InterfaceRender {
-                base_targets: &base_targets,
-                aliases: &aliases,
-                operation: None,
-                enum_targets: &enum_targets,
-                field_enum_targets: &field_enum_targets,
-                config: &config,
-            },
+        let refurb_status_values = super::super::coded_values::parse(
+            "status",
+            Some("整备单状态：10-待整备 20-整备中 30-待拍照 80-整备完成 90-取消整备"),
+            None,
+            &integer,
         )
         .unwrap();
+        let other_status_values = super::super::coded_values::parse(
+            "status",
+            Some("其他状态：1-开始 2-结束"),
+            None,
+            &integer,
+        )
+        .unwrap();
+        let ir = serde_json::from_value::<ContractIr>(serde_json::json!({
+            "target": {
+                "appName": "app",
+                "branch": "feature",
+                "commit": "abc",
+                "codegraphVersion": "1",
+                "codegraphExtractionVersion": "1"
+            },
+            "operations": [{
+                "key": "IGoodsQueryFacade#queryRefurbOrderList",
+                "facadeName": "IGoodsQueryFacade",
+                "facadeFqn": "p.contract.checkapp.IGoodsQueryFacade",
+                "methodName": "queryRefurbOrderList",
+                "signature": "RefurbOrderVO queryRefurbOrderList()",
+                "description": null,
+                "contractSource": "contract/src/main/java/p/contract/checkapp/IGoodsQueryFacade.java",
+                "request": null,
+                "response": { "name": "p.RefurbOrderVO", "arguments": [], "arrayDepth": 0 },
+                "requestSchema": null,
+                "responseSchema": "p.RefurbOrderVO",
+                "service": null,
+                "route": {
+                    "status": "placeholder",
+                    "source": "placeholder",
+                    "method": "POST",
+                    "path": "/query",
+                    "host": null
+                },
+                "semanticPatches": [],
+                "warnings": []
+            }],
+            "schemas": {
+                "p.RefurbOrderVO": {
+                    "fqn": "p.RefurbOrderVO",
+                    "name": "RefurbOrderVO",
+                    "sourcePath": "RefurbOrderVO.java",
+                    "description": null,
+                    "fields": [{
+                        "name": "status",
+                        "javaType": { "name": "Integer", "arguments": [], "arrayDepth": 0 },
+                        "optional": false,
+                        "description": "整备单状态",
+                        "declaredValues": refurb_status_values
+                    }]
+                },
+                "p.OtherVO": {
+                    "fqn": "p.OtherVO",
+                    "name": "OtherVO",
+                    "sourcePath": "OtherVO.java",
+                    "description": null,
+                    "fields": [{
+                        "name": "status",
+                        "javaType": { "name": "Integer", "arguments": [], "arrayDepth": 0 },
+                        "optional": false,
+                        "description": "其他状态",
+                        "declaredValues": other_status_values
+                    }]
+                }
+            }
+        }))
+        .unwrap();
 
-        assert!(source.contains("actionCode: string;"));
-        assert!(!source.contains("export const BizButtonActionCode"));
+        let config = config();
+        let openapi = super::super::openapi::generate(&ir, &config).unwrap();
+        let document = serde_json::from_str::<serde_json::Value>(&openapi.source).unwrap();
+        let status_schema =
+            &document["components"]["schemas"]["RefurbOrderVO"]["properties"]["status"];
+        assert_eq!(
+            status_schema["enum"],
+            serde_json::json!([10, 20, 30, 80, 90])
+        );
+        assert_eq!(
+            status_schema["x-enum-varnames"],
+            serde_json::json!([
+                "STATUS_10",
+                "STATUS_20",
+                "STATUS_30",
+                "STATUS_80",
+                "STATUS_90"
+            ])
+        );
+
+        let artifact = generate(&ir, &config).unwrap();
+        let enum_source = artifact
+            .files
+            .values()
+            .find(|source| source.contains("export const RefurbOrderVOStatus ="))
+            .expect("RefurbOrderVOStatus const map");
+        assert!(enum_source.contains("STATUS_10: 10"));
+        assert!(enum_source.contains("STATUS_90: 90"));
+        assert!(enum_source.contains("export type RefurbOrderVOStatus ="));
+        let type_source = artifact
+            .files
+            .values()
+            .find(|source| source.contains("export interface RefurbOrderVO"))
+            .expect("RefurbOrderVO type");
+        assert!(type_source.contains("import type { RefurbOrderVOStatus }"));
+        assert!(type_source.contains("status: RefurbOrderVOStatus;"));
     }
 
     #[test]

@@ -55,6 +55,16 @@ pub fn run(args: MockArgs) -> u8 {
     }
 }
 
+pub(crate) fn automatic(project: &Path, settings: &super::config::MockSettings) -> Result<Value> {
+    run_inner(MockArgs {
+        project: project.to_owned(),
+        output_root: settings.output_root.clone(),
+        seed: settings.seed,
+        dry_run: false,
+        force: false,
+    })
+}
+
 fn run_inner(args: MockArgs) -> Result<Value> {
     validate_relative_root(&args.output_root)?;
     let project = args

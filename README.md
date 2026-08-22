@@ -112,10 +112,12 @@ layout selects the matching preset; `--layout` overrides it.
 `generate` loads that config, runs `codegraph init` or `codegraph sync` once, reads the resulting
 SQLite index in read-only mode, parses Java with Tree-sitter, and builds one deterministic contract
 IR. Rust generates Draft OpenAPI 3.1, TypeScript DTO files, separate enum files, and API clients that
-reuse the detected request adapter. It does not invoke Bun, Node.js, Orval, Python, ZGateway, Mock
-generation, or business-source migration. A DTO field becomes a strict enum only when response
-provenance closes its full domain, or its Javadoc names one indexed Java enum whose value accessor
-can be projected completely; comment-only value lists remain non-strict metadata.
+reuse the detected request adapter. The same command then queries testserver ZGateway on a best-effort
+basis, migrates business imports from the fixed previous `.nlab` snapshot, optionally generates Mock
+files when `mock.enabled` is true, promotes the stable OpenAPI snapshot, and writes one final report.
+It does not invoke Bun, Node.js, Orval, Python, frontend typecheck, tests, builds, or lint. A DTO field
+uses a complete code-provenance enum first, then a complete linked Java enum, then explicit comment or
+annotation values; otherwise it remains its original scalar type.
 
 Generated output includes:
 
@@ -125,40 +127,22 @@ src/types/service-type/**/*.ts
 src/types/service-enums/**/*.ts
 .nlab/nlab-api.config.json
 .nlab/contract-ir.json
-.nlab/openapi.pending.json
+.nlab/openapi.json
 .nlab/frontend-manifest.json
+.nlab/replacement-map.json
+.nlab/generate-report.json
 ```
 
-The backend must remain on the configured branch; uncommitted Java or `pom.xml` changes stop
-generation. The frontend must remain outside the backend repository. Existing non-generated files,
+The backend must remain on the configured branch, but generation reads its current working-tree Java
+and POM content. The frontend must remain outside the backend repository. Existing non-generated files,
 symlink path escapes, config drift, incomplete CodeGraph state, branch movement, ambiguous Facade
 overloads, and incomplete schema references stop the run. A legacy bridge manifest marked
 `service-paths` permits its owned generated files to be replaced during the first Facade-layout
-generation. stdout contains one JSON result; progress and diagnostics use stderr. The overall
-deadline defaults to 1200 seconds.
-
-Post-processing remains explicit and independently repeatable:
-
-```bash
-jt nlab-api routes --project /path/to/generated-output
-jt nlab-api migrate --project /path/to/new-output --legacy /path/to/old-output
-jt nlab-api mock --project /path/to/generated-output
-jt nlab-api accept \
-  --project /path/to/generated-output \
-  --repo-path /path/to/backend \
-  --mock generated
-```
-
-`routes` queries published testserver ZGateway routes through `zzcli`, updates contract IR and
-pending OpenAPI, then regenerates owned API clients. Transport failure may reuse a matching
-`.nlab/route-manifest.json` as explicit cached evidence; a successful zero-route response never
-falls back. Online lookup additionally requires `--allow-online`. `migrate` writes
-`.nlab/replacement-map.json`; with `--source-root` it reports only removed exports still imported by
-business code, and `--apply` rewrites proven path/name moves while preserving local symbol names.
-`mock` creates deterministic static JSON plus Whistle rules using the response envelope detected by
-`init`, protecting unmanaged or manually modified files through hashes. `accept` verifies backend
-commit identity, route state, migration/OpenAPI identity, Mock/OpenAPI identity, and the explicit
-Mock decision before promoting pending OpenAPI to `.nlab/openapi.json`.
+generation. Missing enums, external value sources, Gateway errors, missing routes, removed unused
+operations, and Mock being disabled do not stop generation; they remain in
+`.nlab/generate-report.json`. stdout contains one final JSON result. stderr contains only stage and
+percentage progress events outside a TTY; a TTY shows one progress bar. The overall deadline defaults
+to 1200 seconds.
 
 Configure Node.js and Rust package release automation:
 

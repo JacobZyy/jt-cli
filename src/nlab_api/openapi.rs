@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
+use super::coded_values;
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, type_output_path};
 use super::model::{
@@ -197,14 +198,14 @@ fn operation_object(
         "x-nlab-api-output".to_owned(),
         json!(join_path(
             &config.frontend.layout.implementation_dir,
-            &api_output_path(operation, &config.backend.contract_root)?
+            &api_output_path(operation, &config.backend.contract_roots)?
         )),
     );
     value.insert(
         "x-nlab-type-output".to_owned(),
         json!(join_path(
             &config.frontend.layout.types_dir,
-            &type_output_path(operation, &config.backend.contract_root)?
+            &type_output_path(operation, &config.backend.contract_roots)?
         )),
     );
     if let Some(service) = &operation.service {
@@ -311,6 +312,10 @@ fn schema_object(
                 }),
             );
         } else if let Some(values) = &field.declared_values {
+            apply_enum(
+                &mut property,
+                &coded_values::with_fallback_keys(&field.name, &values.values),
+            );
             property
                 .as_object_mut()
                 .expect("schema object")
@@ -544,6 +549,7 @@ fn neutral_enum_name(value: &WireValue) -> String {
     let value = match value {
         WireValue::String(value) => value.clone(),
         WireValue::Number(value) => format!("VALUE_{value}"),
+        WireValue::Decimal(value) => format!("VALUE_{}", value.to_string().replace('.', "_")),
     };
     let mut result = value
         .chars()
@@ -572,6 +578,7 @@ fn wire_json(value: &WireValue) -> Value {
     match value {
         WireValue::String(value) => json!(value),
         WireValue::Number(value) => json!(value),
+        WireValue::Decimal(value) => json!(value),
     }
 }
 

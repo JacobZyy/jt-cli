@@ -1335,6 +1335,7 @@ fn render_wire_value(value: &WireValue) -> String {
     match value {
         WireValue::String(value) => value.clone(),
         WireValue::Number(value) => value.to_string(),
+        WireValue::Decimal(value) => value.to_string(),
     }
 }
 
@@ -1389,6 +1390,9 @@ fn is_collection(name: &str) -> bool {
     )
 }
 
+// Follow-up direction: continue internal RPC provenance through sibling CodeGraph indexes under a
+// configured repositories root, such as ~/Documents/workspace/zhuanzhuan-rd. This run still stops
+// at the current repository boundary and falls back to explicit DTO comment values.
 fn is_external_path(path: &str) -> bool {
     let normalized = format!("/{path}");
     [
@@ -1716,7 +1720,9 @@ mod tests {
             codegraph_version: "test".to_owned(),
             codegraph_extraction_version: "test".to_owned(),
         };
-        let (mut operations, schemas) = project.build_contracts(&identity).unwrap();
+        let (mut operations, schemas) = project
+            .build_contracts(&identity, &["contract/src/main/java/p".to_owned()])
+            .unwrap();
         SemanticAnalyzer::new(&project)
             .enrich(&mut operations, &schemas)
             .unwrap();
