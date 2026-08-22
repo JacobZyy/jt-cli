@@ -459,13 +459,8 @@ fn enum_exports(
     let mut exports = BTreeMap::new();
     for relative in files {
         let path = root.join(relative);
-        let source = match fs::read_to_string(&path) {
-            Ok(source) => source,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("read generated enum {}", path.display()));
-            }
+        let Some(source) = read_optional_generated_source(&path, "read generated enum")? else {
+            continue;
         };
         for captures in declaration.captures_iter(&source) {
             let Some(name) = captures.get(1) else {
@@ -486,6 +481,14 @@ fn enum_exports(
         }
     }
     Ok(exports)
+}
+
+fn read_optional_generated_source(path: &Path, action: &str) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(source) => Ok(Some(source)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("{action} {}", path.display())),
+    }
 }
 
 fn ts_literal_key(value: &str) -> String {
@@ -818,8 +821,10 @@ fn exported_symbols(root: &Path, files: &[String]) -> Result<BTreeMap<String, Ve
     let mut symbols = BTreeMap::<String, Vec<String>>::new();
     for relative in files {
         let path = root.join(relative);
-        let source = fs::read_to_string(&path)
-            .with_context(|| format!("read generated type file {}", path.display()))?;
+        let Some(source) = read_optional_generated_source(&path, "read generated type file")?
+        else {
+            continue;
+        };
         let mut file_symbols = pattern
             .captures_iter(&source)
             .filter_map(|captures| captures.get(1).map(|value| value.as_str().to_owned()))
@@ -1251,7 +1256,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enum_exports_skip_missing_manifest_files() {
+    fn generated_symbol_readers_skip_missing_manifest_files() {
         let root = tempfile::tempdir().unwrap();
         fs::write(
             root.path().join("status.ts"),
@@ -1264,8 +1269,14 @@ mod tests {
             &["status.ts".to_owned(), "missing.ts".to_owned()],
         )
         .unwrap();
+        let symbols = exported_symbols(
+            root.path(),
+            &["status.ts".to_owned(), "missing.ts".to_owned()],
+        )
+        .unwrap();
 
         assert_eq!(exports["Status"]["n:1"], "STATUS_1");
+        assert_eq!(symbols["Status"], ["status.ts"]);
     }
 
     #[test]
