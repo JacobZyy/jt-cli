@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.4](https://github.com/JacobZyy/jt-cli/compare/v1.9.3...v1.9.4) (2026-08-22)
+
+
+### Bug Fixes
+
+* **nlab-api:** preserve enum owner names ([#40](https://github.com/JacobZyy/jt-cli/issues/40)) ([edae972](https://github.com/JacobZyy/jt-cli/commit/edae97241601187facf446ff421c263e1c66359d))
+
 ## [1.9.3](https://github.com/JacobZyy/jt-cli/compare/v1.9.2...v1.9.3) (2026-08-22)
 
 
