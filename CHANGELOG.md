@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.2](https://github.com/JacobZyy/jt-cli/compare/v1.9.1...v1.9.2) (2026-08-22)
+
+
+### Bug Fixes
+
+* **nlab-api:** skip missing legacy types ([#36](https://github.com/JacobZyy/jt-cli/issues/36)) ([6a5ef72](https://github.com/JacobZyy/jt-cli/commit/6a5ef72b82991e06bf12484e1832be99aa0af892))
+
 ## [1.9.1](https://github.com/JacobZyy/jt-cli/compare/v1.9.0...v1.9.1) (2026-08-22)
 
 
