@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.3](https://github.com/JacobZyy/jt-cli/compare/v1.9.2...v1.9.3) (2026-08-22)
+
+
+### Bug Fixes
+
+* **nlab-api:** update backend before generate ([#38](https://github.com/JacobZyy/jt-cli/issues/38)) ([74263dc](https://github.com/JacobZyy/jt-cli/commit/74263dcb3d4b638d123979ff2395ba7acfe31744))
+
 ## [1.9.2](https://github.com/JacobZyy/jt-cli/compare/v1.9.1...v1.9.2) (2026-08-22)
 
 
