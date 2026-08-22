@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/JacobZyy/jt-cli/compare/v1.8.0...v1.9.0) (2026-08-22)
+
+
+### Features
+
+* **nlab-api:** close generation workflow ([#32](https://github.com/JacobZyy/jt-cli/issues/32)) ([9685f96](https://github.com/JacobZyy/jt-cli/commit/9685f9615d470bb6e5e0b8beb9eb1803323f6f14))
+
 ## [1.8.0](https://github.com/JacobZyy/jt-cli/compare/v1.7.1...v1.8.0) (2026-08-21)
 
 
