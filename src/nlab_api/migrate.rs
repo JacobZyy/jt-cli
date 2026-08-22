@@ -458,7 +458,15 @@ fn enum_exports(
     .expect("const enum value regex");
     let mut exports = BTreeMap::new();
     for relative in files {
-        let source = fs::read_to_string(root.join(relative))?;
+        let path = root.join(relative);
+        let source = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read generated enum {}", path.display()));
+            }
+        };
         for captures in declaration.captures_iter(&source) {
             let Some(name) = captures.get(1) else {
                 continue;
@@ -1241,6 +1249,24 @@ fn join_path(left: &str, right: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_exports_skip_missing_manifest_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("status.ts"),
+            "export const Status = {\n  STATUS_1: 1,\n} as const;\n",
+        )
+        .unwrap();
+
+        let exports = enum_exports(
+            root.path(),
+            &["status.ts".to_owned(), "missing.ts".to_owned()],
+        )
+        .unwrap();
+
+        assert_eq!(exports["Status"]["n:1"], "STATUS_1");
+    }
 
     #[test]
     fn operation_mapping_detects_move_without_rename() {
