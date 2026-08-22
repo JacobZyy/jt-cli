@@ -60,6 +60,23 @@ pub fn inspect(repo: &Path, requested_branch: &str) -> Result<RepositoryTarget> 
     })
 }
 
+pub fn update_ff_only(target: &RepositoryTarget, deadline: Instant) -> Result<()> {
+    let mut command = Command::new("git");
+    command
+        .args(["pull", "--ff-only", "origin", &target.branch])
+        .current_dir(&target.root)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let status = run_until(&mut command, deadline)
+        .with_context(|| format!("update backend repository {}", target.root.display()))?;
+    if !status.success() {
+        bail!("git pull --ff-only failed with status {status}");
+    }
+    Ok(())
+}
+
 pub fn sync_codegraph(target: &RepositoryTarget, deadline: Instant) -> Result<()> {
     let action = if target.root.join(".codegraph/codegraph.db").is_file() {
         "sync"
@@ -143,4 +160,68 @@ where
         bail!("Git failed with status {}: {detail}", output.status);
     }
     Ok(output.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn git(root: &Path, arguments: &[&str]) {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {}", arguments.join(" "));
+    }
+
+    #[test]
+    fn update_ff_only_ignores_untracked_codegraph() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        let upstream = root.path().join("upstream");
+        let backend = root.path().join("backend");
+        fs::create_dir(&upstream).unwrap();
+        git(
+            root.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&upstream, &["init", "--initial-branch=main"]);
+        git(&upstream, &["config", "user.name", "test"]);
+        git(&upstream, &["config", "user.email", "test@example.com"]);
+        fs::write(upstream.join("contract.java"), "one").unwrap();
+        git(&upstream, &["add", "contract.java"]);
+        git(&upstream, &["commit", "-m", "initial"]);
+        git(
+            &upstream,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&upstream, &["push", "-u", "origin", "main"]);
+        git(
+            root.path(),
+            &["clone", remote.to_str().unwrap(), backend.to_str().unwrap()],
+        );
+        fs::create_dir(backend.join(".codegraph")).unwrap();
+        fs::write(backend.join(".codegraph/codegraph.db"), "index").unwrap();
+
+        let before = inspect(&backend, "main").unwrap();
+        fs::write(upstream.join("contract.java"), "two").unwrap();
+        git(&upstream, &["add", "contract.java"]);
+        git(&upstream, &["commit", "-m", "update"]);
+        git(&upstream, &["push", "origin", "main"]);
+
+        update_ff_only(&before, Instant::now() + Duration::from_secs(10)).unwrap();
+        let after = inspect(&backend, "main").unwrap();
+        assert_ne!(before.commit, after.commit);
+        assert!(backend.join(".codegraph/codegraph.db").is_file());
+    }
 }

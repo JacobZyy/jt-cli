@@ -111,6 +111,9 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     if path_inside(&target.root, &output_dir) {
         bail!("frontend project must stay outside backend repository");
     }
+    reporter.phase(5, "更新后端仓库");
+    repo::update_ff_only(&target, deadline)?;
+    let target = repo::inspect(&config.backend.repo_path, &config.backend.branch)?;
     let _lock = OutputLock::acquire(&output_dir)?;
     let legacy = if config.migration.enabled {
         migrate::snapshot_legacy(&output_dir)?
