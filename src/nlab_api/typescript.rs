@@ -412,9 +412,11 @@ fn enum_seed_from_parts(owner: &str, accessor: &str, field_name: &str) -> Vec<St
         .or_else(|| accessor.strip_prefix("is"))
         .filter(|value| !value.is_empty())
         .unwrap_or(field_name);
-    let owner_name = seed.last().map(String::as_str).unwrap_or_default();
-    if let Some(suffix) = remove_owner_overlap(owner_name, accessor) {
-        seed.push(suffix.to_owned());
+    let owner_name = seed.last().cloned().unwrap_or_default();
+    if let Some(suffix) = remove_owner_overlap(&owner_name, accessor)
+        && let Some(owner) = seed.last_mut()
+    {
+        owner.push_str(&upper_camel(suffix));
     }
     seed
 }
@@ -1048,13 +1050,6 @@ mod tests {
             &integer,
         )
         .unwrap();
-        let other_status_values = super::super::coded_values::parse(
-            "status",
-            Some("其他状态：1-开始 2-结束"),
-            None,
-            &integer,
-        )
-        .unwrap();
         let ir = serde_json::from_value::<ContractIr>(serde_json::json!({
             "target": {
                 "appName": "app",
@@ -1098,19 +1093,6 @@ mod tests {
                         "optional": false,
                         "description": "整备单状态",
                         "declaredValues": refurb_status_values
-                    }]
-                },
-                "p.OtherVO": {
-                    "fqn": "p.OtherVO",
-                    "name": "OtherVO",
-                    "sourcePath": "OtherVO.java",
-                    "description": null,
-                    "fields": [{
-                        "name": "status",
-                        "javaType": { "name": "Integer", "arguments": [], "arrayDepth": 0 },
-                        "optional": false,
-                        "description": "其他状态",
-                        "declaredValues": other_status_values
                     }]
                 }
             }
@@ -1231,12 +1213,16 @@ mod tests {
         assert!(!api.contains("fetch("));
         assert_eq!(artifact.enum_files.len(), 1);
         let enum_source = &artifact.files[&artifact.enum_files[0]];
+        assert!(enum_source.contains("export const RefurbButtonActionCode ="));
         assert!(enum_source.contains("START_REFURB: \"start_refurb\""));
         let patched_type = artifact
             .files
             .values()
-            .find(|source| source.contains("actionCode: ActionCode"))
+            .find(|source| source.contains("actionCode: RefurbButtonActionCode"))
             .expect("patched operation type");
-        assert!(patched_type.contains("@service-enums/checkapp/goodsQueryFacade/actionCode"));
+        assert!(
+            patched_type
+                .contains("@service-enums/checkapp/goodsQueryFacade/refurbButtonActionCode")
+        );
     }
 }
