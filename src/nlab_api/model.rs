@@ -154,6 +154,8 @@ pub struct CodedValues {
 #[serde(rename_all = "kebab-case")]
 pub enum CodedValueSource {
     Comment,
+    Annotation,
+    ConstantReference,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -169,6 +171,7 @@ pub struct CodedValue {
 pub enum WireValue {
     String(String),
     Number(i64),
+    Decimal(serde_json::Number),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -232,13 +235,18 @@ pub struct GenerateResult {
     pub contracts: usize,
     pub paths: usize,
     pub schemas: usize,
+    pub routes_replaced: usize,
     pub placeholders: usize,
     pub semantic_patches: usize,
     pub closed_enum_patches: usize,
     pub api_files: usize,
     pub type_files: usize,
     pub enum_files: usize,
+    pub migration_changed_source_files: usize,
+    pub migration_unresolved: usize,
     pub mock_generated: bool,
     pub whistle_rules_updated: bool,
+    pub warnings: usize,
+    pub report: String,
     pub duration_ms: u128,
 }

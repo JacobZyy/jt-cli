@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -63,7 +63,7 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         None => super::repo::current_branch(&args.repo_path)?,
     };
     let backend = super::repo::inspect(&args.repo_path, &branch)?;
-    let contract_root = detect_contract_root(&backend.root)?;
+    let contract_roots = detect_contract_roots(&backend.root)?;
     let previous = (project.join(CONFIG_FILE).is_file()
         || project.join(LEGACY_CONFIG_FILE).is_file())
     .then(|| ProjectConfig::load(&project))
@@ -82,9 +82,12 @@ fn run_inner(args: InitArgs) -> Result<Value> {
             repo_path: backend.root.clone(),
             branch: backend.branch,
             app_name,
-            contract_root,
+            contract_roots,
         },
         frontend,
+        gateway: Default::default(),
+        migration: Default::default(),
+        mock: Default::default(),
     };
     config.validate()?;
     ensure_state_directory(&project)?;
@@ -134,7 +137,7 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         "config": config_path,
         "backend": config.backend.repo_path,
         "branch": config.backend.branch,
-        "contractRoot": config.backend.contract_root,
+        "contractRoots": config.backend.contract_roots,
         "buildTool": config.frontend.build_tool.kind,
         "request": {
             "module": config.frontend.request.module,
@@ -143,6 +146,9 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         },
         "layout": config.frontend.layout,
         "aliases": config.frontend.aliases,
+        "gateway": config.gateway,
+        "migration": config.migration,
+        "mock": config.mock,
         "updated": updated,
     }))
 }
@@ -432,8 +438,8 @@ fn has_interface_field(source: &str, field: &str) -> bool {
         .is_match(source)
 }
 
-fn detect_contract_root(repo: &Path) -> Result<String> {
-    let mut parents = WalkBuilder::new(repo)
+fn detect_contract_roots(repo: &Path) -> Result<Vec<String>> {
+    let parents = WalkBuilder::new(repo)
         .standard_filters(true)
         .hidden(false)
         .build()
@@ -453,37 +459,44 @@ fn detect_contract_root(repo: &Path) -> Result<String> {
                 .then(|| entry.path().parent().map(Path::to_owned))
                 .flatten()
         })
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
     if parents.is_empty() {
         bail!("no @ServiceContract Facade declarations found");
     }
-    parents.sort();
-    let mut common = parents[0].clone();
-    for parent in &parents[1..] {
-        while !parent.starts_with(&common) {
-            if !common.pop() {
-                bail!("Facade declarations have no common source root");
+    let mut roots = BTreeSet::new();
+    for parent in parents {
+        let mut root = parent;
+        while root.file_name().and_then(|value| value.to_str()) != Some("contract") {
+            if !root.pop() || root == repo {
+                bail!("Facade declaration is not below one semantic contract package");
             }
         }
+        let relative = root.strip_prefix(repo)?;
+        let value = relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        if !value.contains("src/main/java/") {
+            bail!("Facade contract root is too broad: {value}");
+        }
+        roots.insert(value);
     }
-    while common.file_name().and_then(|value| value.to_str()) != Some("contract") {
-        if !common.pop() || common == repo {
+    if roots.is_empty() {
+        bail!("no semantic contract roots found");
+    }
+    for root in &roots {
+        if roots
+            .iter()
+            .any(|candidate| candidate != root && Path::new(root).starts_with(candidate))
+        {
             bail!("Facade declarations are not below one semantic contract package");
         }
     }
-    let relative = common.strip_prefix(repo)?;
-    let value = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/");
-    if !value.contains("src/main/java/") {
-        bail!("Facade common root is too broad: {value}");
-    }
-    Ok(value)
+    Ok(roots.into_iter().collect())
 }
 
 fn patch_vite_aliases(source: &str, frontend: &FrontendConfig) -> Result<String> {
@@ -821,14 +834,18 @@ mod tests {
         for relative in [
             "contract/src/main/java/p/contract/checkapp/IGoodsFacade.java",
             "contract/src/main/java/p/contract/operations/IOrderFacade.java",
+            "other/src/main/java/q/contract/IOtherFacade.java",
         ] {
             let path = root.path().join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, "@ServiceContract public interface Facade {}").unwrap();
         }
         assert_eq!(
-            detect_contract_root(root.path()).unwrap(),
-            "contract/src/main/java/p/contract"
+            detect_contract_roots(root.path()).unwrap(),
+            vec![
+                "contract/src/main/java/p/contract",
+                "other/src/main/java/q/contract"
+            ]
         );
     }
 

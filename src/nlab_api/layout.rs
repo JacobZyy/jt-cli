@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use super::model::Operation;
 use super::naming::{lower_camel, without_interface_prefix};
 
-pub fn api_output_path(operation: &Operation, contract_root: &str) -> Result<String> {
-    let directory = facade_directory(operation, contract_root)?;
+pub fn api_output_path(operation: &Operation, contract_roots: &[String]) -> Result<String> {
+    let directory = facade_directory(operation, contract_roots)?;
     let file = format!(
         "{}.ts",
         lower_camel(without_interface_prefix(&operation.facade_name))
@@ -15,14 +15,25 @@ pub fn api_output_path(operation: &Operation, contract_root: &str) -> Result<Str
     Ok(join_optional(&directory, &file))
 }
 
-pub fn type_output_path(operation: &Operation, contract_root: &str) -> Result<String> {
-    Ok(api_output_path(operation, contract_root)?
+pub fn type_output_path(operation: &Operation, contract_roots: &[String]) -> Result<String> {
+    Ok(api_output_path(operation, contract_roots)?
         .trim_end_matches(".ts")
         .to_owned())
 }
 
-pub fn facade_directory(operation: &Operation, contract_root: &str) -> Result<String> {
+pub fn facade_directory(operation: &Operation, contract_roots: &[String]) -> Result<String> {
     let source = Path::new(&operation.contract_source);
+    let contract_root = contract_roots
+        .iter()
+        .filter(|root| source.starts_with(Path::new(root)))
+        .max_by_key(|root| root.len())
+        .with_context(|| {
+            format!(
+                "Facade declaration {} is outside configured contract roots: {}",
+                operation.contract_source,
+                contract_roots.join(", ")
+            )
+        })?;
     let relative = source.strip_prefix(contract_root).with_context(|| {
         format!(
             "Facade declaration {} is outside configured contract root {contract_root}",
@@ -137,11 +148,11 @@ mod tests {
         );
         let root = "contract/src/main/java/com/zhuanzhuan/nlabstore/contract";
         assert_eq!(
-            api_output_path(&operation, root).unwrap(),
+            api_output_path(&operation, &[root.to_owned()]).unwrap(),
             "checkapp/goodsQueryFacade.ts"
         );
         assert_eq!(
-            type_output_path(&operation, root).unwrap(),
+            type_output_path(&operation, &[root.to_owned()]).unwrap(),
             "checkapp/goodsQueryFacade"
         );
     }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const STATE_DIR: &str = ".nlab";
 pub const CONFIG_FILE: &str = ".nlab/nlab-api.config.json";
@@ -16,6 +16,54 @@ pub struct ProjectConfig {
     pub version: u8,
     pub backend: BackendConfig,
     pub frontend: FrontendConfig,
+    #[serde(default)]
+    pub gateway: GatewaySettings,
+    #[serde(default)]
+    pub migration: MigrationSettings,
+    #[serde(default)]
+    pub mock: MockSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewaySettings {
+    pub enabled: bool,
+}
+
+impl Default for GatewaySettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationSettings {
+    pub enabled: bool,
+}
+
+impl Default for MigrationSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockSettings {
+    pub enabled: bool,
+    pub output_root: String,
+    pub seed: u64,
+}
+
+impl Default for MockSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_root: ".nlab/generated-mock".to_owned(),
+            seed: 42,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -24,7 +72,28 @@ pub struct BackendConfig {
     pub repo_path: PathBuf,
     pub branch: String,
     pub app_name: String,
-    pub contract_root: String,
+    #[serde(
+        alias = "contractRoot",
+        deserialize_with = "deserialize_contract_roots"
+    )]
+    pub contract_roots: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ContractRoots {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_contract_roots<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match ContractRoots::deserialize(deserializer)? {
+        ContractRoots::One(root) => vec![root],
+        ContractRoots::Many(roots) => roots,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -151,8 +220,13 @@ impl ProjectConfig {
                 self.version
             );
         }
+        if self.backend.contract_roots.is_empty() {
+            bail!("backend.contractRoots must not be empty");
+        }
+        for root in &self.backend.contract_roots {
+            validate_relative_path(root, "backend.contractRoots")?;
+        }
         for (name, value) in [
-            ("backend.contractRoot", self.backend.contract_root.as_str()),
             ("frontend.sourceRoot", self.frontend.source_root.as_str()),
             (
                 "frontend.buildTool.configPath",
@@ -200,6 +274,7 @@ impl ProjectConfig {
         {
             bail!("frontend request module and export must not be empty");
         }
+        validate_relative_path(&self.mock.output_root, "mock.outputRoot")?;
         if !self
             .frontend
             .response
@@ -317,7 +392,7 @@ mod tests {
                 repo_path: PathBuf::from("/backend"),
                 branch: "feature".to_owned(),
                 app_name: "app".to_owned(),
-                contract_root: "contract/src/main/java/p/contract".to_owned(),
+                contract_roots: vec!["contract/src/main/java/p/contract".to_owned()],
             },
             frontend: FrontendConfig {
                 source_root: "src".to_owned(),
@@ -351,8 +426,23 @@ mod tests {
                     enums: "@service-enums".to_owned(),
                 },
             },
+            gateway: Default::default(),
+            migration: Default::default(),
+            mock: Default::default(),
         };
         assert!(config.validate().is_ok());
+        let mut legacy = serde_json::to_value(&config).unwrap();
+        let backend = legacy["backend"].as_object_mut().unwrap();
+        backend.remove("contractRoots");
+        backend.insert(
+            "contractRoot".to_owned(),
+            serde_json::json!("contract/src/main/java/p/contract"),
+        );
+        let decoded = serde_json::from_value::<ProjectConfig>(legacy).unwrap();
+        assert_eq!(decoded.backend.contract_roots.len(), 1);
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert!(encoded["backend"].get("contractRoot").is_none());
+        assert!(encoded["backend"]["contractRoots"].is_array());
         config.frontend.aliases.types = "service-types".to_owned();
         assert!(config.validate().is_err());
     }

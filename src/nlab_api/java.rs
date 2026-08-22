@@ -71,11 +71,12 @@ impl<'a> JavaProject<'a> {
     pub fn build_contracts(
         &self,
         target: &TargetIdentity,
+        contract_roots: &[String],
     ) -> Result<(Vec<Operation>, BTreeMap<String, Schema>)> {
         let mut schemas = BTreeMap::new();
         let mut operations = Vec::new();
         let mut keys = BTreeSet::new();
-        for facade in self.facades() {
+        for facade in self.facades(contract_roots) {
             let mut methods = self.graph.contained(&facade.id, "method");
             methods.sort_by(|left, right| {
                 left.name
@@ -161,7 +162,7 @@ impl<'a> JavaProject<'a> {
         (candidates.len() == 1).then(|| candidates[0])
     }
 
-    fn facades(&self) -> Vec<&GraphNode> {
+    fn facades(&self, contract_roots: &[String]) -> Vec<&GraphNode> {
         let mut result = self
             .graph
             .nodes
@@ -169,7 +170,9 @@ impl<'a> JavaProject<'a> {
             .filter(|node| {
                 node.kind == "interface"
                     && node.name.ends_with("Facade")
-                    && node.file_path.contains("/contract/")
+                    && contract_roots
+                        .iter()
+                        .any(|root| Path::new(&node.file_path).starts_with(root))
                     && self.sources.get(&node.file_path).is_some_and(|source| {
                         source.contains("@ServiceContract") || source.contains("ServiceContract")
                     })
@@ -358,6 +361,7 @@ impl<'a> JavaProject<'a> {
                 declared_values: coded_values::parse(
                     &field.name,
                     description.as_deref(),
+                    (!field.decorators.trim().is_empty()).then_some(field.decorators.as_str()),
                     &java_type,
                 ),
                 linked_enum: None,

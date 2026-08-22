@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::model::{ContractIr, FrontendManifest};
@@ -140,6 +141,40 @@ pub fn write(
         type_files: frontend.type_files.clone(),
         enum_files: frontend.enum_files.clone(),
     })
+}
+
+pub fn promote_openapi(root: &Path) -> Result<PathBuf> {
+    let pending = safe_target(root, ".nlab/openapi.pending.json")?;
+    let stable = safe_target(root, ".nlab/openapi.json")?;
+    let source = fs::read(&pending)
+        .with_context(|| format!("read pending OpenAPI {}", pending.display()))?;
+    atomic_write(&stable, &source)?;
+    fs::remove_file(&pending)
+        .with_context(|| format!("remove pending OpenAPI {}", pending.display()))?;
+    Ok(stable)
+}
+
+pub fn write_report(root: &Path, report: &Value) -> Result<PathBuf> {
+    let path = safe_target(root, ".nlab/generate-report.json")?;
+    let source = format!("{}\n", serde_json::to_string_pretty(report)?);
+    atomic_write(&path, source.as_bytes())?;
+    Ok(path)
+}
+
+fn atomic_write(path: &Path, source: &[u8]) -> Result<()> {
+    if fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!("refuse to replace symlink: {}", path.display());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&temporary, source)
+        .with_context(|| format!("write temporary file {}", temporary.display()))?;
+    fs::rename(&temporary, path).with_context(|| format!("replace file {}", path.display()))
 }
 
 fn legacy_root_openapi_is_managed(
