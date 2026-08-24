@@ -64,9 +64,13 @@ fn select(selector: &OsStr) -> Result<Icon, String> {
             file_name: "jt.svg",
             content: Content::Svg(include_str!("../jt-icon/jt.svg")),
         },
+        Some("animated") => Icon {
+            file_name: "jt-animated.svg",
+            content: Content::Svg(include_str!("../jt-icon/jt-animated.svg")),
+        },
         _ => {
             return Err(format!(
-                "unsupported icon {}; expected svg or PNG size 16, 24, 32, 48, 64, 128, 256, 512, or 1024",
+                "unsupported icon {}; expected svg, animated, or PNG size 16, 24, 32, 48, 64, 128, 256, 512, or 1024",
                 selector.to_string_lossy()
             ));
         }
@@ -88,7 +92,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn writes_png_source_and_svg_markup() {
+    fn writes_png_and_svg_sources() {
         let directory = TestDirectory::new();
         let output = directory.path.join("public");
 
@@ -104,6 +108,13 @@ mod tests {
         assert_eq!(
             fs::read_to_string(svg_path).unwrap(),
             include_str!("../jt-icon/jt.svg")
+        );
+
+        let animated_path = download(OsStr::new("animated"), &output).unwrap();
+        assert_eq!(animated_path, output.join("jt-animated.svg"));
+        assert_eq!(
+            fs::read_to_string(animated_path).unwrap(),
+            include_str!("../jt-icon/jt-animated.svg")
         );
     }
 

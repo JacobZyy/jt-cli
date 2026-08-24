@@ -188,8 +188,8 @@ struct UpgradeArgs {
 
 #[derive(Debug, Args)]
 struct IconArgs {
-    /// PNG size or svg
-    #[arg(value_name = "size|svg")]
+    /// PNG size, svg, or animated
+    #[arg(value_name = "size|svg|animated")]
     selector: OsString,
     /// Output directory; default: ./public
     #[arg(value_name = "directory")]
