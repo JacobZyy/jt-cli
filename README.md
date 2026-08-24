@@ -204,6 +204,7 @@ Write one JT icon into `./public`:
 ```bash
 jt icon 64
 jt icon svg
+jt icon animated
 ```
 
 Pass a directory as the fourth shell argument to override the destination:
@@ -211,9 +212,10 @@ Pass a directory as the fourth shell argument to override the destination:
 ```bash
 jt icon 64 ./assets
 jt icon svg ./assets
+jt icon animated ./assets
 ```
 
-PNG sizes are `16`, `24`, `32`, `48`, `64`, `128`, `256`, `512`, and `1024`. A PNG selector writes the matching original `jt-<size>.png`; `svg` creates `jt.svg` from its embedded markup. Commands work offline, create the destination directory, and refuse to overwrite an existing file.
+PNG sizes are `16`, `24`, `32`, `48`, `64`, `128`, `256`, `512`, and `1024`. A PNG selector writes the matching original `jt-<size>.png`; `svg` creates `jt.svg`; `animated` creates `jt-animated.svg`. Commands use embedded sources, work offline, create the destination directory, and refuse to overwrite an existing file.
 
 ## Install
 
