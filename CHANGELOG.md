@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/JacobZyy/jt-cli/compare/v1.9.4...v1.10.0) (2026-08-24)
+
+
+### Features
+
+* **icon:** add animated SVG selector ([981944e](https://github.com/JacobZyy/jt-cli/commit/981944eec6342b26e8089ed17fa0032e81e37f5c))
+
 ## [1.9.4](https://github.com/JacobZyy/jt-cli/compare/v1.9.3...v1.9.4) (2026-08-22)
 
 
