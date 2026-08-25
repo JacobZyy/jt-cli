@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/JacobZyy/jt-cli/compare/v1.10.0...v1.11.0) (2026-08-25)
+
+
+### Features
+
+* **console:** add AI-hook trace dashboard ([#44](https://github.com/JacobZyy/jt-cli/issues/44)) ([e30cdcc](https://github.com/JacobZyy/jt-cli/commit/e30cdccd73b11c7412679a3c9204af244f19811e))
+
 ## [1.10.0](https://github.com/JacobZyy/jt-cli/compare/v1.9.4...v1.10.0) (2026-08-24)
 
 
