@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+@source "../../../../apps/**/*.{ts,tsx}";
+@source "../**/*.{ts,tsx}";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.975 0.009 253);
+  --foreground: oklch(0.25 0.035 257);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.25 0.035 257);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.25 0.035 257);
+  --primary: oklch(0.55 0.23 266);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.94 0.02 251);
+  --secondary-foreground: oklch(0.31 0.04 256);
+  --muted: oklch(0.95 0.012 252);
+  --muted-foreground: oklch(0.52 0.03 257);
+  --accent: oklch(0.93 0.03 208);
+  --accent-foreground: oklch(0.35 0.08 212);
+  --destructive: oklch(0.58 0.22 24);
+  --border: oklch(0.89 0.025 253);
+  --input: oklch(0.88 0.025 253);
+  --ring: oklch(0.63 0.17 265);
+  --radius: 0.7rem;
+  --signal-blue: #2f5bff;
+  --signal-teal: #0f8b8d;
+  --signal-red: #d64550;
+  --signal-amber: #c47b00;
+  --signal-grid: #d9e2f2;
+  --signal-ink: #16243a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-signal-blue: var(--signal-blue);
+  --color-signal-teal: var(--signal-teal);
+  --color-signal-red: var(--signal-red);
+  --color-signal-amber: var(--signal-amber);
+  --color-signal-grid: var(--signal-grid);
+  --color-signal-ink: var(--signal-ink);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, var(--signal-grid) 42%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, var(--signal-grid) 42%, transparent) 1px, transparent 1px);
+    background-size: 32px 32px;
+    font-family: "Avenir Next", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+}
+
+@layer utilities {
+  .font-data {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+}

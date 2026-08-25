@@ -1,2 +1,6 @@
 /target
+**/.turbo
+**/.next
+**/node_modules
+coverage
 .DS_Store

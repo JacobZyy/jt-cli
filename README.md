@@ -91,6 +91,30 @@ stable runner order and combine ESLint diagnostics with Vitest test/coverage sec
 failure returns the table and concise threshold conclusions. First failure blocks for repair; retry
 continues once to prevent a Stop loop. Bounded details remain in `/tmp/jt-ai-hook-<repo>.jsonl`.
 
+Inspect those local traces in the web console:
+
+```bash
+pnpm install
+pnpm --filter ai-hook-console dev
+```
+
+Open `http://localhost:3000`. The console lists sessions with status, trigger counts, context,
+and code paths. Each detail page renders hook messages as Markdown, shows the session transcript,
+and reconstructs `apply_patch` diffs from Codex session JSONL. It reads `/tmp/jt-ai-hook-*.jsonl`,
+`~/.codex/sessions`, and `~/.codex/archived_sessions` without modifying them. Set
+`AI_HOOK_LOG_DIR` or `CODEX_HOME` to use different local directories.
+
+The repository remains a Rust crate at the root. pnpm and Turborepo manage the web workspaces:
+
+```text
+apps/ai-hook-console      Next.js App Router console
+packages/ai-hook-core     AI-hook and Codex JSONL reader
+packages/ui               shared shadcn/ui components and theme
+```
+
+Session data can contain private code and conversation text. Keep this console bound to a trusted
+local environment unless authentication is added.
+
 Initialize one frontend project from its real build, TypeScript, request, response-envelope, output,
 and backend Facade layout:
 
