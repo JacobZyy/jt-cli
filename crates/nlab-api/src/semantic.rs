@@ -1478,8 +1478,8 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nlab_api::graph::{GraphEdge, GraphNode, test_snapshot};
-    use crate::nlab_api::model::TargetIdentity;
+    use crate::graph::{GraphEdge, GraphNode, test_snapshot};
+    use crate::model::TargetIdentity;
     use std::fs;
 
     #[test]

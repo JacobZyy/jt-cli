@@ -15,6 +15,8 @@ fi
 cargo build \
   --release \
   --locked \
+  --package jt \
+  --bin jt \
   --manifest-path "$REPOSITORY_ROOT/Cargo.toml" \
   --target-dir "$REPOSITORY_ROOT/target"
 

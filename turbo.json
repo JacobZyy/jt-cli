@@ -1,9 +1,14 @@
 {
   "$schema": "https://turborepo.com/schema.json",
+  "futureFlags": {
+    "experimentalCargoWorkspaces": true
+  },
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
-      "outputs": [".next/**", "!.next/cache/**", "dist/**"]
+      "dependsOn": ["^build"]
+    },
+    "check": {
+      "dependsOn": ["^check"]
     },
     "check-types": {
       "dependsOn": ["build", "^check-types"]

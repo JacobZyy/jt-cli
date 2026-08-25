@@ -1,7 +1,6 @@
 mod ai_hook;
 mod cli;
 mod icon;
-mod nlab_api;
 mod node;
 mod release;
 mod upgrade;

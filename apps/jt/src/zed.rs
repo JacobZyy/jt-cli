@@ -13,7 +13,7 @@ use crate::node::fs::{atomic_write, atomic_write_with_permissions, read_optional
 use crate::node::platform::first_executable;
 
 const TEMPLATE_URL: &str =
-    "https://raw.githubusercontent.com/JacobZyy/jt-cli/main/templates/zed/settings.json";
+    "https://raw.githubusercontent.com/JacobZyy/jt-cli/main/apps/jt/templates/zed/settings.json";
 const TEMPLATE_PATH: &str = ".zed/settings.json";
 const MAX_TEMPLATE_SIZE: usize = 1024 * 1024;
 const MAX_TEMPLATE_SIZE_ARG: &str = "1048576";

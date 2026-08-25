@@ -1067,7 +1067,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    const REUSABLE_WORKFLOW: &str = include_str!("../.github/workflows/npm-release.yml");
+    const REUSABLE_WORKFLOW: &str = include_str!("../../../.github/workflows/npm-release.yml");
 
     const NPM_PACKAGE: &str = r#"{
   "name": "@acme/demo",

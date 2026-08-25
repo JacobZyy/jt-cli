@@ -109,7 +109,7 @@ fn normal_path(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nlab_api::model::{HttpRoute, RouteSource, RouteStatus, TypeRef};
+    use crate::model::{HttpRoute, RouteSource, RouteStatus, TypeRef};
 
     fn operation(source: &str) -> Operation {
         Operation {

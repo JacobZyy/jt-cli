@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::model::{ContractIr, HttpRoute, RouteSource, RouteStatus};
 use super::output::OutputLock;
 
-const ZGATEWAY_CONFIG: &str = include_str!("../../assets/nlab-api/zgateway.zzcli.json");
+const ZGATEWAY_CONFIG: &str = include_str!("../assets/zgateway.zzcli.json");
 
 #[derive(Clone, Debug, Args)]
 pub struct RoutesArgs {

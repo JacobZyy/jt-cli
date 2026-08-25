@@ -361,6 +361,7 @@ fn build_install_plan(cargo: &Path, revision: &str, root: &Path) -> InstallPlan 
             OsString::from("--locked"),
             OsString::from("--root"),
             root.as_os_str().to_os_string(),
+            OsString::from("jt"),
         ],
     }
 }
@@ -511,7 +512,7 @@ mod tests {
         assert_eq!(plan.args[7], std::ffi::OsString::from("/tmp/stage root"));
         assert_eq!(
             display_command(&plan),
-            "'/path with spaces/cargo' install --git https://github.com/JacobZyy/jt-cli --rev 0123456789abcdef0123456789abcdef01234567 --locked --root '/tmp/stage root'"
+            "'/path with spaces/cargo' install --git https://github.com/JacobZyy/jt-cli --rev 0123456789abcdef0123456789abcdef01234567 --locked --root '/tmp/stage root' jt"
         );
     }
 

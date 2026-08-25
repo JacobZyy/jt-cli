@@ -1,4 +1,5 @@
 mod accept;
+mod after_generate;
 mod coded_values;
 mod config;
 mod graph;
@@ -196,6 +197,57 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     ensure_before_deadline(deadline)?;
     let written = output::write(&output_dir, &ir, &openapi, &frontend)?;
 
+    reporter.phase(82, "执行生成后命令");
+    ensure_before_deadline(deadline)?;
+    let generated_files = written
+        .api_files
+        .iter()
+        .chain(&written.type_files)
+        .chain(&written.enum_files)
+        .cloned()
+        .collect::<Vec<_>>();
+    let after_generate =
+        match after_generate::run(&output_dir, &config.after_generate, &generated_files) {
+            Ok(reports) => reports,
+            Err(failure) => {
+                let failure_message = failure.message;
+                diagnostics.push(json!({
+                    "level": "error",
+                    "stage": "afterGenerate",
+                    "code": "AFTER_GENERATE_FAILED",
+                    "message": failure_message,
+                }));
+                let report = json!({
+                    "version": 1,
+                    "status": "failed",
+                    "backend": {
+                        "repoPath": target.root,
+                        "branch": target.branch,
+                        "commit": target.commit,
+                    },
+                    "stages": {
+                        "generate": "complete",
+                        "afterGenerate": {
+                            "status": "failed",
+                            "hooks": failure.reports,
+                        },
+                    },
+                    "diagnostics": diagnostics,
+                    "artifacts": {
+                        "openapi": written.openapi_path,
+                        "apiFiles": written.api_files,
+                        "typeFiles": written.type_files,
+                        "enumFiles": written.enum_files,
+                    }
+                });
+                let report_path = output::write_report(&output_dir, &report)?;
+                bail!(
+                    "afterGenerate hook failed: {failure_message}; report: {}",
+                    report_path.display()
+                );
+            }
+        };
+
     reporter.phase(85, "迁移业务引用");
     let migration = if let Some(legacy) = &legacy {
         migrate::automatic(
@@ -268,6 +320,10 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         },
         "stages": {
             "generate": "complete",
+            "afterGenerate": {
+                "status": if config.after_generate.is_empty() { "skipped" } else { "complete" },
+                "hooks": after_generate,
+            },
             "routes": {
                 "status": if route_summary.warning.is_some() || route_summary.placeholders > 0 { "partial" } else { "complete" },
                 "replaced": route_summary.replaced,

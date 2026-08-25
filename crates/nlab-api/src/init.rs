@@ -88,6 +88,10 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         gateway: Default::default(),
         migration: Default::default(),
         mock: Default::default(),
+        after_generate: previous
+            .as_ref()
+            .map(|config| config.after_generate.clone())
+            .unwrap_or_default(),
     };
     config.validate()?;
     ensure_state_directory(&project)?;

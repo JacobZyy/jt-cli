@@ -22,6 +22,18 @@ pub struct ProjectConfig {
     pub migration: MigrationSettings,
     #[serde(default)]
     pub mock: MockSettings,
+    #[serde(default)]
+    pub after_generate: Vec<AfterGenerateHook>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AfterGenerateHook {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub include_generated_files: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,6 +287,11 @@ impl ProjectConfig {
             bail!("frontend request module and export must not be empty");
         }
         validate_relative_path(&self.mock.output_root, "mock.outputRoot")?;
+        for hook in &self.after_generate {
+            if hook.command.trim().is_empty() {
+                bail!("afterGenerate command must not be empty");
+            }
+        }
         if !self
             .frontend
             .response
@@ -429,6 +446,7 @@ mod tests {
             gateway: Default::default(),
             migration: Default::default(),
             mock: Default::default(),
+            after_generate: vec![],
         };
         assert!(config.validate().is_ok());
         let mut legacy = serde_json::to_value(&config).unwrap();
@@ -444,6 +462,15 @@ mod tests {
         assert!(encoded["backend"].get("contractRoot").is_none());
         assert!(encoded["backend"]["contractRoots"].is_array());
         config.frontend.aliases.types = "service-types".to_owned();
+        assert!(config.validate().is_err());
+        config.frontend.aliases.types = "@service-types".to_owned();
+        config.after_generate = vec![AfterGenerateHook {
+            command: "pnpm".to_owned(),
+            args: vec!["exec".to_owned(), "eslint".to_owned(), "--fix".to_owned()],
+            include_generated_files: true,
+        }];
+        assert!(config.validate().is_ok());
+        config.after_generate[0].command.clear();
         assert!(config.validate().is_err());
     }
 }
