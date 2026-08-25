@@ -7,8 +7,9 @@
   },
   "scripts": {
     "build": "turbo run build",
+    "check": "turbo run check",
     "check-types": "turbo run check-types",
-    "dev": "turbo run dev",
+    "dev": "turbo run dev --filter=ai-hook-console",
     "lint": "turbo run lint",
     "test": "turbo run test"
   },

@@ -43,7 +43,7 @@ jt zed-conf
 
 The command finds the current Git repository root and writes `.zed/settings.json`. Existing
 different content is backed up beside the file before an atomic update. The template is fetched
-over HTTPS from [`templates/zed/settings.json`](templates/zed/settings.json) on `main`, so merging a
+over HTTPS from [`apps/jt/templates/zed/settings.json`](apps/jt/templates/zed/settings.json) on `main`, so merging a
 template-only change updates future command runs without releasing a new `jt` version.
 
 Configure project-local AI-edit hooks:
@@ -104,13 +104,37 @@ and reconstructs `apply_patch` diffs from Codex session JSONL. It reads `/tmp/jt
 `~/.codex/sessions`, and `~/.codex/archived_sessions` without modifying them. Set
 `AI_HOOK_LOG_DIR` or `CODEX_HOME` to use different local directories.
 
-The repository remains a Rust crate at the root. pnpm and Turborepo manage the web workspaces:
+On macOS, install the production server as a login service:
+
+```bash
+pnpm --filter ai-hook-console service:install
+```
+
+The LaunchAgent listens only on `127.0.0.1:3100`, starts at login, and restarts after failure.
+After changing console code, rebuild and restart it with one command:
+
+```bash
+pnpm --filter ai-hook-console service:restart
+```
+
+Use `service:status` to inspect it or `service:uninstall` to remove the LaunchAgent. Runtime logs
+are stored in `~/Library/Logs/jt-ai-hook-console.log` and
+`~/Library/Logs/jt-ai-hook-console.error.log`.
+
+The repository is both a Cargo workspace and a pnpm/Turborepo monorepo:
 
 ```text
-apps/ai-hook-console      Next.js App Router console
-packages/ai-hook-core     AI-hook and Codex JSONL reader
-packages/ui               shared shadcn/ui components and theme
+apps/jt                    jt Rust binary and owned assets/templates
+apps/ai-hook-console       Next.js App Router console
+crates/nlab-api            shared nlab-api library and standalone binary
+packages/ai-hook-core      AI-hook and Codex JSONL reader
+packages/ui                shared UI components and theme
 ```
+
+Turborepo's experimental Cargo workspace support discovers `jt` and `nlab-api` through
+`cargo metadata`. `pnpm build`, `pnpm check`, `pnpm lint`, and `pnpm test` therefore orchestrate both
+Node packages and Rust crates from one task graph. Cargo and pnpm keep their own manifests and
+lockfiles as ecosystem dependency sources.
 
 Session data can contain private code and conversation text. Keep this console bound to a trusted
 local environment unless authentication is added.
@@ -128,6 +152,18 @@ jt nlab-api init \
 jt nlab-api generate --project /path/to/frontend
 ```
 
+The standalone binary uses the same Rust library and config:
+
+```bash
+nlab-api init \
+  --project /path/to/frontend \
+  --repo-path /path/to/backend \
+  --branch feature-branch \
+  --app-name service_name
+
+nlab-api generate --project /path/to/frontend
+```
+
 `init` writes `.nlab/nlab-api.config.json`, then adds idempotent build-tool and TypeScript aliases. Current
 support targets Vite projects with an exported `nlabRequest` adapter. Vitest configs that merge the
 Vite config inherit those aliases without a duplicate edit. Existing `src/api` or `src/service`
@@ -139,7 +175,8 @@ IR. Rust generates Draft OpenAPI 3.1, TypeScript DTO files, separate enum files,
 reuse the detected request adapter. The same command then queries testserver ZGateway on a best-effort
 basis, migrates business imports from the fixed previous `.nlab` snapshot, optionally generates Mock
 files when `mock.enabled` is true, promotes the stable OpenAPI snapshot, and writes one final report.
-It does not invoke Bun, Node.js, Orval, Python, frontend typecheck, tests, builds, or lint. A DTO field
+By default it does not invoke Bun, Node.js, Orval, Python, frontend typecheck, tests, builds, or lint;
+configured `afterGenerate` hooks may run project-owned commands. A DTO field
 uses a complete code-provenance enum first, then a complete linked Java enum, then explicit comment or
 annotation values; otherwise it remains its original scalar type.
 
@@ -167,6 +204,26 @@ operations, and Mock being disabled do not stop generation; they remain in
 `.nlab/generate-report.json`. stdout contains one final JSON result. stderr contains only stage and
 percentage progress events outside a TTY; a TTY shows one progress bar. The overall deadline defaults
 to 1200 seconds.
+
+Projects can run repository-owned commands after API, type, and enum files are written:
+
+```json
+{
+  "afterGenerate": [
+    {
+      "command": "pnpm",
+      "args": ["exec", "eslint", "--fix"],
+      "includeGeneratedFiles": true
+    }
+  ]
+}
+```
+
+Hooks run sequentially without a shell, from the frontend project root. Every hook receives the exact
+relative file list as JSON in `NLAB_API_GENERATED_FILES` and the project root in
+`NLAB_API_PROJECT_ROOT`. `includeGeneratedFiles` also appends each path as one literal argument. The
+report records the expanded command, duration, and exit status. A non-zero status stops generation,
+retains the pending artifacts, and writes a failed `.nlab/generate-report.json`.
 
 Configure Node.js and Rust package release automation:
 
@@ -256,7 +313,7 @@ JT_INSTALL_DIR=/path/to/bin ./install.sh
 Install a published release, replacing `vX.Y.Z` with a tag from [GitHub Releases](https://github.com/JacobZyy/jt-cli/releases):
 
 ```bash
-cargo install --git https://github.com/JacobZyy/jt-cli --tag vX.Y.Z --locked --root "$HOME/.local"
+cargo install --git https://github.com/JacobZyy/jt-cli --tag vX.Y.Z --locked --root "$HOME/.local" jt
 ```
 
 Upgrade an existing user-owned installation:
@@ -267,7 +324,26 @@ jt upgrade
 jt upgrade --dry-run --force
 ```
 
-`jt upgrade` resolves an exact published GitHub Release and pins its Git commit, asks Cargo to build it in a temporary directory, verifies the staged binary, then atomically replaces `~/.local/bin/jt`. A failed post-install version check restores the previous binary. `--force` reinstalls the current version. The command never runs a shell or `sudo`. Other paths and package-manager shims must use their original installer or manager. Cargo and Git remain required; prebuilt release assets and persistent rollback are not implemented yet.
+`jt upgrade` resolves an exact published GitHub Release and pins its Git commit, asks Cargo to build it in a temporary directory, verifies the staged binary, then atomically replaces `~/.local/bin/jt`. A failed post-install version check restores the previous binary. `--force` reinstalls the current version. The command never runs a shell or `sudo`. Other paths and package-manager shims must use their original installer or manager. Cargo and Git remain required for `jt`; persistent rollback is not implemented.
+
+Install standalone `nlab-api` without Rust or Cargo:
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/JacobZyy/jt-cli/main/install-nlab-api.sh \
+  -o /tmp/install-nlab-api.sh
+sh /tmp/install-nlab-api.sh
+```
+
+Re-run the script to upgrade. Pin a release or change the install directory when needed:
+
+```bash
+NLAB_API_VERSION=1.11.0 NLAB_API_INSTALL_DIR="$HOME/bin" sh /tmp/install-nlab-api.sh
+```
+
+Each GitHub Release publishes checksum-verified `nlab-api` archives for Linux and macOS on x86_64
+and ARM64. The installer writes only `nlab-api`, defaults to `~/.local/bin`, verifies the downloaded
+SHA-256 checksum and binary, and refuses to replace a symlink or non-regular target.
 
 ## Supported repositories
 
@@ -314,8 +390,8 @@ workflow in the consuming repository, not the central reusable workflow. The wor
 Release flow:
 
 1. Merge a Conventional Commit PR into the default branch.
-2. Install, test, and build every detected ecosystem. Turborepo orchestrates Node.js workspace
-   tasks; Cargo validates the Rust workspace.
+2. Install, test, and build every detected ecosystem. Turborepo orchestrates Node packages and the
+   Cargo workspace through one task graph.
 3. release-please creates or updates one manifest Release PR for all changed packages.
 4. Merge Release PR.
 5. Same workflow validates again; release-please creates versions, `CHANGELOG.md` files, tags, and
@@ -337,10 +413,17 @@ Push features through a Conventional Commit PR. `.github/workflows/release.yml` 
 ## Development
 
 ```bash
-cargo fmt --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked
+pnpm check
+pnpm lint
+pnpm test
+pnpm build
+
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
+
+The pnpm commands are the normal repository entrypoints. Direct Cargo formatting and strict Clippy
+remain explicit release gates while Turbo's Cargo integration is experimental.
 
 ## Git hook
 

@@ -1,0 +1,28 @@
+[package]
+name = "nlab-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Generate frontend contracts from NLab Java APIs"
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cliclack.workspace = true
+ignore.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tree-sitter.workspace = true
+tree-sitter-java.workspace = true

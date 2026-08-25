@@ -443,22 +443,18 @@ dependencies = [
 name = "jt"
 version = "1.10.0"
 dependencies = [
- "anyhow",
  "clap",
  "clap_complete",
  "cliclack",
  "ignore",
+ "nlab-api",
  "rand",
  "rand_chacha",
- "regex",
- "rusqlite",
  "semver",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "tree-sitter",
- "tree-sitter-java",
 ]
 
 [[package]]
@@ -495,6 +491,26 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "nlab-api"
+version = "1.10.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cliclack",
+ "ignore",
+ "rand",
+ "rand_chacha",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tree-sitter",
+ "tree-sitter-java",
+]
 
 [[package]]
 name = "once_cell"

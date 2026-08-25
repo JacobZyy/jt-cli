@@ -1,0 +1,27 @@
+[package]
+name = "jt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Personal CLI for Jacob and Taotao"
+repository.workspace = true
+readme = "../../README.md"
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true
+clap_complete = "4.6.9"
+cliclack.workspace = true
+ignore.workspace = true
+nlab-api = { path = "../../crates/nlab-api" }
+rand.workspace = true
+rand_chacha.workspace = true
+semver = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
