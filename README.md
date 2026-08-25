@@ -104,6 +104,23 @@ and reconstructs `apply_patch` diffs from Codex session JSONL. It reads `/tmp/jt
 `~/.codex/sessions`, and `~/.codex/archived_sessions` without modifying them. Set
 `AI_HOOK_LOG_DIR` or `CODEX_HOME` to use different local directories.
 
+On macOS, install the production server as a login service:
+
+```bash
+pnpm --filter ai-hook-console service:install
+```
+
+The LaunchAgent listens only on `127.0.0.1:3100`, starts at login, and restarts after failure.
+After changing console code, rebuild and restart it with one command:
+
+```bash
+pnpm --filter ai-hook-console service:restart
+```
+
+Use `service:status` to inspect it or `service:uninstall` to remove the LaunchAgent. Runtime logs
+are stored in `~/Library/Logs/jt-ai-hook-console.log` and
+`~/Library/Logs/jt-ai-hook-console.error.log`.
+
 The repository remains a Rust crate at the root. pnpm and Turborepo manage the web workspaces:
 
 ```text
