@@ -10,7 +10,29 @@ permissions:
   contents: read
 
 jobs:
-  workspace:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - name: Format
+        run: cargo +stable fmt --all --check
+
+      - name: Clippy
+        run: cargo +stable clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test standalone installer
+        run: sh crates/nlab-api/tests/install.sh
+
+  web:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -36,23 +58,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Format Rust workspace
-        run: cargo +stable fmt --all --check
-
       - name: Check workspaces
         run: pnpm check
 
       - name: Lint workspaces
         run: pnpm lint
 
-      - name: Enforce Rust warnings
-        run: cargo +stable clippy --locked --workspace --all-targets --all-features -- -D warnings
-
       - name: Test workspaces
         run: pnpm test
 
       - name: Build workspaces
         run: pnpm build
-
-      - name: Test standalone installer
-        run: sh crates/nlab-api/tests/install.sh
