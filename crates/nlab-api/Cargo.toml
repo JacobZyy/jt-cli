@@ -1,6 +1,6 @@
 [package]
 name = "nlab-api"
-version.workspace = true
+version = "1.10.0" # x-release-please-version
 edition.workspace = true
 rust-version.workspace = true
 description = "Generate frontend contracts from NLab Java APIs"
