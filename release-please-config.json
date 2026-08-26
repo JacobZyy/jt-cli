@@ -12,6 +12,7 @@
       "release-type": "rust",
       "package-name": "nlab-api",
       "component": "nlab-api",
+      "include-component-in-tag": false,
       "skip-changelog": true,
       "skip-github-release": true
     }
@@ -19,7 +20,7 @@
   "plugins": [
     {
       "type": "cargo-workspace",
-      "merge": true,
+      "merge": false,
       "updateAllPackages": true
     },
     {
