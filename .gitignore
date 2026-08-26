@@ -1,6 +1,8 @@
 /target
 **/.turbo
 **/.next
+**/.vitepress/cache
+**/.vitepress/dist
 **/node_modules
 **/next-env.d.ts
 coverage

@@ -126,6 +126,7 @@ The repository is both a Cargo workspace and a pnpm/Turborepo monorepo:
 ```text
 apps/jt                    jt Rust binary and owned assets/templates
 apps/ai-hook-console       Next.js App Router console
+apps/nlab-api-docs         VitePress documentation for nlab-api
 crates/nlab-api            shared nlab-api library and standalone binary
 packages/ai-hook-core      AI-hook and Codex JSONL reader
 packages/ui                shared UI components and theme
@@ -138,6 +139,12 @@ lockfiles as ecosystem dependency sources.
 
 Session data can contain private code and conversation text. Keep this console bound to a trusted
 local environment unless authentication is added.
+
+Run the nlab-api documentation locally:
+
+```bash
+pnpm --filter @workspace/nlab-api-docs dev
+```
 
 Initialize one frontend project from its real build, TypeScript, request, response-envelope, output,
 and backend Facade layout:
