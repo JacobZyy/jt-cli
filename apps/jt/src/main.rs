@@ -1,6 +1,7 @@
 mod ai_hook;
 mod cli;
 mod icon;
+mod nlab_api_cli;
 mod node;
 mod release;
 mod upgrade;
@@ -126,6 +127,8 @@ enum NlabApiCommand {
     Init(nlab_api::InitArgs),
     #[command(name = "generate", about = "Run complete frontend API generation")]
     Generate(nlab_api::GenerateArgs),
+    #[command(name = "config", about = "Configure the project-local nlab-api runner")]
+    Config(nlab_api_cli::ConfigArgs),
     #[command(
         name = "routes",
         about = "Resolve placeholder paths through ZGateway",
@@ -208,7 +211,16 @@ enum CompletionShell {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let arguments = env::args_os().collect::<Vec<_>>();
+    match nlab_api_cli::forward_if_standalone(&arguments) {
+        Ok(Some(status)) => return ExitCode::from(status),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let cli = Cli::parse_from(&arguments);
 
     match cli.command {
         Commands::Repo {
@@ -217,24 +229,7 @@ fn main() -> ExitCode {
         Commands::Node {
             command: NodeCommand::Init,
         } => node_init(),
-        Commands::NlabApi {
-            command: NlabApiCommand::Init(args),
-        } => ExitCode::from(nlab_api::init(args)),
-        Commands::NlabApi {
-            command: NlabApiCommand::Generate(args),
-        } => ExitCode::from(nlab_api::generate(args)),
-        Commands::NlabApi {
-            command: NlabApiCommand::Routes(args),
-        } => ExitCode::from(nlab_api::routes(args)),
-        Commands::NlabApi {
-            command: NlabApiCommand::Migrate(args),
-        } => ExitCode::from(nlab_api::migrate(args)),
-        Commands::NlabApi {
-            command: NlabApiCommand::Mock(args),
-        } => ExitCode::from(nlab_api::mock(args)),
-        Commands::NlabApi {
-            command: NlabApiCommand::Accept(args),
-        } => ExitCode::from(nlab_api::accept(args)),
+        Commands::NlabApi { command } => run_nlab_api(command),
         Commands::Cli {
             command: CliCommand::Bootstrap,
         } => cli_bootstrap(),
@@ -250,6 +245,18 @@ fn main() -> ExitCode {
         Commands::Upgrade(args) => upgrade(args),
         Commands::Icon(args) => icon_download(&args.selector, args.directory.as_ref()),
         Commands::Completions(args) => completions(args.shell),
+    }
+}
+
+fn run_nlab_api(command: NlabApiCommand) -> ExitCode {
+    match command {
+        NlabApiCommand::Init(args) => ExitCode::from(nlab_api::init(args)),
+        NlabApiCommand::Generate(args) => ExitCode::from(nlab_api::generate(args)),
+        NlabApiCommand::Config(args) => ExitCode::from(nlab_api_cli::configure(args)),
+        NlabApiCommand::Routes(args) => ExitCode::from(nlab_api::routes(args)),
+        NlabApiCommand::Migrate(args) => ExitCode::from(nlab_api::migrate(args)),
+        NlabApiCommand::Mock(args) => ExitCode::from(nlab_api::mock(args)),
+        NlabApiCommand::Accept(args) => ExitCode::from(nlab_api::accept(args)),
     }
 }
 
