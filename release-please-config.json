@@ -1,10 +1,31 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "packages": {
-    ".": {
+    "apps/jt": {
       "release-type": "rust",
       "package-name": "jt",
+      "component": "jt",
+      "changelog-path": "/CHANGELOG.md",
       "include-component-in-tag": false
+    },
+    "crates/nlab-api": {
+      "release-type": "rust",
+      "package-name": "nlab-api",
+      "component": "nlab-api",
+      "skip-changelog": true,
+      "skip-github-release": true
     }
-  }
+  },
+  "plugins": [
+    {
+      "type": "cargo-workspace",
+      "merge": true,
+      "updateAllPackages": true
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "jt workspace",
+      "components": ["jt", "nlab-api"]
+    }
+  ]
 }
