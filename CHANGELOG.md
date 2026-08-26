@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.11.0](https://github.com/JacobZyy/jt-cli/compare/v1.10.0...v1.11.0) (2026-08-26)
+
+
+### Features
+
+* **nlab-api:** add standalone release flow ([#47](https://github.com/JacobZyy/jt-cli/issues/47)) ([7ea75de](https://github.com/JacobZyy/jt-cli/commit/7ea75de0aebdc08d2d100713eca6c971d18426d5))
+* **repo:** unify project architecture ([#46](https://github.com/JacobZyy/jt-cli/issues/46)) ([201b8b2](https://github.com/JacobZyy/jt-cli/commit/201b8b2bd0caca119fbe0dc1bad9b8c48d131a2a))
+
+
+### Bug Fixes
+
+* **release:** use explicit crate versions ([#48](https://github.com/JacobZyy/jt-cli/issues/48)) ([12f49bd](https://github.com/JacobZyy/jt-cli/commit/12f49bd968506d88bf45a79cffcbd50ab358e58d))
+
 ## [1.10.0](https://github.com/JacobZyy/jt-cli/compare/v1.9.4...v1.10.0) (2026-08-24)
 
 
