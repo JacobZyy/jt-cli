@@ -39,12 +39,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
           - runner: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
@@ -66,12 +60,15 @@ jobs:
 
       - name: Package and checksum
         env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.tag_name }}
           TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir dist
-          cp "target/$TARGET/release/nlab-api" dist/nlab-api
+          binary="target/$TARGET/release/nlab-api"
+          test "$("$binary" --version)" = "nlab-api ${EXPECTED_VERSION#v}"
+          cp "$binary" dist/nlab-api
           tar -C dist -czf "dist/nlab-api-$TARGET.tar.gz" nlab-api
           cd dist
           if command -v sha256sum >/dev/null 2>&1; then
@@ -90,3 +87,35 @@ jobs:
           "dist/nlab-api-$TARGET.tar.gz"
           "dist/nlab-api-$TARGET.tar.gz.sha256"
           --clobber
+
+  nlab-api-ready:
+    needs:
+      - release
+      - nlab-api-binaries
+    if: needs.release.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Publish nlab-api readiness manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/nlab-api-manifest.json"
+          version="${TAG_NAME#v}"
+          cat > "$manifest" <<EOF
+          {
+            "schemaVersion": 1,
+            "version": "$version",
+            "tag": "$TAG_NAME",
+            "targets": ["aarch64-apple-darwin"]
+          }
+          EOF
+          gh release upload "$TAG_NAME" "$manifest" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"

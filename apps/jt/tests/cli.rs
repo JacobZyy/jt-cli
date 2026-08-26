@@ -60,7 +60,7 @@ fn nlab_api_help_and_invalid_repo_are_non_mutating() {
     let group_help = jt().args(["nlab-api", "--help"]).output().unwrap();
     assert!(group_help.status.success());
     let group_help = String::from_utf8(group_help.stdout).unwrap();
-    for command in ["init", "generate"] {
+    for command in ["init", "generate", "config"] {
         assert!(group_help.contains(command), "missing nlab-api {command}");
     }
     for command in ["routes", "migrate", "mock", "accept"] {
@@ -87,6 +87,7 @@ fn nlab_api_help_and_invalid_repo_are_non_mutating() {
     assert!(help.contains("--timeout-seconds"));
 
     let root = tempdir().unwrap();
+    let isolated_path = tempdir().unwrap();
     let result = jt()
         .args([
             "nlab-api",
@@ -94,12 +95,118 @@ fn nlab_api_help_and_invalid_repo_are_non_mutating() {
             "--project",
             root.path().to_str().unwrap(),
         ])
+        .env("PATH", isolated_path.path())
         .output()
         .unwrap();
 
     assert_eq!(result.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("read nlab-api config"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cannot run standalone nlab-api"));
     assert!(!root.path().join(".nlab").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn nlab_api_runner_defaults_to_standalone_and_local_config_selects_jt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = tempdir().unwrap();
+    let fake_bin = tempdir().unwrap();
+    let standalone = fake_bin.path().join("nlab-api");
+    let log = project.path().join("standalone.log");
+    fs::write(
+        &standalone,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NLAB_API_TEST_LOG\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&standalone, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        fake_bin.path().display(),
+        std::env::var_os("PATH")
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+    let project_path = project.path().to_str().unwrap();
+
+    let forwarded = jt()
+        .args([
+            "nlab-api",
+            "generate",
+            "--project",
+            project_path,
+            "--timeout-seconds",
+            "10",
+            "--future-option",
+            "value",
+        ])
+        .env("PATH", &path)
+        .env("NLAB_API_TEST_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(forwarded.status.success());
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!(
+            "generate\n--project\n{project_path}\n--timeout-seconds\n10\n--future-option\nvalue\n"
+        )
+    );
+
+    let configured = jt()
+        .args([
+            "nlab-api",
+            "config",
+            "--runner",
+            "jt",
+            "--project",
+            project_path,
+        ])
+        .output()
+        .unwrap();
+    assert!(configured.status.success());
+    let config = fs::read_to_string(project.path().join(".nlab/cli.local.json")).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&config).unwrap(),
+        serde_json::json!({"version": 1, "runner": "jt"})
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join(".gitignore")).unwrap(),
+        "/.nlab/cli.local.json\n"
+    );
+
+    fs::remove_file(&log).unwrap();
+    let embedded = jt()
+        .args(["nlab-api", "generate", "--project", project_path])
+        .env("PATH", &path)
+        .env("NLAB_API_TEST_LOG", &log)
+        .output()
+        .unwrap();
+    assert_eq!(embedded.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&embedded.stderr).contains("read nlab-api config"));
+    assert!(!log.exists());
+
+    let unset = jt()
+        .args(["nlab-api", "config", "--unset", "--project", project_path])
+        .output()
+        .unwrap();
+    assert!(unset.status.success());
+    assert!(!project.path().join(".nlab/cli.local.json").exists());
+    assert_eq!(
+        fs::read_to_string(project.path().join(".gitignore")).unwrap(),
+        "/.nlab/cli.local.json\n"
+    );
+
+    let forwarded_again = jt()
+        .args(["nlab-api", "generate", "--project", project_path])
+        .env("PATH", &path)
+        .env("NLAB_API_TEST_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(forwarded_again.status.success());
+    assert!(
+        fs::read_to_string(log)
+            .unwrap()
+            .starts_with("generate\n--project\n")
+    );
 }
 
 #[test]

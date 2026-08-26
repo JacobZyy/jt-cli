@@ -39,6 +39,7 @@ TEST_LOG="$LOG" \
   sh "$REPOSITORY_ROOT/install-nlab-api.sh" >/dev/null
 
 [ "$("$INSTALL_DIR/nlab-api" --version)" = 'nlab-api 1.10.0' ]
+[ "$(cat "$INSTALL_DIR/.nlab-api-managed")" = 'nlab-api installer v1' ]
 grep -q '/releases/download/v1.10.0/nlab-api-aarch64-apple-darwin.tar.gz' "$LOG"
 
 rm "$INSTALL_DIR/nlab-api"
