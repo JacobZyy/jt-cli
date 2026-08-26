@@ -4,17 +4,20 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn nlab_api() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_nlab-api"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nlab-api"));
+    command.env("NLAB_API_NO_UPDATE", "1");
+    command
 }
 
 #[test]
-fn exposes_init_and_generate_only() {
+fn exposes_public_commands() {
     let output = nlab_api().arg("--help").output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(output.status.success());
     assert!(stdout.contains("init"));
     assert!(stdout.contains("generate"));
+    assert!(stdout.contains("update"));
     for hidden in ["routes", "migrate", "mock", "accept"] {
         assert!(!stdout.contains(hidden));
     }

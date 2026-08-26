@@ -126,6 +126,7 @@ The repository is both a Cargo workspace and a pnpm/Turborepo monorepo:
 ```text
 apps/jt                    jt Rust binary and owned assets/templates
 apps/ai-hook-console       Next.js App Router console
+apps/nlab-api-docs         VitePress documentation for nlab-api
 crates/nlab-api            shared nlab-api library and standalone binary
 packages/ai-hook-core      AI-hook and Codex JSONL reader
 packages/ui                shared UI components and theme
@@ -139,10 +140,18 @@ lockfiles as ecosystem dependency sources.
 Session data can contain private code and conversation text. Keep this console bound to a trusted
 local environment unless authentication is added.
 
+Run the nlab-api documentation locally:
+
+```bash
+pnpm --filter @workspace/nlab-api-docs dev
+```
+
 Initialize one frontend project from its real build, TypeScript, request, response-envelope, output,
 and backend Facade layout:
 
 ```bash
+jt nlab-api config --runner jt --project /path/to/frontend
+
 jt nlab-api init \
   --project /path/to/frontend \
   --repo-path /path/to/backend \
@@ -150,6 +159,16 @@ jt nlab-api init \
   --app-name service_name
 
 jt nlab-api generate --project /path/to/frontend
+```
+
+`jt nlab-api init` and `generate` default to the standalone `nlab-api` executable. The
+project-local `.nlab/cli.local.json` switches those two commands to jt's embedded implementation.
+Only `jt nlab-api config` reads or writes this preference; standalone `nlab-api` ignores it.
+The config command adds `/.nlab/cli.local.json` to the target project's `.gitignore`.
+Restore standalone execution with:
+
+```bash
+jt nlab-api config --unset --project /path/to/frontend
 ```
 
 The standalone binary uses the same Rust library and config:
@@ -335,15 +354,26 @@ curl -fsSL \
 sh /tmp/install-nlab-api.sh
 ```
 
-Re-run the script to upgrade. Pin a release or change the install directory when needed:
+`nlab-api` checks the latest ready release before normal commands and automatically replaces
+an older installed binary. Use explicit commands when needed:
+
+```bash
+nlab-api update --check
+nlab-api update
+```
+
+Pass `--no-update` for offline or reproducible runs. Re-run the script to install a pinned release
+or change the install directory:
 
 ```bash
 NLAB_API_VERSION=1.11.0 NLAB_API_INSTALL_DIR="$HOME/bin" sh /tmp/install-nlab-api.sh
 ```
 
-Each GitHub Release publishes checksum-verified `nlab-api` archives for Linux and macOS on x86_64
-and ARM64. The installer writes only `nlab-api`, defaults to `~/.local/bin`, verifies the downloaded
-SHA-256 checksum and binary, and refuses to replace a symlink or non-regular target.
+Each GitHub Release publishes a checksum-verified `nlab-api` archive for macOS Apple Silicon
+(`aarch64-apple-darwin`). The installer writes only `nlab-api`, defaults to `~/.local/bin`,
+verifies the downloaded SHA-256 checksum and binary, and refuses to replace a symlink or
+non-regular target. It also writes an ownership marker used by self-update; manually copied binaries
+are not replaced automatically. Generation still requires the existing `git` and `codegraph` tools.
 
 ## Supported repositories
 

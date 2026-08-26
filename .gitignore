@@ -1,7 +1,10 @@
 /target
 **/.turbo
 **/.next
+**/.vitepress/cache
+**/.vitepress/dist
 **/node_modules
 **/next-env.d.ts
 coverage
 .DS_Store
+/.nlab/cli.local.json

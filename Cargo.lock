@@ -504,6 +504,7 @@ dependencies = [
  "rand_chacha",
  "regex",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

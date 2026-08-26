@@ -8,10 +8,7 @@ INSTALL_DIR=${NLAB_API_INSTALL_DIR:-"$HOME/.local/bin"}
 VERSION=${NLAB_API_VERSION:-latest}
 
 case "$(uname -s)-$(uname -m)" in
-  Darwin-x86_64) TARGET=x86_64-apple-darwin ;;
   Darwin-arm64) TARGET=aarch64-apple-darwin ;;
-  Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
-  Linux-aarch64 | Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
   *)
     printf '%s\n' "unsupported platform: $(uname -s) $(uname -m)" >&2
     exit 1
@@ -50,9 +47,11 @@ command -v install >/dev/null 2>&1 || {
 
 NLAB_TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/nlab-api.XXXXXX")
 NLAB_STAGE_PATH="$INSTALL_DIR/.nlab-api.tmp.$$"
+NLAB_MARKER_STAGE="$INSTALL_DIR/.nlab-api-managed.tmp.$$"
 cleanup() {
   rm -rf "$NLAB_TEMP_DIR"
   rm -f "$NLAB_STAGE_PATH"
+  rm -f "$NLAB_MARKER_STAGE"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -86,11 +85,19 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 INSTALL_PATH="$INSTALL_DIR/nlab-api"
+MARKER_PATH="$INSTALL_DIR/.nlab-api-managed"
 if [ -L "$INSTALL_PATH" ] || { [ -e "$INSTALL_PATH" ] && [ ! -f "$INSTALL_PATH" ]; }; then
   printf '%s\n' "refusing to replace non-regular file: $INSTALL_PATH" >&2
   exit 1
 fi
+if [ -L "$MARKER_PATH" ] || { [ -e "$MARKER_PATH" ] && [ ! -f "$MARKER_PATH" ]; }; then
+  printf '%s\n' "refusing to replace non-regular file: $MARKER_PATH" >&2
+  exit 1
+fi
 install -m 755 "$NLAB_TEMP_DIR/nlab-api" "$NLAB_STAGE_PATH"
+printf '%s\n' 'nlab-api installer v1' > "$NLAB_MARKER_STAGE"
+chmod 644 "$NLAB_MARKER_STAGE"
 mv -f "$NLAB_STAGE_PATH" "$INSTALL_PATH"
+mv -f "$NLAB_MARKER_STAGE" "$MARKER_PATH"
 
 printf '%s\n' "installed nlab-api to $INSTALL_PATH"
