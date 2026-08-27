@@ -1,0 +1,37 @@
+{
+  "findings": [
+    { "kind": "file", "name": "index.ts", "path": "src/index.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "file", "name": "only-test.ts", "path": "src/only-test.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "function", "name": "onlyTestUse", "path": "src/only-test.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "file", "name": "reexported.ts", "path": "src/reexported.ts", "line": 1, "reason": "reexport-only", "reexports": ["src/index.ts:1"] },
+    { "kind": "function", "name": "reexportedOnly", "path": "src/reexported.ts", "line": 1, "reason": "reexport-only", "reexports": ["src/index.ts:1"] },
+    { "kind": "file", "name": "same-b.ts", "path": "src/same-b.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "function", "name": "duplicate", "path": "src/same-b.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "file", "name": "unreferenced-file.ts", "path": "src/unreferenced-file.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "variable", "name": "unusedFileValue", "path": "src/unreferenced-file.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "function", "name": "unusedExport", "path": "src/unused.ts", "line": 1, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "function", "name": "importedButUnread", "path": "src/unused.ts", "line": 3, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "function", "name": "recursiveOnly", "path": "src/unused.ts", "line": 5, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "variable", "name": "writeOnly", "path": "src/unused.ts", "line": 9, "reason": "no-inbound-usage", "reexports": [] }
+  ],
+  "ignored": [
+    { "kind": "variable", "name": "_intentionalUnused", "path": "src/intentional.ts", "line": 1, "reason": "intentional-unused" },
+    { "kind": "file", "name": "main.ts", "path": "src/main.ts", "line": 1, "reason": "entrypoint" },
+    { "kind": "function", "name": "appEntrypoint", "path": "src/main.ts", "line": 9, "reason": "entrypoint" },
+    { "kind": "file", "name": "types.d.ts", "path": "src/types.d.ts", "line": 1, "reason": "type-declaration" }
+  ],
+  "unknown": [
+    { "kind": "function", "name": "dynamicRun", "path": "src/dynamic-target.ts", "line": 1, "reason": "dynamic-import-boundary" }
+  ],
+  "diagnostics": ["semantic-helper"],
+  "summary": {
+    "scannedFiles": 21,
+    "scannedSymbols": 17,
+    "functions": 6,
+    "variables": 2,
+    "files": 5,
+    "ignored": 4,
+    "unknown": 1,
+    "diagnostics": 1
+  }
+}

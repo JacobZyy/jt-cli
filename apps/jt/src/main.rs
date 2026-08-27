@@ -4,6 +4,7 @@ mod icon;
 mod nlab_api_cli;
 mod node;
 mod release;
+mod unused;
 mod upgrade;
 mod zed;
 
@@ -33,6 +34,8 @@ Examples:
   jt zed-conf
   jt ai-hook
   jt ai-hook --checks vitest,eslint --agents codex
+  jt unused [PATH]
+  jt call-graph [PATH]
   jt vitest
   jt upgrade [version] [options]
   jt icon <size|svg> [directory]
@@ -87,6 +90,16 @@ enum Commands {
     ZedConf,
     #[command(name = "ai-hook", about = "Configure project AI hooks")]
     AiHook(ai_hook::AiHookArgs),
+    #[command(
+        name = "unused",
+        about = "Find unused JavaScript, TypeScript, and Vue code"
+    )]
+    Unused(unused::UnusedArgs),
+    #[command(
+        name = "call-graph",
+        about = "Write an interactive JavaScript, TypeScript, and Vue call graph"
+    )]
+    CallGraph(unused::CallGraphArgs),
     #[command(name = "vitest", about = "Vitest automation (not implemented yet)")]
     Vitest,
     #[command(name = "upgrade", about = "Upgrade jt from a published GitHub Release")]
@@ -238,6 +251,8 @@ fn main() -> ExitCode {
         } => ghostty_install(),
         Commands::ZedConf => ExitCode::from(zed::run()),
         Commands::AiHook(args) => ExitCode::from(ai_hook::run(args)),
+        Commands::Unused(args) => ExitCode::from(unused::run(args)),
+        Commands::CallGraph(args) => ExitCode::from(unused::run_call_graph(args)),
         Commands::Vitest => {
             println!("Vitest functionality is not implemented yet.");
             ExitCode::SUCCESS

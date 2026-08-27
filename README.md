@@ -46,6 +46,83 @@ different content is backed up beside the file before an atomic update. The temp
 over HTTPS from [`apps/jt/templates/zed/settings.json`](apps/jt/templates/zed/settings.json) on `main`, so merging a
 template-only change updates future command runs without releasing a new `jt` version.
 
+Find statically unused functions, variables, and files:
+
+```bash
+jt unused
+jt unused /path/to/project --kind function,variable,file
+jt unused /path/to/project --mode library --json
+```
+
+`PATH` can be a project root or a nested source directory/file. `jt` walks upward to find the nearest
+JavaScript/TypeScript project (`package.json`, `tsconfig.json`, or `jsconfig.json`), builds one reference
+graph, and reports findings inside the requested scope. The scan is read-only: it does not run
+`codegraph init`, install packages, or write an index.
+
+Projects can commit `.nlab/unused.config.json` to control the graph:
+
+```json
+{
+  "version": 1,
+  "roots": ["src"],
+  "exclude": [
+    "src/types/service-type/**",
+    "src/types/service-enums/**",
+    "src/mock/**"
+  ]
+}
+```
+
+`roots` contains project-relative files or directories; an omitted or empty list means the project
+root. `exclude` accepts project-relative gitignore-style patterns without negation. Excluded files do
+not produce findings and do not count as reference consumers. An explicit `PATH` only narrows output
+inside configured roots. Absolute paths, `..`, unknown fields, unsupported versions, and symlinked
+roots fail before scanning. JSON reports the effective `scanRoots` and `exclude` values.
+
+The scanner uses Oxc for JavaScript/TypeScript syntax and the project's TypeScript/Volar installation
+for cross-file and Vue template references. `--mode app` is the default: an `export` declaration alone
+is not usage, and a barrel re-export alone is not usage. A real consumer is required. `--mode library`
+ignores exported symbols as public API; unexported unused symbols remain candidates. Static dynamic
+imports count as usage. Pattern or otherwise unresolved dynamic imports are handled conservatively and
+reported in diagnostics rather than silently declared unused. Missing TypeScript/Volar dependencies are
+not installed; affected semantic coverage appears in diagnostics/unknown.
+
+The semantic phase loads the trusted project's installed `typescript`/`vue-tsc` packages in a bounded
+Node.js helper (120-second timeout). Run it only in workspaces whose dependencies you trust.
+
+`main.*`, declaration files (`*.d.ts`), and test files (`tests/`, `__tests__/`, `*.test.*`, `*.spec.*`)
+are ignored as entrypoints, type declarations, or test code. Results are sorted by path and source
+position. `--json` writes pure JSON to stdout; errors retain the normal `error:` stderr format. Results
+are static evidence only: framework routes, decorators, macros, reflection, string-based registries,
+and other runtime loading can still require review.
+
+Regression coverage includes projects with known answers under `apps/jt/tests/fixtures`.
+`unused-golden` locks the Oxc fallback; `unused-semantic-golden` locks TypeScript/Volar, Vue
+template, and namespace-import behavior when workspace Node.js dependencies are installed.
+
+Write a self-contained interactive call graph:
+
+```bash
+jt call-graph
+jt call-graph src/views --focus queryQcTemplate --depth 3
+jt call-graph --output .nlab/call-graph.html --max-nodes 800
+jt call-graph --open
+```
+
+The command reuses the same `.nlab/unused.config.json` roots and exclusions, Oxc graph, and
+TypeScript/Volar semantic pass as `jt unused`. It merges repeated call sites into directed edges,
+keeps import/type-import/re-export/dynamic-import edges distinct, and writes one offline HTML file with no CDN,
+server, telemetry, or source-code upload. The Canvas view supports pan, zoom, node dragging, search,
+kind filters, caller/callee focus, configurable depth, and call-site details. Output defaults to
+`.nlab/call-graph.html`; jt-generated files can be regenerated, while replacing another HTML file
+requires `--force`. The HTML embeds the complete graph and initially displays at most 400 nodes;
+search and focus can reveal the rest. A 20,000-node/80,000-edge safety ceiling requires narrowing
+`.nlab/unused.config.json` for exceptionally large repositories.
+
+The graph follows Graphy's split between language analysis, a renderer-independent node/edge model,
+and an interactive focused view. It does not invent edges for unresolved reflection or string-based
+dispatch; those gaps remain diagnostics rather than false exact calls.
+
 Configure project-local AI-edit hooks:
 
 ```bash
