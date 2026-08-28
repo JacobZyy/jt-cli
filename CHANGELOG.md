@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.1](https://github.com/JacobZyy/jt-cli/compare/v1.11.0...v1.11.1) (2026-08-28)
+
+
+### Features
+
+* **jt:** add unused analysis and graph inspector ([598adb1](https://github.com/JacobZyy/jt-cli/commit/598adb16f7a521dbd5f6aeb47b7376555454ef5b))
+
 ## [1.11.0](https://github.com/JacobZyy/jt-cli/compare/v1.10.0...v1.11.0) (2026-08-26)
 
 
