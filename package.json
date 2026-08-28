@@ -14,7 +14,9 @@
     "test": "turbo run test"
   },
   "devDependencies": {
+    "@vue/compiler-sfc": "3.5.41",
     "turbo": "2.10.11",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vue-tsc": "3.3.9"
   }
 }

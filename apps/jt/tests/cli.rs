@@ -4,6 +4,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+use rusqlite::Connection;
 use tempfile::tempdir;
 
 fn jt() -> Command {
@@ -43,6 +44,8 @@ fn help_lists_new_commands_only() {
     assert!(stdout.contains("jt zed-conf"));
     assert!(stdout.contains("jt ai-hook"));
     assert!(stdout.contains("jt ai-hook --checks vitest,eslint --agents codex"));
+    assert!(stdout.contains("jt unused [PATH]"));
+    assert!(stdout.contains("jt call-graph [PATH]"));
     assert!(stdout.contains("jt vitest"));
     assert!(!stdout.contains("jt vitest ai-hook"));
     assert!(stdout.contains("jt upgrade"));
@@ -53,6 +56,621 @@ fn help_lists_new_commands_only() {
             .any(|line| line.trim_start().starts_with("help "))
     );
     assert!(!stdout.contains("jt release init"));
+}
+
+#[test]
+fn unused_help_and_non_project_are_read_only() {
+    let help = jt().args(["unused", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--kind"));
+    assert!(help.contains("--mode"));
+    assert!(help.contains("--json"));
+
+    let project = tempdir().unwrap();
+    let output = jt()
+        .args(["unused", project.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("error:"));
+    assert!(stderr.contains("JavaScript"));
+    assert!(stderr.contains("TypeScript"));
+    assert!(stderr.contains("Vue"));
+    assert!(stderr.contains("project"));
+    assert!(project.path().read_dir().unwrap().next().is_none());
+
+    let invalid = jt().args(["unused", "--kind", "class"]).output().unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+}
+
+fn write_unused_fixture(path: &Path) {
+    for (relative, contents) in [
+        (
+            "package.json",
+            r#"{"name":"unused-fixture","private":true}"#,
+        ),
+        (
+            "tsconfig.json",
+            r#"{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","strict":true},"include":["src"]}"#,
+        ),
+        (
+            "src/main.ts",
+            "import './consumer';\nexport function appEntrypoint() {}\n",
+        ),
+        (
+            "src/consumer.ts",
+            "import { consumed, importedButUnused } from './defs';\nconsumed();\nimport './side-effect';\nvoid import('./dynamic-target');\n",
+        ),
+        (
+            "src/defs.ts",
+            "export function appOnly() {}\nexport function consumed() {}\nexport function importedButUnused() {}\nfunction privateOnly() {}\n",
+        ),
+        ("src/side-effect.ts", "console.log('side effect');\n"),
+        ("src/dynamic-target.ts", "console.log('dynamic target');\n"),
+        ("src/reexported.ts", "export function reexported() {}\n"),
+        (
+            "src/index.ts",
+            "export { reexported } from './reexported';\n",
+        ),
+        ("src/types.d.ts", "declare function typeOnly(): void;\n"),
+        ("src/example.test.ts", "export function testOnly() {}\n"),
+    ] {
+        write_file(path, relative, contents);
+    }
+}
+
+fn write_file(root: &Path, relative: &str, contents: &str) {
+    let file = root.join(relative);
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(file, contents).unwrap();
+}
+
+fn report_section_names(report: &serde_json::Value, section: &str) -> Vec<String> {
+    report[section]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing JSON section {section}"))
+        .iter()
+        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn report_finding<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item.get("name").and_then(serde_json::Value::as_str) == Some(name))
+        .unwrap_or_else(|| panic!("missing finding {name}"))
+}
+
+fn golden_entry(item: &serde_json::Value, include_reexports: bool) -> serde_json::Value {
+    let mut entry = serde_json::json!({
+        "kind": item["kind"],
+        "name": item["name"],
+        "path": item["path"],
+        "line": item["line"],
+        "reason": item["reason"],
+    });
+    if include_reexports {
+        entry["reexports"] = item["reexports"].clone();
+    }
+    entry
+}
+
+fn golden_report(report: &serde_json::Value) -> serde_json::Value {
+    let entries = |section: &str, include_reexports| {
+        report[section]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing JSON section {section}"))
+            .iter()
+            .map(|item| golden_entry(item, include_reexports))
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "findings": entries("findings", true),
+        "ignored": entries("ignored", false),
+        "unknown": entries("unknown", false),
+        "diagnostics": report["diagnostics"]
+            .as_array()
+            .expect("missing diagnostics")
+            .iter()
+            .map(|diagnostic| diagnostic["code"].clone())
+            .collect::<Vec<_>>(),
+        "summary": {
+            "scannedFiles": report["summary"]["scannedFiles"],
+            "scannedSymbols": report["summary"]["scannedSymbols"],
+            "functions": report["summary"]["functions"],
+            "variables": report["summary"]["variables"],
+            "files": report["summary"]["files"],
+            "ignored": report["summary"]["ignored"],
+            "unknown": report["summary"]["unknown"],
+            "diagnostics": report["summary"]["diagnostics"],
+        },
+    })
+}
+
+#[test]
+fn unused_golden_fixture_matches_expected_contract() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unused-golden");
+    let expected = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture.join("expected.json")).unwrap(),
+    )
+    .unwrap();
+    let isolated_path = tempdir().unwrap();
+    let output = jt()
+        .args(["unused", fixture.to_str().unwrap(), "--json"])
+        .env("PATH", isolated_path.path())
+        .env_remove("NODE_PATH")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let actual = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(golden_report(&actual), expected);
+}
+
+fn semantic_dependencies_available(fixture: &Path) -> bool {
+    let probe = r#"
+const { createRequire } = require('node:module')
+const projectRequire = createRequire(`${process.argv[1]}/package.json`)
+for (const dependency of ['typescript', 'vue-tsc', '@vue/compiler-sfc']) {
+  projectRequire.resolve(dependency)
+}
+"#;
+    Command::new("node")
+        .args(["-e", probe, fixture.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn unused_semantic_golden_fixture_matches_expected_contract() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unused-semantic-golden");
+    if !semantic_dependencies_available(&fixture) {
+        eprintln!(
+            "skipped semantic golden fixture: install workspace Node.js dependencies with `pnpm install`"
+        );
+        return;
+    }
+    let expected = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture.join("expected.json")).unwrap(),
+    )
+    .unwrap();
+    let output = jt()
+        .args(["unused", fixture.to_str().unwrap(), "--json"])
+        .env_remove("NODE_PATH")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let actual = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(golden_report(&actual), expected);
+}
+
+#[test]
+fn unused_fixture_distinguishes_app_library_and_reexport_usage() {
+    let project = tempdir().unwrap();
+    write_unused_fixture(project.path());
+    let project_path = project.path().to_str().unwrap();
+
+    let app = jt()
+        .args(["unused", project_path, "--kind", "function", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        app.status.success(),
+        "{}",
+        String::from_utf8_lossy(&app.stderr)
+    );
+    assert!(app.stderr.is_empty());
+    let app: serde_json::Value = serde_json::from_slice(&app.stdout).unwrap();
+    let app_names = report_section_names(&app, "findings");
+    assert!(app_names.contains(&"appOnly".to_owned()));
+    assert!(app_names.contains(&"importedButUnused".to_owned()));
+    assert!(app_names.contains(&"privateOnly".to_owned()));
+    assert!(app_names.contains(&"reexported".to_owned()));
+    assert!(!app_names.contains(&"consumed".to_owned()));
+    assert!(!app_names.contains(&"appEntrypoint".to_owned()));
+    assert!(!app_names.contains(&"testOnly".to_owned()));
+
+    let reexport = report_finding(&app, "reexported");
+    assert!(
+        reexport
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reason| reason.contains("reexport"))
+    );
+    assert!(
+        reexport
+            .get("reexports")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|locations| !locations.is_empty())
+    );
+
+    let library = jt()
+        .args([
+            "unused",
+            project_path,
+            "--kind",
+            "function",
+            "--mode",
+            "library",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        library.status.success(),
+        "{}",
+        String::from_utf8_lossy(&library.stderr)
+    );
+    assert!(library.stderr.is_empty());
+    let library: serde_json::Value = serde_json::from_slice(&library.stdout).unwrap();
+    let library_names = report_section_names(&library, "findings");
+    assert!(library_names.contains(&"privateOnly".to_owned()));
+    assert!(!library_names.contains(&"appOnly".to_owned()));
+    assert!(!library_names.contains(&"reexported".to_owned()));
+    let ignored_names = report_section_names(&library, "ignored");
+    assert!(ignored_names.contains(&"appOnly".to_owned()));
+    assert!(ignored_names.contains(&"reexported".to_owned()));
+
+    let files = jt()
+        .args(["unused", project_path, "--kind", "file", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        files.status.success(),
+        "{}",
+        String::from_utf8_lossy(&files.stderr)
+    );
+    let files: serde_json::Value = serde_json::from_slice(&files.stdout).unwrap();
+    let file_paths = files["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.get("path").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        file_paths
+            .iter()
+            .any(|path| path.ends_with("reexported.ts"))
+    );
+    let reexported_file = files["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item.get("path")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| path.ends_with("reexported.ts"))
+        })
+        .unwrap();
+    assert_eq!(reexported_file["reason"], "reexport-only");
+    assert!(
+        reexported_file["reexports"]
+            .as_array()
+            .is_some_and(|locations| !locations.is_empty())
+    );
+    assert!(
+        !file_paths
+            .iter()
+            .any(|path| path.ends_with("side-effect.ts"))
+    );
+    assert!(
+        !file_paths
+            .iter()
+            .any(|path| path.ends_with("dynamic-target.ts"))
+    );
+    assert!(!file_paths.iter().any(|path| path.ends_with("main.ts")));
+    assert!(!file_paths.iter().any(|path| path.ends_with("types.d.ts")));
+    assert!(
+        !file_paths
+            .iter()
+            .any(|path| path.ends_with("example.test.ts"))
+    );
+}
+
+#[test]
+fn unused_config_limits_roots_and_excludes_consumers() {
+    let project = tempdir().unwrap();
+    write_file(
+        project.path(),
+        "package.json",
+        r#"{"name":"unused-config-fixture","private":true}"#,
+    );
+    write_file(
+        project.path(),
+        ".nlab/unused.config.json",
+        r#"{"version":1,"roots":["src"],"exclude":["src/ignored/**"]}"#,
+    );
+    write_file(
+        project.path(),
+        "src/feature/defs.ts",
+        "export function usedInScope() {}\nexport function usedOnlyByExcludedConsumer() {}\n",
+    );
+    write_file(
+        project.path(),
+        "src/feature/consumer.ts",
+        "import { usedInScope } from './defs'; usedInScope();\n",
+    );
+    write_file(
+        project.path(),
+        "src/ignored/consumer.ts",
+        "import { usedOnlyByExcludedConsumer } from '../feature/defs'; usedOnlyByExcludedConsumer();\n",
+    );
+    write_file(
+        project.path(),
+        "scripts/outside.ts",
+        "export function outsideRoot() {}\n",
+    );
+
+    let output = jt()
+        .args([
+            "unused",
+            project.path().to_str().unwrap(),
+            "--kind",
+            "function",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scanRoots"], serde_json::json!(["src"]));
+    assert_eq!(report["exclude"], serde_json::json!(["src/ignored/**"]));
+    assert_eq!(report["summary"]["scannedFiles"], 2);
+    let findings = report_section_names(&report, "findings");
+    assert!(findings.contains(&"usedOnlyByExcludedConsumer".to_owned()));
+    assert!(!findings.contains(&"usedInScope".to_owned()));
+    assert!(!findings.contains(&"outsideRoot".to_owned()));
+
+    let outside = jt()
+        .args([
+            "unused",
+            project.path().join("scripts").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(outside.status.code(), Some(1));
+    assert!(outside.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&outside.stderr).contains("outside configured roots"));
+}
+
+#[test]
+fn unused_config_rejects_invalid_contracts_without_writes() {
+    for config in [
+        r#"{"version":2,"roots":["src"]}"#,
+        r#"{"version":1,"roots":["../src"]}"#,
+        r#"{"version":1,"roots":["/src"]}"#,
+        r#"{"version":1,"roots":["src"],"unknown":true}"#,
+        r#"{"version":1,"roots":["src"],"exclude":["!src/keep.ts"]}"#,
+    ] {
+        let project = tempdir().unwrap();
+        write_file(project.path(), "package.json", r#"{"private":true}"#);
+        write_file(project.path(), "src/index.ts", "export const value = 1;\n");
+        write_file(project.path(), ".nlab/unused.config.json", config);
+        let before = fs::read(project.path().join(".nlab/unused.config.json")).unwrap();
+
+        let output = jt()
+            .args(["unused", project.path().to_str().unwrap(), "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{config}");
+        assert!(output.stdout.is_empty(), "{config}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unused.config.json"),
+            "{config}"
+        );
+        assert_eq!(
+            fs::read(project.path().join(".nlab/unused.config.json")).unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
+fn call_graph_writes_deterministic_owned_html() {
+    let project = tempdir().unwrap();
+    write_file(
+        project.path(),
+        "package.json",
+        r#"{"name":"call-graph-fixture","private":true}"#,
+    );
+    write_file(
+        project.path(),
+        "src/calls.ts",
+        "function callee() {}\nfunction caller() { callee(); }\ncaller();\n",
+    );
+    let project_path = project.path().to_str().unwrap();
+
+    let first = jt()
+        .args([
+            "call-graph",
+            project_path,
+            "--output",
+            "graph.html",
+            "--focus",
+            "caller",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let html_path = project.path().join("graph.html");
+    let first_html = fs::read_to_string(&html_path).unwrap();
+    assert!(first_html.contains("generated by jt call-graph"));
+    assert!(!first_html.contains("__JT_GRAPH_DATA__"));
+    assert!(first_html.contains("\"kind\":\"calls\""));
+    assert!(first_html.contains("callee"));
+    let database_path = project.path().join(".nlab/unused-graph.db");
+    let database = Connection::open(&database_path).unwrap();
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT value FROM project_metadata WHERE key = 'generator'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "jt call-graph"
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM edges edge
+                 JOIN nodes source ON source.id = edge.source
+                 JOIN nodes target ON target.id = edge.target
+                 WHERE edge.kind = 'calls'
+                   AND source.name = 'caller'
+                   AND target.name = 'callee'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT edge.col
+                 FROM edges edge
+                 JOIN nodes source ON source.id = edge.source
+                 JOIN nodes target ON target.id = edge.target
+                 WHERE edge.kind = 'calls'
+                   AND source.name = 'caller'
+                   AND target.name = 'callee'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        20
+    );
+    drop(database);
+
+    let second = jt()
+        .args([
+            "call-graph",
+            project_path,
+            "--output",
+            "graph.html",
+            "--focus",
+            "caller",
+        ])
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert_eq!(fs::read_to_string(&html_path).unwrap(), first_html);
+
+    write_file(project.path(), "manual.html", "<p>owned by user</p>\n");
+    let refused = jt()
+        .args(["call-graph", project_path, "--output", "manual.html"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unowned HTML"));
+    assert_eq!(
+        fs::read_to_string(project.path().join("manual.html")).unwrap(),
+        "<p>owned by user</p>\n"
+    );
+
+    write_file(project.path(), "manual.db", "owned by user\n");
+    let refused = jt()
+        .args([
+            "call-graph",
+            project_path,
+            "--output",
+            "graph.html",
+            "--database",
+            "manual.db",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--force-database"));
+    assert_eq!(
+        fs::read_to_string(project.path().join("manual.db")).unwrap(),
+        "owned by user\n"
+    );
+
+    let replaced = jt()
+        .args([
+            "call-graph",
+            project_path,
+            "--output",
+            "graph.html",
+            "--database",
+            "manual.db",
+            "--force-database",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        replaced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+    assert_eq!(
+        Connection::open(project.path().join("manual.db"))
+            .unwrap()
+            .query_row(
+                "SELECT value FROM project_metadata WHERE key = 'generator'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "jt call-graph"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn call_graph_rejects_symlinked_default_output_directory() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    write_file(project.path(), "package.json", r#"{"private":true}"#);
+    write_file(project.path(), "src/index.ts", "function value() {}\n");
+    symlink(outside.path(), project.path().join(".nlab")).unwrap();
+
+    let output = jt()
+        .args(["call-graph", project.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("through symlink"));
+    assert!(!outside.path().join("call-graph.html").exists());
+    assert!(!outside.path().join("unused-graph.db").exists());
 }
 
 #[test]

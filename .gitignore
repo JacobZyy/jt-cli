@@ -1,6 +1,8 @@
 /target
 **/.turbo
 **/.next
+**/.nuxt
+**/.output
 **/.vitepress/cache
 **/.vitepress/dist
 **/node_modules

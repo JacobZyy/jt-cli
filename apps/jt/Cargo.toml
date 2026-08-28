@@ -18,8 +18,16 @@ clap_complete = "4.6.9"
 cliclack.workspace = true
 ignore.workspace = true
 nlab-api = { path = "../../crates/nlab-api" }
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_parser.workspace = true
+oxc_resolver.workspace = true
+oxc_semantic.workspace = true
+oxc_span.workspace = true
+oxc_syntax.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+rusqlite.workspace = true
 semver = "1"
 serde.workspace = true
 serde_json.workspace = true

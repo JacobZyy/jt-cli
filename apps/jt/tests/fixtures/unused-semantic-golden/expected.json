@@ -1,0 +1,21 @@
+{
+  "findings": [
+    { "kind": "function", "name": "unusedInVue", "path": "src/Page.vue", "line": 12, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "function", "name": "namespaceUnused", "path": "src/namespace-source.ts", "line": 3, "reason": "no-inbound-usage", "reexports": [] }
+  ],
+  "ignored": [
+    { "kind": "file", "name": "main.ts", "path": "src/main.ts", "line": 1, "reason": "entrypoint" }
+  ],
+  "unknown": [],
+  "diagnostics": [],
+  "summary": {
+    "scannedFiles": 5,
+    "scannedSymbols": 5,
+    "functions": 2,
+    "variables": 0,
+    "files": 0,
+    "ignored": 1,
+    "unknown": 0,
+    "diagnostics": 0
+  }
+}
