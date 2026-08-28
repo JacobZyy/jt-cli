@@ -106,6 +106,7 @@ Write a self-contained interactive call graph:
 jt call-graph
 jt call-graph src/views --focus queryQcTemplate --depth 3
 jt call-graph --output .nlab/call-graph.html --max-nodes 800
+jt call-graph --database .nlab/unused-graph.db
 jt call-graph --open
 ```
 
@@ -116,8 +117,20 @@ server, telemetry, or source-code upload. The Canvas view supports pan, zoom, no
 kind filters, caller/callee focus, configurable depth, and call-site details. Output defaults to
 `.nlab/call-graph.html`; jt-generated files can be regenerated, while replacing another HTML file
 requires `--force`. The HTML embeds the complete graph and initially displays at most 400 nodes;
-search and focus can reveal the rest. A 20,000-node/80,000-edge safety ceiling requires narrowing
+search and focus can reveal the rest. The same run atomically writes `.nlab/unused-graph.db`, a
+read-only SQLite input for `@jacob-z/unused-graph-inspector`. A 20,000-node/80,000-edge safety ceiling requires narrowing
 `.nlab/unused.config.json` for exceptionally large repositories.
+
+Run the Nuxt SSR inspector from this workspace:
+
+```bash
+NUXT_GRAPH_DATABASE=/path/to/project/.nlab/unused-graph.db \
+  pnpm --filter @jacob-z/unused-graph-inspector dev
+```
+
+Its SSR routes query SQLite on the server. The client renders an aggregated project-area overview,
+then uses Cytoscape.js and ELK for focused directed call flows. The npm executable and `jt graph`
+launcher remain deferred.
 
 The graph follows Graphy's split between language analysis, a renderer-independent node/edge model,
 and an interactive focused view. It does not invent edges for unresolved reflection or string-based

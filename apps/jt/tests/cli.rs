@@ -4,6 +4,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+use rusqlite::Connection;
 use tempfile::tempdir;
 
 fn jt() -> Command {
@@ -529,6 +530,51 @@ fn call_graph_writes_deterministic_owned_html() {
     assert!(!first_html.contains("__JT_GRAPH_DATA__"));
     assert!(first_html.contains("\"kind\":\"calls\""));
     assert!(first_html.contains("callee"));
+    let database_path = project.path().join(".nlab/unused-graph.db");
+    let database = Connection::open(&database_path).unwrap();
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT value FROM project_metadata WHERE key = 'generator'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "jt call-graph"
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM edges edge
+                 JOIN nodes source ON source.id = edge.source
+                 JOIN nodes target ON target.id = edge.target
+                 WHERE edge.kind = 'calls'
+                   AND source.name = 'caller'
+                   AND target.name = 'callee'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT edge.col
+                 FROM edges edge
+                 JOIN nodes source ON source.id = edge.source
+                 JOIN nodes target ON target.id = edge.target
+                 WHERE edge.kind = 'calls'
+                   AND source.name = 'caller'
+                   AND target.name = 'callee'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        20
+    );
+    drop(database);
 
     let second = jt()
         .args([
@@ -555,6 +601,55 @@ fn call_graph_writes_deterministic_owned_html() {
         fs::read_to_string(project.path().join("manual.html")).unwrap(),
         "<p>owned by user</p>\n"
     );
+
+    write_file(project.path(), "manual.db", "owned by user\n");
+    let refused = jt()
+        .args([
+            "call-graph",
+            project_path,
+            "--output",
+            "graph.html",
+            "--database",
+            "manual.db",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--force-database"));
+    assert_eq!(
+        fs::read_to_string(project.path().join("manual.db")).unwrap(),
+        "owned by user\n"
+    );
+
+    let replaced = jt()
+        .args([
+            "call-graph",
+            project_path,
+            "--output",
+            "graph.html",
+            "--database",
+            "manual.db",
+            "--force-database",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        replaced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+    assert_eq!(
+        Connection::open(project.path().join("manual.db"))
+            .unwrap()
+            .query_row(
+                "SELECT value FROM project_metadata WHERE key = 'generator'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "jt call-graph"
+    );
 }
 
 #[cfg(unix)]
@@ -575,6 +670,7 @@ fn call_graph_rejects_symlinked_default_output_directory() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("through symlink"));
     assert!(!outside.path().join("call-graph.html").exists());
+    assert!(!outside.path().join("unused-graph.db").exists());
 }
 
 #[test]

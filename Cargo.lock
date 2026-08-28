@@ -671,6 +671,7 @@ dependencies = [
  "oxc_syntax",
  "rand",
  "rand_chacha",
+ "rusqlite",
  "semver",
  "serde",
  "serde_json",
