@@ -1,6 +1,6 @@
 [package]
 name = "jt"
-version = "1.11.0" # x-release-please-version
+version = "1.11.1" # x-release-please-version
 edition.workspace = true
 rust-version.workspace = true
 description = "Personal CLI for Jacob and Taotao"
