@@ -244,46 +244,58 @@ jt nlab-api config --runner jt --project /path/to/frontend
 
 jt nlab-api init \
   --project /path/to/frontend \
-  --repo-path /path/to/backend \
+  --repo-url git@example.com:team/backend.git \
+  --clone-dir /path/to/backend \
   --branch feature-branch \
   --app-name service_name
 
 jt nlab-api generate --project /path/to/frontend
 ```
 
-`jt nlab-api init` and `generate` default to the standalone `nlab-api` executable. The
-project-local `.nlab/cli.local.json` switches those two commands to jt's embedded implementation.
-Only `jt nlab-api config` reads or writes this preference; standalone `nlab-api` ignores it.
-The config command adds `/.nlab/cli.local.json` to the target project's `.gitignore`.
-Restore standalone execution with:
+Both binaries write the same project-local runner config:
 
 ```bash
-jt nlab-api config --unset --project /path/to/frontend
+jt nlab-api config --runner jt --project /path/to/frontend
+nlab-api config --runner nlab-api --project /path/to/frontend
+jt nlab-api config --show --project /path/to/frontend
+jt nlab-api config --detect --project /path/to/frontend
 ```
+
+The preference lives in ignored `.nlab/nlab-api.local.json`. `nlab-backend-bridge` uses the configured
+runner as the sole command source. When the value is missing, it invokes `config --detect`, which checks
+`jt` first, then `nlab-api`, and persists the first available command. `config --unset` clears the value
+for detection on next use.
 
 The standalone binary uses the same Rust library and config:
 
 ```bash
 nlab-api init \
   --project /path/to/frontend \
-  --repo-path /path/to/backend \
+  --repo-url git@example.com:team/backend.git \
+  --clone-dir /path/to/backend \
   --branch feature-branch \
   --app-name service_name
 
 nlab-api generate --project /path/to/frontend
+nlab-api generate --project /path/to/frontend --branch another-branch
 ```
 
-`init` writes `.nlab/nlab-api.config.json`, then adds idempotent build-tool and TypeScript aliases. Current
-support targets Vite projects with an exported `nlabRequest` adapter. Vitest configs that merge the
-Vite config inherit those aliases without a duplicate edit. Existing `src/api` or `src/service`
-layout selects the matching preset; `--layout` overrides it.
+`init` accepts either `--repo-url` or an existing `--repo-path`. It clones missing repositories,
+writes team-owned settings to `.nlab/nlab-api.config.json`, writes the resolved machine path to ignored
+`.nlab/nlab-api.local.json`, then adds idempotent build-tool and TypeScript aliases. Current support
+targets Vite projects with an exported `nlabRequest` adapter. Vitest configs that merge the Vite config
+inherit those aliases without a duplicate edit. Existing `src/api` or `src/service` layout selects the
+matching preset; `--layout` overrides it. Version 1 project config and `.nlab/cli.local.json` remain
+read-compatible; rerun `init` explicitly to write the split version 2 files.
 
-`generate` loads that config, runs `codegraph init` or `codegraph sync` once, reads the resulting
-SQLite index in read-only mode, parses Java with Tree-sitter, and builds one deterministic contract
-IR. Rust generates Draft OpenAPI 3.1, TypeScript DTO files, separate enum files, and API clients that
-reuse the detected request adapter. The same command then queries testserver ZGateway on a best-effort
-basis, migrates business imports from the fixed previous `.nlab` snapshot, optionally generates Mock
-files when `mock.enabled` is true, promotes the stable OpenAPI snapshot, and writes one final report.
+`generate` loads both config scopes, serializes access to the shared backend checkout, clones it when
+missing, rejects tracked changes, switches to the configured or one-run `--branch`, and
+fast-forwards it from origin. It then runs `codegraph init` or `codegraph sync` once, reads the resulting
+SQLite index in read-only mode, parses Java with Tree-sitter, and builds one deterministic contract IR.
+Rust generates Draft OpenAPI 3.1, TypeScript DTO files, separate enum files, and API clients that reuse
+the detected request adapter. The same command then queries testserver ZGateway on a best-effort basis,
+migrates business imports from the fixed previous `.nlab` snapshot, optionally generates Mock files
+when `mock.enabled` is true, promotes the stable OpenAPI snapshot, and writes one final report.
 By default it does not invoke Bun, Node.js, Orval, Python, frontend typecheck, tests, builds, or lint;
 configured `afterGenerate` hooks may run project-owned commands. A DTO field
 uses a complete code-provenance enum first, then a complete linked Java enum, then explicit comment or
@@ -303,10 +315,11 @@ src/types/service-enums/**/*.ts
 .nlab/generate-report.json
 ```
 
-The backend must remain on the configured branch, but generation reads its current working-tree Java
-and POM content. The frontend must remain outside the backend repository. Existing non-generated files,
-symlink path escapes, config drift, incomplete CodeGraph state, branch movement, ambiguous Facade
-overloads, and incomplete schema references stop the run. A legacy bridge manifest marked
+The backend may start on another branch; nlab-api switches it when the checkout is clean. The frontend
+must remain outside the backend repository. Existing tracked backend changes, concurrent
+use of the same backend checkout, non-generated frontend files, symlink path escapes, config drift,
+incomplete CodeGraph state, branch movement, ambiguous Facade overloads, and incomplete schema
+references stop the run. A legacy bridge manifest marked
 `service-paths` permits its owned generated files to be replaced during the first Facade-layout
 generation. Missing enums, external value sources, Gateway errors, missing routes, removed unused
 operations, and Mock being disabled do not stop generation; they remain in

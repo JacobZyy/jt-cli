@@ -40,12 +40,19 @@ pub struct GenerateArgs {
     /// Frontend project containing .nlab/nlab-api.config.json
     #[arg(long, value_name = "path", default_value = ".")]
     project: PathBuf,
+    /// Backend branch for this run; defaults to the shared project config
+    #[arg(long)]
+    branch: Option<String>,
     /// Overall deadline, capped at 1200 seconds
     #[arg(long, default_value_t = MAX_TIMEOUT_SECONDS)]
     timeout_seconds: u64,
 }
 
 pub use accept::AcceptArgs;
+pub use config::{
+    ConfigArgs, LocalProjectConfig, LocalRunner, configure, ensure_local_config_ignored,
+    remove_legacy_local_config,
+};
 pub use init::InitArgs;
 pub use migrate::MigrateArgs;
 pub use mock::MockArgs;
@@ -108,13 +115,22 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         .with_context(|| format!("resolve frontend project {}", args.project.display()))?;
     let config = config::ProjectConfig::load(&output_dir)?;
     config.validate_project(&output_dir)?;
-    let target = repo::inspect(&config.backend.repo_path, &config.backend.branch)?;
+    let branch = args.branch.as_deref().unwrap_or(&config.backend.branch);
+    let repo_path = repo::resolve_path(
+        &config.backend.repo_path,
+        config.backend.repository.as_deref(),
+    )?;
+    reporter.phase(5, "准备后端仓库");
+    let prepared = repo::prepare(
+        &repo_path,
+        config.backend.repository.as_deref(),
+        Some(branch),
+        deadline,
+    )?;
+    let target = &prepared.target;
     if path_inside(&target.root, &output_dir) {
         bail!("frontend project must stay outside backend repository");
     }
-    reporter.phase(5, "更新后端仓库");
-    repo::update_ff_only(&target, deadline)?;
-    let target = repo::inspect(&config.backend.repo_path, &config.backend.branch)?;
     let _lock = OutputLock::acquire(&output_dir)?;
     let legacy = if config.migration.enabled {
         migrate::snapshot_legacy(&output_dir)?
@@ -123,7 +139,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     };
 
     reporter.phase(10, "同步 CodeGraph");
-    repo::sync_codegraph(&target, deadline)?;
+    repo::sync_codegraph(target, deadline)?;
 
     reporter.phase(25, "读取后端索引");
     ensure_before_deadline(deadline)?;
@@ -285,7 +301,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         .is_some_and(|count| count > 0);
 
     reporter.phase(98, "完成生成");
-    repo::verify_unchanged(&target)?;
+    repo::verify_unchanged(target)?;
     let stable_openapi = output::promote_openapi(&output_dir)?;
 
     let semantic_patches = ir
@@ -349,8 +365,8 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     Ok(GenerateResult {
         status,
         repo_path: target.root.display().to_string(),
-        branch: target.branch,
-        commit: target.commit,
+        branch: target.branch.clone(),
+        commit: target.commit.clone(),
         output_dir: output_dir.display().to_string(),
         openapi: stable_openapi.display().to_string(),
         openapi_sha256: written.openapi_sha256,

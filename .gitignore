@@ -10,3 +10,4 @@
 coverage
 .DS_Store
 /.nlab/cli.local.json
+/.nlab/nlab-api.local.json
