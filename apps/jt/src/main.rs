@@ -141,7 +141,7 @@ enum NlabApiCommand {
     #[command(name = "generate", about = "Run complete frontend API generation")]
     Generate(nlab_api::GenerateArgs),
     #[command(name = "config", about = "Configure the project-local nlab-api runner")]
-    Config(nlab_api_cli::ConfigArgs),
+    Config(nlab_api::ConfigArgs),
     #[command(
         name = "routes",
         about = "Resolve placeholder paths through ZGateway",
@@ -267,7 +267,7 @@ fn run_nlab_api(command: NlabApiCommand) -> ExitCode {
     match command {
         NlabApiCommand::Init(args) => ExitCode::from(nlab_api::init(args)),
         NlabApiCommand::Generate(args) => ExitCode::from(nlab_api::generate(args)),
-        NlabApiCommand::Config(args) => ExitCode::from(nlab_api_cli::configure(args)),
+        NlabApiCommand::Config(args) => ExitCode::from(nlab_api::configure(args)),
         NlabApiCommand::Routes(args) => ExitCode::from(nlab_api::routes(args)),
         NlabApiCommand::Migrate(args) => ExitCode::from(nlab_api::migrate(args)),
         NlabApiCommand::Mock(args) => ExitCode::from(nlab_api::mock(args)),

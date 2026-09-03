@@ -11,7 +11,7 @@
 - OpenAPI、API、types 和 enums 从同一 Contract IR 生成。
 - `closed`、`known`、`external`、`unresolved` 保留语义确定性。
 
-### Standalone CLI：实现完成，尚未正式发布
+### Standalone CLI
 
 - `jt nlab-api` 与 standalone `nlab-api` 复用同一 Rust library。
 - macOS Apple Silicon 预编译分发。

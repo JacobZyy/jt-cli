@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -11,8 +12,9 @@ use serde_json::{Map, Value};
 
 use super::config::{
     BackendConfig, BuildToolConfig, BuildToolKind, CONFIG_FILE, CONFIG_VERSION, FrontendConfig,
-    ImportAliases, LEGACY_CONFIG_FILE, LayoutPreset, OutputLayout, ProjectConfig, RequestAdapter,
-    ResponseEnvelope, ResponseMode, STATE_DIR, TestConfig,
+    ImportAliases, LEGACY_CONFIG_FILE, LOCAL_CONFIG_FILE, LayoutPreset, LocalProjectConfig,
+    OutputLayout, ProjectConfig, RequestAdapter, ResponseEnvelope, ResponseMode, STATE_DIR,
+    TestConfig,
 };
 
 #[derive(Clone, Debug, Args)]
@@ -20,9 +22,25 @@ pub struct InitArgs {
     /// Frontend project to inspect and configure
     #[arg(long, value_name = "path", default_value = ".")]
     project: PathBuf,
-    /// Java backend repository containing @ServiceContract Facades
-    #[arg(long, value_name = "path")]
-    repo_path: PathBuf,
+    /// Existing Java backend repository containing @ServiceContract Facades
+    #[arg(
+        long,
+        value_name = "path",
+        required_unless_present = "repo_url",
+        conflicts_with = "repo_url"
+    )]
+    repo_path: Option<PathBuf>,
+    /// Git URL cloned when no local backend repository is supplied
+    #[arg(
+        long,
+        value_name = "url",
+        required_unless_present = "repo_path",
+        conflicts_with = "repo_path"
+    )]
+    repo_url: Option<String>,
+    /// Clone destination; defaults to a repository-specific path under ~/.local/share/nlab-api/repos
+    #[arg(long, value_name = "path", requires = "repo_url")]
+    clone_dir: Option<PathBuf>,
     /// Backend branch; default: currently checked-out branch
     #[arg(long)]
     branch: Option<String>,
@@ -32,6 +50,9 @@ pub struct InitArgs {
     /// Generated implementation directory family; default: detect existing api/service layout
     #[arg(long, value_enum)]
     layout: Option<LayoutPreset>,
+    /// Overall deadline, capped at 1200 seconds
+    #[arg(long, default_value_t = super::MAX_TIMEOUT_SECONDS)]
+    timeout_seconds: u64,
 }
 
 pub fn run(args: InitArgs) -> u8 {
@@ -51,6 +72,13 @@ pub fn run(args: InitArgs) -> u8 {
 }
 
 fn run_inner(args: InitArgs) -> Result<Value> {
+    if args.timeout_seconds == 0 || args.timeout_seconds > super::MAX_TIMEOUT_SECONDS {
+        bail!(
+            "--timeout-seconds must be between 1 and {}",
+            super::MAX_TIMEOUT_SECONDS
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(args.timeout_seconds);
     let project = args
         .project
         .canonicalize()
@@ -58,36 +86,58 @@ fn run_inner(args: InitArgs) -> Result<Value> {
     if !project.join("package.json").is_file() {
         bail!("frontend package.json missing: {}", project.display());
     }
-    let branch = match args.branch {
-        Some(branch) => branch,
-        None => super::repo::current_branch(&args.repo_path)?,
+    let repository_path = match (&args.repo_path, &args.repo_url) {
+        (Some(path), None) => super::repo::resolve_path(path, None)?,
+        (None, Some(repository)) => match &args.clone_dir {
+            Some(path) => super::repo::resolve_path(path, Some(repository))?,
+            None => super::repo::managed_clone_path(repository)?,
+        },
+        _ => unreachable!("clap requires exactly one backend repository input"),
     };
-    let backend = super::repo::inspect(&args.repo_path, &branch)?;
+    let prepared = super::repo::prepare(
+        &repository_path,
+        args.repo_url.as_deref(),
+        args.branch.as_deref(),
+        deadline,
+    )?;
+    let backend = prepared.target.clone();
     let contract_roots = detect_contract_roots(&backend.root)?;
     let previous = (project.join(CONFIG_FILE).is_file()
         || project.join(LEGACY_CONFIG_FILE).is_file())
     .then(|| ProjectConfig::load(&project))
     .transpose()?;
     let frontend = probe_frontend(&project, args.layout, previous.as_ref())?;
-    let app_name = args.app_name.unwrap_or_else(|| {
-        backend
+    let app_name = match (args.app_name, args.repo_url.as_deref()) {
+        (Some(app_name), _) => app_name,
+        (None, Some(repository)) => super::repo::repository_name(repository)?.to_owned(),
+        (None, None) => backend
             .root
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "nlab".to_owned())
-    });
+            .unwrap_or_else(|| "nlab".to_owned()),
+    };
     let config = ProjectConfig {
         version: CONFIG_VERSION,
         backend: BackendConfig {
+            repository: Some(prepared.origin.clone()),
             repo_path: backend.root.clone(),
             branch: backend.branch,
             app_name,
             contract_roots,
         },
         frontend,
-        gateway: Default::default(),
-        migration: Default::default(),
-        mock: Default::default(),
+        gateway: previous
+            .as_ref()
+            .map(|config| config.gateway.clone())
+            .unwrap_or_default(),
+        migration: previous
+            .as_ref()
+            .map(|config| config.migration.clone())
+            .unwrap_or_default(),
+        mock: previous
+            .as_ref()
+            .map(|config| config.mock.clone())
+            .unwrap_or_default(),
         after_generate: previous
             .as_ref()
             .map(|config| config.after_generate.clone())
@@ -104,7 +154,10 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         .with_context(|| format!("read TypeScript config {}", tsconfig.display()))?;
     let vite_patched = patch_vite_aliases(&vite_source, &config.frontend)?;
     let tsconfig_patched = patch_tsconfig_aliases(&tsconfig_source, &config.frontend)?;
-    let config_source = format!("{}\n", serde_json::to_string_pretty(&config)?);
+    let config_source = config.shared_source()?;
+    let mut local_config = LocalProjectConfig::load(&project)?;
+    local_config.backend.repo_path = Some(backend.root.clone());
+    let local_config_source = local_config.source()?;
     let mut changes = vec![
         FileChange::existing(build_config.clone(), vite_source, vite_patched),
         FileChange::existing(tsconfig.clone(), tsconfig_source, tsconfig_patched),
@@ -132,6 +185,13 @@ fn run_inner(args: InitArgs) -> Result<Value> {
     let config_path = project.join(CONFIG_FILE);
     changes.push(FileChange::load(config_path.clone(), config_source)?);
     updated.push(config_path.clone());
+    let local_config_path = project.join(LOCAL_CONFIG_FILE);
+    changes.push(FileChange::load(
+        local_config_path.clone(),
+        local_config_source,
+    )?);
+    updated.push(local_config_path.clone());
+    super::config::ensure_local_config_ignored(&project)?;
     apply_changes(changes)?;
     remove_legacy_config(&project)?;
 
@@ -139,6 +199,7 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         "status": "complete",
         "project": project,
         "config": config_path,
+        "localConfig": local_config_path,
         "backend": config.backend.repo_path,
         "branch": config.backend.branch,
         "contractRoots": config.backend.contract_roots,
