@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="nlab">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="nLab API 从 Java Facade 提取真实契约，生成 OpenAPI、TypeScript 类型、枚举与 API 客户端。"
+    />
+    <meta name="theme-color" content="#f6f4ed" />
+    <title>nLab API · Java 契约到前端 API</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+      [data-theme='nlab'] {
+        color-scheme: light;
+        --color-base-100: oklch(97% 0.012 88);
+        --color-base-200: oklch(93% 0.018 86);
+        --color-base-300: oklch(87% 0.025 82);
+        --color-base-content: oklch(24% 0.025 252);
+        --color-primary: oklch(52% 0.2 257);
+        --color-primary-content: oklch(98% 0.01 250);
+        --color-secondary: oklch(73% 0.16 67);
+        --color-secondary-content: oklch(24% 0.045 53);
+        --color-accent: oklch(69% 0.13 173);
+        --color-accent-content: oklch(21% 0.035 173);
+        --color-neutral: oklch(29% 0.026 253);
+        --color-neutral-content: oklch(95% 0.01 250);
+        --color-info: oklch(67% 0.13 236);
+        --color-info-content: oklch(20% 0.04 238);
+        --color-success: oklch(68% 0.145 156);
+        --color-success-content: oklch(20% 0.04 156);
+        --color-warning: oklch(77% 0.15 79);
+        --color-warning-content: oklch(24% 0.05 62);
+        --color-error: oklch(61% 0.2 25);
+        --color-error-content: oklch(97% 0.012 25);
+        --radius-selector: 0.25rem;
+        --radius-field: 0.35rem;
+        --radius-box: 0.5rem;
+        --size-selector: 0.25rem;
+        --size-field: 0.25rem;
+        --border: 1px;
+        --depth: 0;
+        --noise: 0;
+      }
+
+      :root {
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        font-synthesis: none;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        min-width: 320px;
+        background-image:
+          linear-gradient(to right, color-mix(in oklab, var(--color-base-content) 5%, transparent) 1px, transparent 1px),
+          linear-gradient(to bottom, color-mix(in oklab, var(--color-base-content) 5%, transparent) 1px, transparent 1px);
+        background-size: 32px 32px;
+      }
+
+      code,
+      .mono {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      .shell {
+        width: min(1180px, calc(100% - 2rem));
+        margin-inline: auto;
+      }
+
+      .masthead {
+        background: color-mix(in oklab, var(--color-base-100) 88%, transparent);
+        backdrop-filter: blur(14px);
+      }
+
+      .wordmark {
+        letter-spacing: -0.055em;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        width: 1.7rem;
+        height: 2px;
+        background: var(--color-primary);
+        content: "";
+      }
+
+      .hero-copy h1 {
+        max-width: 11ch;
+        font-size: clamp(3.25rem, 9vw, 7.6rem);
+        font-weight: 820;
+        letter-spacing: -0.075em;
+        line-height: 0.89;
+      }
+
+      .hero-copy .lead {
+        max-width: 42rem;
+        font-size: clamp(1.05rem, 2vw, 1.35rem);
+        line-height: 1.7;
+      }
+
+      .signal-panel {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--color-base-300);
+        background: color-mix(in oklab, var(--color-base-100) 95%, white);
+      }
+
+      .signal-panel::after {
+        position: absolute;
+        inset: 0 0 auto;
+        height: 5px;
+        background: linear-gradient(
+          90deg,
+          var(--color-primary) 0 56%,
+          var(--color-secondary) 56% 76%,
+          var(--color-accent) 76%
+        );
+        content: "";
+      }
+
+      .status-dot {
+        width: 0.65rem;
+        height: 0.65rem;
+        border-radius: 999px;
+        background: var(--color-success);
+        box-shadow: 0 0 0 5px color-mix(in oklab, var(--color-success) 16%, transparent);
+      }
+
+      .section-rule {
+        border-top: 1px solid var(--color-base-300);
+      }
+
+      .section-title {
+        max-width: 15ch;
+        font-size: clamp(2rem, 5vw, 4rem);
+        font-weight: 780;
+        letter-spacing: -0.055em;
+        line-height: 0.98;
+      }
+
+      .rail {
+        position: relative;
+        display: grid;
+        gap: 1rem;
+      }
+
+      .rail::before {
+        position: absolute;
+        top: 1.45rem;
+        right: 4%;
+        left: 4%;
+        z-index: 0;
+        height: 2px;
+        background: var(--color-base-300);
+        content: "";
+      }
+
+      .rail-stop {
+        position: relative;
+        z-index: 1;
+        min-width: 0;
+        padding-top: 0.35rem;
+      }
+
+      .rail-index {
+        display: grid;
+        width: 2.25rem;
+        height: 2.25rem;
+        place-items: center;
+        border: 2px solid var(--color-base-content);
+        border-radius: 999px;
+        background: var(--color-base-100);
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.7rem;
+        font-weight: 800;
+      }
+
+      .rail-stop:last-child .rail-index {
+        border-color: var(--color-primary);
+        background: var(--color-primary);
+        color: var(--color-primary-content);
+      }
+
+      .ledger {
+        display: grid;
+        border: 1px solid var(--color-base-300);
+        background: var(--color-base-100);
+      }
+
+      .ledger-row {
+        display: grid;
+        gap: 0.75rem;
+        padding: 1.1rem;
+        border-bottom: 1px solid var(--color-base-300);
+      }
+
+      .ledger-row:last-child {
+        border-bottom: 0;
+      }
+
+      .owner-tag {
+        justify-self: start;
+        padding: 0.25rem 0.5rem;
+        border: 1px solid currentColor;
+        border-radius: 999px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .install-band {
+        position: relative;
+        overflow: hidden;
+        background: var(--color-neutral);
+        color: var(--color-neutral-content);
+      }
+
+      .install-band::before {
+        position: absolute;
+        inset: auto -8rem -12rem auto;
+        width: 28rem;
+        height: 28rem;
+        border: 4rem solid color-mix(in oklab, var(--color-primary) 28%, transparent);
+        border-radius: 999px;
+        content: "";
+      }
+
+      .command-box {
+        position: relative;
+        border: 1px solid color-mix(in oklab, var(--color-neutral-content) 24%, transparent);
+        background: color-mix(in oklab, var(--color-neutral) 86%, black);
+      }
+
+      .command-box code {
+        overflow-wrap: anywhere;
+      }
+
+      .copy-status {
+        min-height: 1.25rem;
+      }
+
+      .principle-number {
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: var(--color-primary);
+      }
+
+      .focus-link:focus-visible,
+      .btn:focus-visible {
+        outline: 3px solid color-mix(in oklab, var(--color-primary) 50%, transparent);
+        outline-offset: 3px;
+      }
+
+      @media (min-width: 720px) {
+        .rail {
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+        }
+
+        .ledger-row {
+          grid-template-columns: minmax(15rem, 1.1fr) minmax(8rem, 0.65fr) 2fr;
+          align-items: center;
+        }
+      }
+
+      @media (max-width: 719px) {
+        .rail::before {
+          top: 1rem;
+          bottom: 1rem;
+          left: 1.45rem;
+          width: 2px;
+          height: auto;
+        }
+
+        .rail-stop {
+          padding-left: 3.5rem;
+        }
+
+        .rail-index {
+          position: absolute;
+          top: 0;
+          left: 0.35rem;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body class="bg-base-100 text-base-content antialiased">
+    <header class="masthead sticky top-0 z-50 border-b border-base-300">
+      <nav class="shell flex min-h-16 items-center justify-between gap-4" aria-label="主导航">
+        <a class="focus-link flex items-baseline gap-3" href="#top" aria-label="nLab API 首页">
+          <span class="wordmark text-2xl font-black">nLab API</span>
+          <span class="mono hidden text-xs text-base-content/60 sm:inline">CONTRACT RAIL / 01</span>
+        </a>
+        <div class="flex items-center gap-1 sm:gap-3">
+          <a class="btn btn-ghost btn-sm hidden sm:inline-flex" href="#design">设计</a>
+          <a class="btn btn-primary btn-sm" href="#install">安装</a>
+        </div>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="shell grid min-h-[calc(100vh-4rem)] items-center gap-12 py-16 lg:grid-cols-[1.35fr_0.65fr] lg:py-24">
+        <div class="hero-copy">
+          <p class="eyebrow mb-8 text-primary">Java contract delivery</p>
+          <h1>后端事实，直达前端。</h1>
+          <p class="lead mt-8 text-base-content/72">
+            从 Java Facade 提取真实对外契约。一次生成 OpenAPI、TypeScript 类型、枚举与 API 客户端；
+            仓库、分支、证据、失败报告由同一个 Rust CLI 管理。
+          </p>
+          <div class="mt-10 flex flex-wrap gap-3">
+            <a class="btn btn-primary btn-lg" href="#install">安装 CLI + Skill</a>
+            <a
+              class="btn btn-outline btn-lg"
+              href="https://github.com/JacobZyy/jt-cli/releases/tag/v1.11.2"
+              target="_blank"
+              rel="noreferrer"
+            >
+              查看 v1.11.2
+            </a>
+          </div>
+        </div>
+
+        <aside class="signal-panel p-6 lg:p-8" aria-label="发布状态">
+          <div class="flex items-center justify-between border-b border-base-300 pb-5">
+            <span class="mono text-xs font-bold tracking-[0.12em]">SYSTEM STATUS</span>
+            <span class="status-dot" aria-label="可用"></span>
+          </div>
+          <dl class="mt-6 grid gap-6">
+            <div>
+              <dt class="mono text-xs text-base-content/55">DELIVERY</dt>
+              <dd class="mt-1 text-xl font-bold">单二进制 + 手动 Skill</dd>
+            </div>
+            <div>
+              <dt class="mono text-xs text-base-content/55">RUNTIME</dt>
+              <dd class="mt-1 text-xl font-bold">Rust / macOS Apple Silicon</dd>
+            </div>
+            <div>
+              <dt class="mono text-xs text-base-content/55">OUTPUT</dt>
+              <dd class="mt-1 text-xl font-bold">OpenAPI 3.1 / TS / report</dd>
+            </div>
+            <div class="alert alert-success rounded-sm" role="status">
+              <span class="mono text-sm">release v1.11.2 ready</span>
+            </div>
+          </dl>
+        </aside>
+      </section>
+
+      <section id="design" class="section-rule bg-base-100/90 py-20 lg:py-28">
+        <div class="shell">
+          <div class="grid gap-8 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
+            <div>
+              <p class="eyebrow mb-5 text-primary">One deterministic path</p>
+              <h2 class="section-title">一条轨道，五个确定阶段。</h2>
+            </div>
+            <p class="max-w-2xl text-lg leading-8 text-base-content/68 lg:justify-self-end">
+              AI 负责补齐输入、调用命令、解释报告。CLI 独占可重复工作：配置、Git、索引、解析、生成与校验。
+              相同 commit 与配置，应得到相同产物。
+            </p>
+          </div>
+
+          <ol class="rail mt-16" aria-label="nLab API 生成流程">
+            <li class="rail-stop">
+              <span class="rail-index">01</span>
+              <h3 class="mt-6 font-bold">选择 runner</h3>
+              <p class="mt-2 text-sm leading-6 text-base-content/65">
+                读取项目本地 config。为空时优先探测 <code>jt</code>，否则使用 standalone。
+              </p>
+            </li>
+            <li class="rail-stop">
+              <span class="rail-index">02</span>
+              <h3 class="mt-6 font-bold">准备仓库</h3>
+              <p class="mt-2 text-sm leading-6 text-base-content/65">
+                clone、加锁、检查改动、切换目标分支、<code>--ff-only</code> 更新。
+              </p>
+            </li>
+            <li class="rail-stop">
+              <span class="rail-index">03</span>
+              <h3 class="mt-6 font-bold">收集证据</h3>
+              <p class="mt-2 text-sm leading-6 text-base-content/65">
+                CodeGraph 给出关系，Tree-sitter 解析 Java 类型、写入点与枚举值。
+              </p>
+            </li>
+            <li class="rail-stop">
+              <span class="rail-index">04</span>
+              <h3 class="mt-6 font-bold">构建 Contract IR</h3>
+              <p class="mt-2 text-sm leading-6 text-base-content/65">
+                以 Facade operation 为根。结构与值来源汇入唯一中间表示。
+              </p>
+            </li>
+            <li class="rail-stop">
+              <span class="rail-index">05</span>
+              <h3 class="mt-6 font-bold">原子交付</h3>
+              <p class="mt-2 text-sm leading-6 text-base-content/65">
+                同源生成 OpenAPI、API、types、enums；校验后提升快照并写报告。
+              </p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section-rule py-20 lg:py-28">
+        <div class="shell grid gap-12 lg:grid-cols-2">
+          <article class="border-l-4 border-primary pl-6 lg:pl-8">
+            <p class="mono text-xs font-bold tracking-[0.12em] text-primary">WHAT IT IS</p>
+            <h2 class="mt-4 text-3xl font-bold tracking-tight">契约交付工具</h2>
+            <p class="mt-5 text-lg leading-8 text-base-content/68">
+              前端需要的不只是 DTO 结构。nLab API 同时保留 operation 身份、嵌套类型、字段值域、真实路由、
+              生成所有权与失败证据。
+            </p>
+          </article>
+          <article class="border-l-4 border-base-content/25 pl-6 lg:pl-8">
+            <p class="mono text-xs font-bold tracking-[0.12em] text-base-content/55">WHAT IT IS NOT</p>
+            <h2 class="mt-4 text-3xl font-bold tracking-tight">不是类型翻译器</h2>
+            <p class="mt-5 text-lg leading-8 text-base-content/68">
+              不是 <code>Java → OpenAPI → Orval → TypeScript</code> 的接力推导，也不让 AI 猜业务状态。
+              OpenAPI、API、types、enums 都是 Contract IR 的兄弟产物。
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section-rule bg-base-200/75 py-20 lg:py-28">
+        <div class="shell">
+          <p class="eyebrow mb-5 text-primary">Truth under uncertainty</p>
+          <h2 class="section-title">证据不足，不假装确定。</h2>
+          <div class="mt-12 grid gap-px overflow-hidden border border-base-300 bg-base-300 md:grid-cols-2 lg:grid-cols-4">
+            <article class="bg-base-100 p-6">
+              <span class="principle-number">CLOSED</span>
+              <h3 class="mt-4 text-xl font-bold">完整闭合</h3>
+              <p class="mt-3 leading-7 text-base-content/65">所有可达写入点收敛到同一完整枚举域，才生成严格类型。</p>
+            </article>
+            <article class="bg-base-100 p-6">
+              <span class="principle-number">KNOWN</span>
+              <h3 class="mt-4 text-xl font-bold">部分已知</h3>
+              <p class="mt-3 leading-7 text-base-content/65">找到关联但无法证明完整。保留开放 scalar，记录证据。</p>
+            </article>
+            <article class="bg-base-100 p-6">
+              <span class="principle-number">EXTERNAL</span>
+              <h3 class="mt-4 text-xl font-bold">外部边界</h3>
+              <p class="mt-3 leading-7 text-base-content/65">RPC、Database 等来源不跨仓库猜测，明确停止追踪。</p>
+            </article>
+            <article class="bg-base-100 p-6">
+              <span class="principle-number">UNRESOLVED</span>
+              <h3 class="mt-4 text-xl font-bold">证据缺口</h3>
+              <p class="mt-3 leading-7 text-base-content/65">歧义、解析失败、预算耗尽进入报告，不伪造闭合结论。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-rule py-20 lg:py-28">
+        <div class="shell">
+          <div class="grid gap-8 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
+            <div>
+              <p class="eyebrow mb-5 text-primary">Configuration ownership</p>
+              <h2 class="section-title">团队事实与个人环境分开。</h2>
+            </div>
+            <p class="max-w-2xl text-lg leading-8 text-base-content/68 lg:justify-self-end">
+              可共享配置进入 Git。机器路径与 runner 留在 ignored local config。一次性分支覆盖不改团队默认值。
+            </p>
+          </div>
+
+          <div class="ledger mt-12" role="table" aria-label="nLab API 配置所有权">
+            <div class="ledger-row" role="row">
+              <code role="cell">.nlab/nlab-api.config.json</code>
+              <span class="owner-tag text-primary" role="cell">团队共享</span>
+              <span role="cell">backend repository、默认 branch、contract roots、输出布局、afterGenerate。</span>
+            </div>
+            <div class="ledger-row" role="row">
+              <code role="cell">.nlab/nlab-api.local.json</code>
+              <span class="owner-tag text-accent" role="cell">个人忽略</span>
+              <span role="cell">本机 backend path、runner；CLI 自动维护，Skill 不手改 JSON。</span>
+            </div>
+            <div class="ledger-row" role="row">
+              <code role="cell">generate --branch branchB</code>
+              <span class="owner-tag text-secondary" role="cell">单次运行</span>
+              <span role="cell">锁定并切换干净 checkout，生成 branchB；不覆盖共享默认 branchA。</span>
+            </div>
+          </div>
+
+          <div class="alert alert-warning mt-6 rounded-sm" role="note">
+            <span>
+              同一后端目录只能同时处于一个分支。CLI 用锁串行访问；每次生成都会切回本次目标分支。已有 tracked 改动时拒绝切换。
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section id="install" class="install-band py-20 lg:py-28">
+        <div class="shell relative z-10 grid gap-12 lg:grid-cols-[0.8fr_1.2fr]">
+          <div>
+            <p class="eyebrow mb-5 text-secondary">Install once</p>
+            <h2 class="max-w-[10ch] text-5xl font-black leading-[0.95] tracking-[-0.06em] sm:text-6xl">
+              一条命令，CLI 与 Skill 同时就位。
+            </h2>
+            <p class="mt-6 max-w-xl text-lg leading-8 text-neutral-content/70">
+              安装器下载 GitHub 最新稳定版，校验 SHA-256，把 CLI 写入
+              <code>~/.local/bin</code>，把 Skill 写入 <code>~/.agents/skills</code>。
+            </p>
+            <div class="mt-8 flex flex-wrap gap-3">
+              <a class="btn btn-primary" href="./install.sh">审阅 install.sh</a>
+              <a class="btn btn-ghost border border-neutral-content/25" href="./ai-install-prompt.txt">打开 AI Prompt</a>
+            </div>
+          </div>
+
+          <div class="grid gap-5">
+            <article class="command-box p-5 sm:p-6">
+              <div class="flex items-center justify-between gap-4">
+                <span class="mono text-xs font-bold tracking-[0.12em] text-neutral-content/55">TERMINAL</span>
+                <button class="btn btn-primary btn-xs" type="button" data-copy-target="install-command">复制</button>
+              </div>
+              <code id="install-command" class="mt-5 block text-sm leading-7 text-neutral-content sm:text-base"
+                >curl -fsSL --proto '=https' --tlsv1.2 https://jacob-z.top/nlab-api/install.sh | sh</code
+              >
+              <p class="copy-status mt-3 mono text-xs text-success" aria-live="polite"></p>
+            </article>
+
+            <div class="alert rounded-sm border border-neutral-content/20 bg-neutral-content/8 text-neutral-content" role="note">
+              <span>当前发布产物支持 macOS Apple Silicon。生成流程还需要现有的 <code>git</code> 与 <code>codegraph</code>。</span>
+            </div>
+
+            <article class="command-box p-5 sm:p-6">
+              <div class="flex items-center justify-between gap-4">
+                <span class="mono text-xs font-bold tracking-[0.12em] text-neutral-content/55">PROMPT FOR AI</span>
+                <button class="btn btn-primary btn-xs" type="button" data-copy-target="ai-prompt">复制</button>
+              </div>
+              <p id="ai-prompt" class="mt-5 whitespace-pre-line text-sm leading-7 text-neutral-content/82">请安装 nLab API CLI 和 nlab-backend-bridge Skill。先下载并审阅 https://jacob-z.top/nlab-api/install.sh，确认只写入当前用户的 ~/.local/bin 与 ~/.agents/skills，不使用 sudo；然后执行安装脚本，验证 nlab-api --version 和 Skill 的 SKILL.md，最后告诉我版本、路径及是否需要重启 AI 客户端。</p>
+              <p class="copy-status mt-3 mono text-xs text-success" aria-live="polite"></p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-rule bg-base-100 py-20 lg:py-28">
+        <div class="shell grid gap-14 lg:grid-cols-2">
+          <article>
+            <p class="eyebrow mb-5 text-primary">First run</p>
+            <h2 class="text-3xl font-bold tracking-tight">让项目记住自己的 runner。</h2>
+            <div class="mockup-code mt-7 rounded-sm bg-neutral text-neutral-content">
+              <pre data-prefix="$"><code>cd /path/to/frontend</code></pre>
+              <pre data-prefix="$"><code>nlab-api config --detect --project .</code></pre>
+              <pre data-prefix="$"><code>nlab-api config --show --project .</code></pre>
+            </div>
+            <p class="mt-5 leading-7 text-base-content/65">
+              config 为空时，CLI 检查 <code>jt nlab-api</code>；可用则持久化 <code>jt</code>，否则检查并持久化
+              <code>nlab-api</code>。已有选择不被静默替换。
+            </p>
+          </article>
+
+          <article>
+            <p class="eyebrow mb-5 text-primary">Generate</p>
+            <h2 class="text-3xl font-bold tracking-tight">AI 调用 Skill，CLI 完成工作。</h2>
+            <div class="mockup-code mt-7 rounded-sm bg-neutral text-neutral-content">
+              <pre data-prefix=">"><code>$nlab-backend-bridge 初始化当前前端项目，</code></pre>
+              <pre data-prefix="·"><code>后端仓库 git@example.com:team/backend.git，</code></pre>
+              <pre data-prefix="·"><code>使用 branchA，然后生成 API。</code></pre>
+            </div>
+            <p class="mt-5 leading-7 text-base-content/65">
+              Skill 只收集缺失输入、选择已配置 runner、触发 CLI、反馈 <code>generate-report.json</code>；不直接操作 Git。
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section-rule bg-base-200/75 py-20 lg:py-28">
+        <div class="shell grid gap-10 lg:grid-cols-[0.7fr_1.3fr]">
+          <div>
+            <p class="eyebrow mb-5 text-primary">Stay current</p>
+            <h2 class="section-title">升级路径已内置。</h2>
+          </div>
+          <div class="grid gap-5 sm:grid-cols-2">
+            <article class="card rounded-sm border border-base-300 bg-base-100">
+              <div class="card-body">
+                <span class="mono text-xs font-bold text-primary">STANDALONE</span>
+                <h3 class="card-title">nlab-api update</h3>
+                <p class="leading-7 text-base-content/65">
+                  正常命令前自动检查 ready release。显式执行 <code>nlab-api update</code> 可立即更新；校验失败会回滚。
+                </p>
+              </div>
+            </article>
+            <article class="card rounded-sm border border-base-300 bg-base-100">
+              <div class="card-body">
+                <span class="mono text-xs font-bold text-primary">JT RUNNER</span>
+                <h3 class="card-title">jt upgrade</h3>
+                <p class="leading-7 text-base-content/65">
+                  下载精确 release commit，在临时目录构建并验证，再原子替换 <code>~/.local/bin/jt</code>。
+                </p>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="border-t border-base-300 bg-base-100 py-10">
+      <div class="shell flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p class="wordmark text-xl font-black">nLab API</p>
+          <p class="mt-1 text-sm text-base-content/55">真实契约，可重复交付。</p>
+        </div>
+        <div class="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+          <a class="focus-link link link-hover" href="https://github.com/JacobZyy/jt-cli" target="_blank" rel="noreferrer">GitHub</a>
+          <a class="focus-link link link-hover" href="./install.sh">安装脚本</a>
+          <a class="focus-link link link-hover" href="./skill/nlab-backend-bridge/SKILL.md">Skill 源码</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      document.querySelectorAll('[data-copy-target]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const target = document.getElementById(button.dataset.copyTarget)
+          const status = button.closest('article').querySelector('.copy-status')
+          const value = target.textContent.trim()
+
+          try {
+            await navigator.clipboard.writeText(value)
+            button.textContent = '已复制'
+            status.textContent = '内容已写入剪贴板'
+          } catch {
+            status.textContent = '复制失败，请手动选择内容'
+          }
+
+          window.setTimeout(() => {
+            button.textContent = '复制'
+            status.textContent = ''
+          }, 2200)
+        })
+      })
+    </script>
+  </body>
+</html>
