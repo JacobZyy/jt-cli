@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.2](https://github.com/JacobZyy/jt-cli/compare/v1.11.1...v1.11.2) (2026-09-03)
+
+
+### Features
+
+* **nlab-api:** manage repositories and runners ([1ef30b2](https://github.com/JacobZyy/jt-cli/commit/1ef30b2631d91834d70a91f10b32608a993880b2))
+
 ## [1.11.1](https://github.com/JacobZyy/jt-cli/compare/v1.11.0...v1.11.1) (2026-08-28)
 
 
