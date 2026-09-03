@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "jt"
-version = "1.11.1"
+version = "1.11.2"
 dependencies = [
  "clap",
  "clap_complete",
@@ -722,7 +722,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nlab-api"
-version = "1.11.1"
+version = "1.11.2"
 dependencies = [
  "anyhow",
  "clap",
