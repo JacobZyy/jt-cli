@@ -1,9 +1,10 @@
-请在这台 Mac 上安装 nLab API CLI 和 nlab-backend-bridge Skill。
+请在当前 Mac 上安装或升级 nLab API CLI 和 nlab-backend-bridge Skill。
 
 要求：
-1. 先下载并阅读 https://jacob-z.top/nlab-api/install.sh，确认它只会安装到当前用户的 ~/.local/bin 和 ~/.agents/skills；不要使用 sudo。
-2. 确认系统是 macOS Apple Silicon，并且已有 curl、tar、git 和 codegraph。
-3. 执行：curl -fsSL --proto '=https' --tlsv1.2 https://jacob-z.top/nlab-api/install.sh | sh
-4. 验证 ~/.local/bin/nlab-api --version 可以运行，并确认 ~/.agents/skills/nlab-backend-bridge/SKILL.md 存在。
-5. 如果 ~/.local/bin 不在 PATH，帮我写入当前 shell 的用户配置；不要改项目业务代码。
-6. 告诉我安装版本、Skill 路径、验证结果，以及是否需要重启 AI 客户端。
+1. 先记录当前仓库的 git status。只处理名称为 nlab-backend-bridge 的旧 Skill，不碰其他项目文件。
+2. 检查当前仓库的 .agents/skills、.codex/skills、.claude/skills、.opencode/skills，以及用户目录的 ~/.agents/skills、~/.codex/skills、~/.claude/skills、~/.config/opencode/skills。
+3. 下载并阅读 https://jacob-z.top/nlab-api/install.sh；不要使用 sudo。确认脚本只写入当前用户目录，并把旧 Skill 入口备份到 ~/.agents/skill-backups。
+4. 如果当前仓库没有旧 Skill，执行：curl -fsSL --proto '=https' --tlsv1.2 https://jacob-z.top/nlab-api/install.sh | sh
+5. 如果当前仓库存在旧 Skill，先确认路径，再执行：curl -fsSL --proto '=https' --tlsv1.2 https://jacob-z.top/nlab-api/install.sh -o /tmp/install-nlab-api.sh && sh /tmp/install-nlab-api.sh --replace-project-skill
+6. 验证 ~/.local/bin/nlab-api --version、~/.agents/skills/nlab-backend-bridge/SKILL.md，以及当前 AI 工具能发现 $nlab-backend-bridge。Codex 直接读取 ~/.agents/skills；Claude Code 应使用指向该主副本的软链。
+7. 如果 ~/.local/bin 不在 PATH，写入当前 shell 的用户配置。告诉我安装版本、Skill 主副本、软链、旧版备份、仓库变更和验证结果。

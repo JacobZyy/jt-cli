@@ -10,7 +10,6 @@ if [ -e "$OUTPUT_DIR" ]; then
 fi
 
 mkdir -p "$OUTPUT_DIR/skill"
-install -m 644 "$SCRIPT_DIR/index.html" "$OUTPUT_DIR/index.html"
 install -m 755 "$SCRIPT_DIR/install.sh" "$OUTPUT_DIR/install.sh"
 install -m 644 "$SCRIPT_DIR/ai-install-prompt.txt" "$OUTPUT_DIR/ai-install-prompt.txt"
 cp -R "$SCRIPT_DIR/skill/nlab-backend-bridge" "$OUTPUT_DIR/skill/nlab-backend-bridge"
