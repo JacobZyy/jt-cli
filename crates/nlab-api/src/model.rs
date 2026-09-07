@@ -83,6 +83,8 @@ pub struct Schema {
     pub name: String,
     pub source_path: String,
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_parameters: Vec<String>,
     pub fields: Vec<Field>,
 }
 
@@ -139,6 +141,38 @@ impl TypeRef {
         }
         rendered.push_str(&"[]".repeat(self.array_depth));
         rendered
+    }
+
+    pub fn substitute(&self, bindings: &BTreeMap<String, TypeRef>) -> Self {
+        if self.arguments.is_empty() {
+            if let Some(binding) = bindings.get(&self.name) {
+                let mut resolved = binding.clone();
+                resolved.array_depth += self.array_depth;
+                return resolved;
+            }
+        }
+        Self {
+            name: self.name.clone(),
+            arguments: self
+                .arguments
+                .iter()
+                .map(|argument| argument.substitute(bindings))
+                .collect(),
+            array_depth: self.array_depth,
+        }
+    }
+}
+
+impl Schema {
+    pub fn bindings_for(&self, type_ref: &TypeRef) -> BTreeMap<String, TypeRef> {
+        if self.type_parameters.len() != type_ref.arguments.len() {
+            return BTreeMap::new();
+        }
+        self.type_parameters
+            .iter()
+            .cloned()
+            .zip(type_ref.arguments.iter().cloned())
+            .collect()
     }
 }
 
