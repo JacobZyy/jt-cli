@@ -29,6 +29,7 @@ pub struct FrontendArtifact {
 struct TypeTarget {
     name: String,
     path: String,
+    type_parameters: Vec<String>,
 }
 
 struct TargetPlan {
@@ -147,8 +148,8 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
     let usage_directories = schema_usage_directories(ir, &config.backend.contract_roots)?;
     let base = ir
         .schemas
-        .keys()
-        .map(|fqn| {
+        .iter()
+        .map(|(fqn, schema)| {
             let directory =
                 nearest_usage_directory(usage_directories.get(fqn).cloned().unwrap_or_default());
             let name = base_names[fqn].clone();
@@ -160,6 +161,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
                         &format!("{}.ts", lower_camel(&name)),
                     ),
                     name,
+                    type_parameters: schema.type_parameters.clone(),
                 },
             )
         })
@@ -281,6 +283,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
                         TypeTarget {
                             path: join_path(&directory, &format!("{}.ts", lower_camel(&name))),
                             name,
+                            type_parameters: ir.schemas[fqn].type_parameters.clone(),
                         },
                     )
                 })
@@ -301,6 +304,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
                 TypeTarget {
                     path: join_path(&directory, &format!("{}.ts", lower_camel(&name))),
                     name,
+                    type_parameters: Vec::new(),
                 },
             ))
         })
@@ -317,6 +321,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
                     &format!("{}.ts", lower_camel(&name)),
                 ),
                 name,
+                type_parameters: Vec::new(),
             };
             (identity, (target, values))
         })
@@ -594,9 +599,14 @@ fn render_interface(
     if let Some(description) = &schema.description {
         output.push_str(&render_doc(description, ""));
     }
+    let type_parameters = if target.type_parameters.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", target.type_parameters.join(", "))
+    };
     output.push_str(&format!(
-        "export interface {} {{\n{fields}}}\n",
-        target.name
+        "export interface {}{} {{\n{fields}}}\n",
+        target.name, type_parameters
     ));
     Ok(output)
 }
@@ -636,6 +646,7 @@ fn render_api_file(
     let current = TypeTarget {
         name: String::new(),
         path: path.to_owned(),
+        type_parameters: Vec::new(),
     };
     let mut method_names = BTreeSet::new();
     let mut bodies = String::new();
@@ -730,15 +741,24 @@ fn type_expression(
     imports: &mut BTreeMap<String, BTreeSet<String>>,
     config: &ProjectConfig,
 ) -> String {
-    let scalar = match type_ref.simple_name() {
-        "String" | "CharSequence" | "char" | "Character" | "Long" | "long" | "BigInteger"
-        | "Date" | "LocalDate" | "LocalDateTime" | "Instant" | "Timestamp" => Some("string"),
-        "Integer" | "int" | "Short" | "short" | "Byte" | "byte" | "Double" | "double" | "Float"
-        | "float" | "BigDecimal" => Some("number"),
-        "Boolean" | "boolean" => Some("boolean"),
-        "Void" | "void" => Some("void"),
-        "Object" | "JSONObject" => Some("unknown"),
-        _ => None,
+    let scalar = if type_ref.arguments.is_empty()
+        && current
+            .type_parameters
+            .iter()
+            .any(|parameter| parameter == type_ref.simple_name())
+    {
+        Some(type_ref.simple_name())
+    } else {
+        match type_ref.simple_name() {
+            "String" | "CharSequence" | "char" | "Character" | "Long" | "long" | "BigInteger"
+            | "Date" | "LocalDate" | "LocalDateTime" | "Instant" | "Timestamp" => Some("string"),
+            "Integer" | "int" | "Short" | "short" | "Byte" | "byte" | "Double" | "double"
+            | "Float" | "float" | "BigDecimal" => Some("number"),
+            "Boolean" | "boolean" => Some("boolean"),
+            "Void" | "void" => Some("void"),
+            "Object" | "JSONObject" => Some("unknown"),
+            _ => None,
+        }
     };
     let mut result = if let Some(scalar) = scalar {
         scalar.to_owned()
@@ -785,7 +805,22 @@ fn type_expression(
                     .or_default()
                     .insert(target.name.clone());
             }
-            target.name.clone()
+            let arguments = if type_ref.arguments.is_empty() {
+                vec!["unknown".to_owned(); target.type_parameters.len()]
+            } else {
+                type_ref
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        type_expression(argument, current, base_targets, aliases, imports, config)
+                    })
+                    .collect()
+            };
+            if arguments.is_empty() {
+                target.name.clone()
+            } else {
+                format!("{}<{}>", target.name, arguments.join(", "))
+            }
         } else {
             "unknown".to_owned()
         }
@@ -1033,6 +1068,119 @@ mod tests {
         assert_eq!(
             remove_owner_overlap("RefurbButton", "ActionCode"),
             Some("ActionCode")
+        );
+    }
+
+    #[test]
+    fn generic_schema_preserves_concrete_type_in_typescript_and_openapi() {
+        let ir = serde_json::from_value::<ContractIr>(serde_json::json!({
+            "target": {
+                "appName": "app",
+                "branch": "feature",
+                "commit": "abc",
+                "codegraphVersion": "1",
+                "codegraphExtractionVersion": "1"
+            },
+            "operations": [{
+                "key": "IWorkOrderQueryFacade#queryWorkOrderList",
+                "facadeName": "IWorkOrderQueryFacade",
+                "facadeFqn": "p.contract.warehouse.IWorkOrderQueryFacade",
+                "methodName": "queryWorkOrderList",
+                "signature": "PageResp<WorkOrderListItemVO> queryWorkOrderList()",
+                "description": null,
+                "contractSource": "contract/src/main/java/p/contract/warehouse/IWorkOrderQueryFacade.java",
+                "request": null,
+                "response": {
+                    "name": "p.PageResp",
+                    "arguments": [{
+                        "name": "p.WorkOrderListItemVO",
+                        "arguments": [],
+                        "arrayDepth": 0
+                    }],
+                    "arrayDepth": 0
+                },
+                "requestSchema": null,
+                "responseSchema": "p.PageResp",
+                "service": null,
+                "route": {
+                    "status": "placeholder",
+                    "source": "placeholder",
+                    "method": "POST",
+                    "path": "/query",
+                    "host": null
+                },
+                "semanticPatches": [],
+                "warnings": []
+            }],
+            "schemas": {
+                "p.PageResp": {
+                    "fqn": "p.PageResp",
+                    "name": "PageResp",
+                    "sourcePath": "PageResp.java",
+                    "description": null,
+                    "typeParameters": ["T"],
+                    "fields": [{
+                        "name": "list",
+                        "javaType": {
+                            "name": "List",
+                            "arguments": [{
+                                "name": "T",
+                                "arguments": [],
+                                "arrayDepth": 0
+                            }],
+                            "arrayDepth": 0
+                        },
+                        "optional": false,
+                        "description": null,
+                        "declaredValues": null
+                    }]
+                },
+                "p.WorkOrderListItemVO": {
+                    "fqn": "p.WorkOrderListItemVO",
+                    "name": "WorkOrderListItemVO",
+                    "sourcePath": "WorkOrderListItemVO.java",
+                    "description": null,
+                    "fields": [{
+                        "name": "workOrderNo",
+                        "javaType": {
+                            "name": "Long",
+                            "arguments": [],
+                            "arrayDepth": 0
+                        },
+                        "optional": false,
+                        "description": null,
+                        "declaredValues": null
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+
+        let artifact = generate(&ir, &config()).unwrap();
+        let page = artifact
+            .files
+            .values()
+            .find(|source| source.contains("export interface PageResp"))
+            .unwrap();
+        assert!(page.contains("export interface PageResp<T>"));
+        assert!(page.contains("list: T[];"));
+        let data = artifact
+            .files
+            .values()
+            .find(|source| source.contains("PageResp<WorkOrderListItemVO>"))
+            .unwrap();
+        assert!(data.contains("import type { PageResp }"));
+        assert!(data.contains("import type { WorkOrderListItemVO }"));
+        assert!(data.contains(" = PageResp<WorkOrderListItemVO>;"));
+
+        let openapi = super::super::openapi::generate(&ir, &config()).unwrap();
+        let document = serde_json::from_str::<serde_json::Value>(&openapi.source).unwrap();
+        let response = &document["paths"]["/query"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"];
+        assert_eq!(response["type"], "object");
+        assert_eq!(
+            response["properties"]["list"]["items"]["$ref"],
+            "#/components/schemas/WorkOrderListItemVO"
         );
     }
 

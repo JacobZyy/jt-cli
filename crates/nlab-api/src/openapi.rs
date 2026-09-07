@@ -27,7 +27,7 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifa
     for (fqn, schema) in &ir.schemas {
         components.insert(
             names[fqn].clone(),
-            schema_object(schema, &names, None, &HashMap::new()),
+            schema_object(schema, &names, None, &HashMap::new(), &BTreeMap::new()),
         );
     }
 
@@ -44,10 +44,10 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifa
             let schema = &ir.schemas[fqn];
             components.insert(
                 alias.clone(),
-                schema_object(schema, &names, Some(operation), &aliases),
+                schema_object(schema, &names, Some(operation), &aliases, &BTreeMap::new()),
             );
         }
-        let operation_value = operation_object(operation, &names, &aliases, config)?;
+        let operation_value = operation_object(operation, &ir.schemas, &names, &aliases, config)?;
         let mut path_item = Map::new();
         path_item.insert(
             operation.route.method.to_ascii_lowercase(),
@@ -138,6 +138,7 @@ pub fn validate(document: &Value, expected_operations: usize) -> Result<()> {
 
 fn operation_object(
     operation: &Operation,
+    schemas: &BTreeMap<String, Schema>,
     names: &BTreeMap<String, String>,
     aliases: &HashMap<String, String>,
     config: &ProjectConfig,
@@ -244,7 +245,13 @@ fn operation_object(
                 "required": true,
                 "content": {
                     "application/json": {
-                        "schema": type_schema(request, names, &HashMap::new())
+                        "schema": operation_schema(
+                            request,
+                            schemas,
+                            names,
+                            operation,
+                            &HashMap::new(),
+                        )
                     }
                 }
             }),
@@ -261,7 +268,13 @@ fn operation_object(
                 "description": "OK",
                 "content": {
                     "application/json": {
-                        "schema": type_schema(&operation.response, names, aliases)
+                        "schema": operation_schema(
+                            &operation.response,
+                            schemas,
+                            names,
+                            operation,
+                            aliases,
+                        )
                     }
                 }
             }
@@ -270,11 +283,38 @@ fn operation_object(
     Ok(Value::Object(value))
 }
 
+fn operation_schema(
+    type_ref: &TypeRef,
+    schemas: &BTreeMap<String, Schema>,
+    names: &BTreeMap<String, String>,
+    operation: &Operation,
+    aliases: &HashMap<String, String>,
+) -> Value {
+    let fqn = type_ref.name.replace("::", ".");
+    let Some(schema) = schemas.get(&fqn) else {
+        return type_schema(type_ref, names, aliases);
+    };
+    if type_ref.array_depth == 0
+        && !schema.type_parameters.is_empty()
+        && schema.type_parameters.len() == type_ref.arguments.len()
+    {
+        return schema_object(
+            schema,
+            names,
+            Some(operation),
+            aliases,
+            &schema.bindings_for(type_ref),
+        );
+    }
+    type_schema(type_ref, names, aliases)
+}
+
 fn schema_object(
     schema: &Schema,
     names: &BTreeMap<String, String>,
     operation: Option<&Operation>,
     aliases: &HashMap<String, String>,
+    bindings: &BTreeMap<String, TypeRef>,
 ) -> Value {
     let patches = operation
         .map(|operation| {
@@ -292,7 +332,7 @@ fn schema_object(
     let mut properties = Map::new();
     let mut required = Vec::new();
     for field in &schema.fields {
-        let mut property = type_schema(&field.java_type, names, aliases);
+        let mut property = type_schema(&field.java_type.substitute(bindings), names, aliases);
         if let Some(description) = &field.description {
             property
                 .as_object_mut()

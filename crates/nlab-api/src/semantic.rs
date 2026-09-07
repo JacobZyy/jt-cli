@@ -1523,6 +1523,7 @@ mod tests {
                 name: "Row".to_owned(),
                 source_path: "Row.java".to_owned(),
                 description: None,
+                type_parameters: vec![],
                 fields: vec![],
             },
         )]);

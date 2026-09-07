@@ -335,7 +335,8 @@ impl<'a> JavaProject<'a> {
             .with_context(|| format!("schema type not indexed: {fqn}"))?;
         let node = &self.graph.nodes[node_id];
         let mut fields = Vec::new();
-        if let Some(parent) = self.superclass(node)? {
+        let (type_parameters, superclass) = self.class_metadata(node)?;
+        if let Some(parent) = superclass {
             self.collect_schema(&parent, schemas, visiting)?;
             if let Some(parent_schema) = schemas.get(&parent) {
                 fields.extend(parent_schema.fields.clone());
@@ -349,7 +350,12 @@ impl<'a> JavaProject<'a> {
                     arguments: Vec::new(),
                     array_depth: 0,
                 });
-            self.qualify_type(&field.file_path, &node.qualified_name, &mut java_type);
+            self.qualify_type_with_parameters(
+                &field.file_path,
+                &node.qualified_name,
+                &mut java_type,
+                &type_parameters,
+            );
             fields.retain(|existing: &Field| existing.name != field.name);
             let description = field
                 .docstring
@@ -387,6 +393,7 @@ impl<'a> JavaProject<'a> {
                     .docstring
                     .clone()
                     .filter(|value| !value.trim().is_empty()),
+                type_parameters,
                 fields,
             },
         );
@@ -413,15 +420,32 @@ impl<'a> JavaProject<'a> {
     }
 
     fn qualify_type(&self, file_path: &str, owner_fqn: &str, type_ref: &mut TypeRef) {
+        self.qualify_type_with_parameters(file_path, owner_fqn, type_ref, &[]);
+    }
+
+    fn qualify_type_with_parameters(
+        &self,
+        file_path: &str,
+        owner_fqn: &str,
+        type_ref: &mut TypeRef,
+        type_parameters: &[String],
+    ) {
+        if type_ref.arguments.is_empty()
+            && type_parameters
+                .iter()
+                .any(|parameter| parameter == type_ref.simple_name())
+        {
+            return;
+        }
         for argument in &mut type_ref.arguments {
-            self.qualify_type(file_path, owner_fqn, argument);
+            self.qualify_type_with_parameters(file_path, owner_fqn, argument, type_parameters);
         }
         if let Some(node) = self.resolve_type(file_path, owner_fqn, type_ref) {
             type_ref.name = normalize_fqn(&node.qualified_name);
         }
     }
 
-    fn superclass(&self, class: &GraphNode) -> Result<Option<String>> {
+    fn class_metadata(&self, class: &GraphNode) -> Result<(Vec<String>, Option<String>)> {
         let source = self.source(&class.file_path)?;
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_java::LANGUAGE.into())?;
@@ -432,9 +456,15 @@ impl<'a> JavaProject<'a> {
             matches!(node.kind(), "class_declaration" | "record_declaration")
                 && node.start_position().row + 1 == class.start_line
         });
-        let Some(superclass) = declaration.and_then(|node| node.child_by_field_name("superclass"))
-        else {
-            return Ok(None);
+        let Some(declaration) = declaration else {
+            return Ok((Vec::new(), None));
+        };
+        let type_parameters = declaration
+            .child_by_field_name("type_parameters")
+            .map(|parameters| type_parameter_names(source, parameters))
+            .unwrap_or_default();
+        let Some(superclass) = declaration.child_by_field_name("superclass") else {
+            return Ok((type_parameters, None));
         };
         let superclass_source = text_of(source, superclass);
         let text = superclass_source
@@ -442,11 +472,12 @@ impl<'a> JavaProject<'a> {
             .trim_start_matches("extends")
             .trim();
         let Some(type_ref) = parse_java_type(text) else {
-            return Ok(None);
+            return Ok((type_parameters, None));
         };
-        Ok(self
+        let superclass = self
             .resolve_type(&class.file_path, &class.qualified_name, &type_ref)
-            .map(|node| normalize_fqn(&node.qualified_name)))
+            .map(|node| normalize_fqn(&node.qualified_name));
+        Ok((type_parameters, superclass))
     }
 
     fn field_optional(&self, field: &GraphNode) -> bool {
@@ -673,6 +704,19 @@ fn descendants(root: Node<'_>) -> Vec<Node<'_>> {
     result
 }
 
+fn type_parameter_names(source: &str, parameters: Node<'_>) -> Vec<String> {
+    descendants(parameters)
+        .into_iter()
+        .filter(|node| node.kind() == "type_parameter")
+        .filter_map(|parameter| {
+            descendants(parameter)
+                .into_iter()
+                .find(|node| node.kind() == "type_identifier")
+        })
+        .map(|name| text_of(source, name))
+        .collect()
+}
+
 fn text_of(source: &str, node: Node<'_>) -> String {
     source[node.byte_range()].to_owned()
 }
@@ -743,6 +787,23 @@ mod tests {
         assert_eq!(response.simple_name(), "ApiResult");
         assert_eq!(parameters[0].simple_name(), "EmployeeUser");
         assert_eq!(parameters[1].simple_name(), "QueryReq");
+    }
+
+    #[test]
+    fn class_type_parameters_preserve_declared_order() {
+        let source = "class PageResp<T, U extends Comparable<U>> {}";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let declaration = descendants(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "class_declaration")
+            .unwrap();
+        let parameters = declaration.child_by_field_name("type_parameters").unwrap();
+
+        assert_eq!(type_parameter_names(source, parameters), ["T", "U"]);
     }
 
     #[test]
