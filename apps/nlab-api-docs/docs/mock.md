@@ -79,9 +79,9 @@ jt nlab-api mock --project /path/to/frontend \
 - `values` 可以替换当前对象已有的整段对象或列表；最终响应必须通过契约验证，不能增加契约没有的属性。替换路径不存在时报告该接口失败。
 - `defaultScenario` 省略时使用基础样例。`base`、`default` 是保留场景名。Query 名和场景名只接受非空 ASCII 字母、数字、`_`、`-`。
 - `sources`、`gaps`、`assumptions` 放在响应外的报告里。资料缺口用文字记录，不能用不存在的字段、枚举或按钮码占位。
-- `generators` 支持 `personName`、`email`、`address`、`phone`、`productName`、`description`、`image`、`url`、`dateTime`、`date`、`identifier`、`uuid`、`label`、`statusLabel`、`province`、`city`、`district`、`merchantGroupName`、`roleLabel`。它生成字符串；目标字段不接受字符串时校验失败。明确固定值优先于生成器。
+- `generators` 支持 `personName`、`email`、`address`、`phone`、`productName`、`description`、`image`、`url`、`dateTime`、`date`、`identifier`、`uuid`、`label`、`statusLabel`、`province`、`city`、`district`、`merchantGroupName`、`roleLabel`、`categoryName`、`brandName`、`modelName`、`count`。它生成字符串；目标字段不接受字符串时校验失败。明确固定值优先于生成器。
 
-没有规则时，工具根据字段名、注释、对象路径、类型和格式选择语义数据。姓名、邮箱使用 Rust `fake 4.4.0` 的 `zh_CN` 数据；省、市、区使用成套的广东省深圳市南山区固定样例，街道门牌为中文开发示意；商品使用示意词库，图片使用布局占位素材。商户组使用明确的示例名称；角色名称与无法识别的字段会在覆盖报告中标注语义或业务文案未覆盖。具体品牌、型号、品类、金额及时间之间的业务关系应由 `base` 和状态差异明确表达。
+没有规则时，工具根据字段名、注释、对象路径、类型和格式选择语义数据。姓名、邮箱使用 Rust `fake 4.4.0` 的 `zh_CN` 数据；省、市、区使用成套的广东省深圳市南山区固定样例，街道门牌为中文开发示意；商品标题、品类、品牌、型号使用同一组捷安特 ATX 810 山地自行车示意数据，图片使用布局占位素材。商户组使用明确的示例名称；角色名称与无法识别的字段会在覆盖报告中标注语义或业务文案未覆盖。具体品牌、型号、品类、金额及时间之间的业务关系应由 `base` 和状态差异明确表达。
 
 契约 `const`、`example`、`default` 和枚举优先于自动推断；枚举基础样例取首个合法值，不随机决定状态。没有按钮规则时使用空列表并记录未覆盖；若契约要求非空且没有规则覆盖，样例校验失败。可空字段、递归树和数组仍需满足当前契约。复杂 pattern、互斥组合或无法构造的递归结构可能需要显式样例；验证失败会报告原因，不写入不合法的响应。
 
@@ -141,3 +141,9 @@ node crates/nlab-api/tests/whistle-mock.mjs \
   /path/to/generated/whistle.rules \
   POST http://example.test/api/detail done __mock
 ```
+
+### 类型和结构语义
+
+`x-nlab-java-type: Long` 优先于名称推断：即使字段叫 `merchantGroupName`，也生成并验证可解析的 i64 数字字符串，名称与契约冲突记入缺口。计数字符串不会用中文占位。
+
+同时含 `pageNum`、`pageSize`、`total`、`list` 的对象，未被规则固定的分页值会按生成列表计算；显式合法分页值保留，矛盾值报告失败。没有业务规则的 `statusTabs` 只生成一项并说明映射未覆盖，不随机拼出生产状态。商品开发标识不代表真实品类库映射；明确契约样例、枚举和业务规则仍优先。

@@ -490,3 +490,111 @@ fn chinese_address_fields_form_one_locale_and_unknown_roles_remain_gaps() {
             .0
     );
 }
+
+#[test]
+fn java_long_overrides_name_inference_and_validates_explicit_samples() {
+    let rules = scenarios::Rules::default();
+    let op = operation(
+        json!({"type":"object","properties":{"merchantGroupName":{"type":"string","x-nlab-java-type":"Long"}}}),
+    );
+    let (samples, gaps) = generate_operation(
+        &op,
+        &json!({}),
+        &rules,
+        &scenarios::Operation::default(),
+        42,
+        "long",
+    )
+    .unwrap();
+    assert!(
+        samples["base"]["merchantGroupName"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .is_ok()
+    );
+    assert!(gaps.iter().any(|g| g.contains("Java Long")));
+    for invalid in ["样例内容", "9223372036854775808"] {
+        let explicit =
+            serde_json::from_value(json!({"base":{"/merchantGroupName":invalid}})).unwrap();
+        assert!(generate_operation(&op, &json!({}), &rules, &explicit, 42, "long").is_err());
+    }
+}
+
+#[test]
+fn generated_pages_track_list_length_preserve_explicit_counts_and_catalog() {
+    let rules = scenarios::Rules::default();
+    let op = operation(json!({"type":"object", "properties":{
+        "total":{"type":"string","x-nlab-java-type":"Long"}, "pageNum":{"type":"number"}, "pageSize":{"type":"number"},
+        "list":{"type":"array","items":{"type":"object","properties":{
+            "goodsTitle":{"type":"string"},"cateName":{"type":"string"},"brandName":{"type":"string"},"modelName":{"type":"string"}
+        }}}
+    }}));
+    let (samples, _) = generate_operation(
+        &op,
+        &json!({}),
+        &rules,
+        &scenarios::Operation::default(),
+        42,
+        "page",
+    )
+    .unwrap();
+    let page = &samples["base"];
+    assert_eq!(page["list"].as_array().unwrap().len(), 2);
+    assert_eq!(page["pageSize"], 2);
+    assert_eq!(page["total"], "2");
+    assert_eq!(page["list"][0]["brandName"], "捷安特");
+    assert_eq!(page["list"][0]["modelName"], "ATX 810");
+    assert_eq!(page["list"][0]["cateName"], "山地自行车");
+    assert!(
+        page["list"][0]["goodsTitle"]
+            .as_str()
+            .unwrap()
+            .contains("ATX 810")
+    );
+    let explicit = serde_json::from_value(json!({"base":{"/pageSize":10,"/total":"30"},"scenarios":{"empty":{"values":{"/list":[]}}}})).unwrap();
+    let (samples, _) = generate_operation(&op, &json!({}), &rules, &explicit, 42, "page").unwrap();
+    assert_eq!(samples["empty"]["pageSize"], 10);
+    assert_eq!(samples["empty"]["total"], "30");
+    let invalid = serde_json::from_value(json!({"base":{"/pageSize":1}})).unwrap();
+    assert!(generate_operation(&op, &json!({}), &rules, &invalid, 42, "page").is_err());
+}
+
+#[test]
+fn unknown_tabs_use_one_placeholder_without_inventing_business_states() {
+    let rules = scenarios::Rules::default();
+    let op = operation(
+        json!({"type":"object","properties":{"statusTabs":{"type":"array","items":{"type":"object","properties":{"type":{"type":"integer"},"code":{"type":"string"}}}}}}),
+    );
+    let (samples, gaps) = generate_operation(
+        &op,
+        &json!({}),
+        &rules,
+        &scenarios::Operation::default(),
+        42,
+        "tabs",
+    )
+    .unwrap();
+    assert_eq!(samples["base"]["statusTabs"].as_array().unwrap().len(), 1);
+    assert!(gaps.iter().any(|g| g.contains("Tab 业务映射尚未确认")));
+}
+
+#[test]
+fn pagination_keeps_declared_contract_samples_ahead_of_inference() {
+    let op = operation(json!({"type":"object","properties":{
+        "pageNum":{"type":"number","default":1},"pageSize":{"type":"number","enum":[10]},
+        "total":{"type":"string","x-nlab-java-type":"Long","example":"20"},
+        "list":{"type":"array","items":{"type":"string"}}
+    }}));
+    let (samples, _) = generate_operation(
+        &op,
+        &json!({}),
+        &scenarios::Rules::default(),
+        &scenarios::Operation::default(),
+        42,
+        "declared-page",
+    )
+    .unwrap();
+    assert_eq!(samples["base"]["pageSize"], 10);
+    assert_eq!(samples["base"]["total"], "20");
+}

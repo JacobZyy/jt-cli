@@ -17,6 +17,7 @@ pub(super) struct Generator<'a> {
     pub rules: &'a Rules,
     pub rng: ChaCha8Rng,
     pub gaps: BTreeSet<String>,
+    pub fixed: BTreeSet<String>,
 }
 
 impl Generator<'_> {
@@ -33,6 +34,7 @@ impl Generator<'_> {
     ) -> Result<Value> {
         for key in ["const", "example", "default"] {
             if let Some(value) = schema.get(key) {
+                self.fixed.insert(pointer.to_owned());
                 return Ok(value.clone());
             }
         }
@@ -41,6 +43,7 @@ impl Generator<'_> {
             .and_then(Value::as_array)
             .and_then(|v| v.first())
         {
+            self.fixed.insert(pointer.to_owned());
             self.gaps.insert(format!(
                 "{pointer}: 使用首个合法枚举样例；状态与字段关系未推断"
             ));
@@ -120,8 +123,17 @@ impl Generator<'_> {
                 let recursive = schema["items"]["$ref"]
                     .as_str()
                     .is_some_and(|r| visiting.contains(r));
+                let is_tab = pointer
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|field| field.to_lowercase().ends_with("tabs"));
                 let count = if recursive && minimum == 0 {
                     0
+                } else if is_tab {
+                    self.gaps.insert(format!(
+                        "{pointer}: Tab 业务映射尚未确认，仅生成一个占位项，避免重复 key"
+                    ));
+                    1.min(schema["maxItems"].as_u64().unwrap_or(1))
                 } else if is_action {
                     self.gaps.insert(format!(
                         "{pointer}: 按钮规则未知，暂未覆盖；空列表仅用于占位"
@@ -152,7 +164,9 @@ impl Generator<'_> {
                         "{pointer}: 契约未声明状态枚举，数值仅为类型合法的基础样例"
                     ));
                 }
-                let mut value = if pointer.to_lowercase().ends_with("id") {
+                let mut value = if let Some(id) = catalog_id(pointer) {
+                    id as f64
+                } else if pointer.to_lowercase().ends_with("id") {
                     self.rng.random_range(100_000..=999_999) as f64
                 } else {
                     1.0
@@ -230,7 +244,29 @@ impl Generator<'_> {
         let words = format!("{pointer} {context}").to_lowercase();
         let contains = |terms: &[&str]| terms.iter().any(|term| words.contains(term));
         let local_contains = |terms: &[&str]| terms.iter().any(|term| local.contains(term));
-        let inferred = if matches!(field.as_str(), "province" | "provincename") {
+        let inferred = if schema["x-nlab-java-type"] == "Long" {
+            if field.contains("name") {
+                self.gaps.insert(format!(
+                    "{pointer}: 字段名称含 name，但契约是 Java Long；保留数字字符串，名称语义未覆盖"
+                ));
+            }
+            if matches!(field.as_str(), "total" | "count" | "quantity") || field.ends_with("count")
+            {
+                "count"
+            } else {
+                "identifier"
+            }
+        } else if matches!(field.as_str(), "total" | "count" | "quantity")
+            || field.ends_with("count")
+        {
+            "count"
+        } else if field == "catename" || field == "categoryname" {
+            "categoryName"
+        } else if field == "brandname" {
+            "brandName"
+        } else if field == "modelname" {
+            "modelName"
+        } else if matches!(field.as_str(), "province" | "provincename") {
             "province"
         } else if matches!(field.as_str(), "city" | "cityname") {
             "city"
@@ -318,16 +354,20 @@ impl Generator<'_> {
             "merchantGroupName" => "南山示例商户组".to_owned(),
             "roleLabel" => "角色文案待确认".to_owned(),
             "phone" => format!("138{:08}", self.rng.random_range(0..100_000_000)),
-            "productName" => {
-                ["山地自行车", "公路自行车", "折叠自行车"][self.rng.random_range(0..3)].to_owned()
-            }
+            "productName" => "捷安特 ATX 810 山地自行车".to_owned(),
+            "categoryName" => "山地自行车".to_owned(),
+            "brandName" => "捷安特".to_owned(),
+            "modelName" => "ATX 810".to_owned(),
+            "count" => "1".to_owned(),
             "description" => "日常使用，外观有轻微使用痕迹，功能待核验".to_owned(),
             "statusLabel" => "状态文案待确认".to_owned(),
             "image" => "https://placehold.co/640x480/png?text=Product+illustration".to_owned(),
             "url" => "https://example.com/preview".to_owned(),
             "dateTime" => self.rules.reference_date.clone(),
             "date" => self.rules.reference_date[..10].to_owned(),
-            "identifier" => self.rng.random_range(100_000..=999_999).to_string(),
+            "identifier" => catalog_id(pointer)
+                .unwrap_or_else(|| self.rng.random_range(100_000..=999_999))
+                .to_string(),
             "uuid" => format!(
                 "{:08x}-0000-4000-8000-{:012x}",
                 self.rng.random::<u32>(),
@@ -344,6 +384,7 @@ pub(super) fn validator(schema: &Value, document: &Value) -> Result<jsonschema::
     let mut root = json!({"allOf": [schema], "components": document["components"]});
     normalize(&mut root)?;
     jsonschema::options()
+        .with_format("nlab-java-long", |value| value.parse::<i64>().is_ok())
         .should_validate_formats(true)
         .build(&root)
         .map_err(|error| anyhow::anyhow!("invalid response schema: {error}"))
@@ -386,6 +427,16 @@ fn normalize(value: &mut Value) -> Result<()> {
             normalize(schema)?;
         }
     }
+    if object.get("x-nlab-java-type").and_then(Value::as_str) == Some("Long")
+        && object.get("type").and_then(Value::as_str) == Some("string")
+    {
+        object
+            .entry("allOf")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .context("allOf must be an array")?
+            .push(json!({"format":"nlab-java-long"}));
+    }
     for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
         if let Some(schemas) = object.get_mut(keyword).and_then(Value::as_array_mut) {
             for schema in schemas {
@@ -399,4 +450,94 @@ fn normalize(value: &mut Value) -> Result<()> {
         object.insert("anyOf".into(), json!([inner, {"type":"null"}]));
     }
     Ok(())
+}
+
+pub(super) fn align_pages(data: &mut Value, pointer: &str, fixed: &BTreeSet<String>) -> Result<()> {
+    match data {
+        Value::Object(object) => {
+            for (key, value) in object.iter_mut() {
+                align_pages(
+                    value,
+                    &format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1")),
+                    fixed,
+                )?;
+            }
+            if ["pageNum", "pageSize", "total", "list"]
+                .iter()
+                .all(|key| object.contains_key(*key))
+            {
+                let length = object["list"]
+                    .as_array()
+                    .context("page list must be an array")?
+                    .len() as u64;
+                let is_fixed = |field: &str| {
+                    let path = format!("{pointer}/{field}");
+                    fixed
+                        .iter()
+                        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
+                };
+                let count = |value: &Value| {
+                    value
+                        .as_u64()
+                        .or_else(|| {
+                            value
+                                .as_f64()
+                                .filter(|v| v.fract() == 0.0 && *v >= 0.0)
+                                .map(|v| v as u64)
+                        })
+                        .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
+                        .context("page count must be a nonnegative integer")
+                };
+                let set = |object: &mut Map<String, Value>, key: &str, value: u64| {
+                    let value = if object[key].is_string() {
+                        json!(value.to_string())
+                    } else {
+                        json!(value)
+                    };
+                    object.insert(key.to_owned(), value);
+                };
+                if !is_fixed("pageNum") {
+                    set(object, "pageNum", 1);
+                }
+                if !is_fixed("pageSize") {
+                    set(object, "pageSize", length.max(1));
+                }
+                let page = count(&object["pageNum"])?;
+                let size = count(&object["pageSize"])?;
+                if page == 0 || size == 0 || size < length {
+                    bail!("{pointer}: pageNum/pageSize conflict with generated list");
+                }
+                let minimum_total = if length == 0 {
+                    0
+                } else {
+                    (page - 1)
+                        .checked_mul(size)
+                        .and_then(|n| n.checked_add(length))
+                        .context("page counts overflow")?
+                };
+                if !is_fixed("total") {
+                    set(object, "total", minimum_total);
+                }
+                if count(&object["total"])? < minimum_total {
+                    bail!("{pointer}: total is smaller than the generated page");
+                }
+            }
+        }
+        Value::Array(array) => {
+            for (index, value) in array.iter_mut().enumerate() {
+                align_pages(value, &format!("{pointer}/{index}"), fixed)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn catalog_id(pointer: &str) -> Option<u64> {
+    match pointer.rsplit('/').next()?.to_lowercase().as_str() {
+        "cateid" | "categoryid" => Some(1001),
+        "brandid" => Some(2001),
+        "modelid" => Some(3001),
+        _ => None,
+    }
 }

@@ -189,13 +189,13 @@ fn run_inner(args: MockArgs) -> Result<Value> {
         safe_segment(app_name)
     );
     let report = json!({
-        "version": 1, "generator": "jt-nlab-mock/3", "faker": "fake/4.4.0", "seed": args.seed,
+        "version": 1, "generator": "jt-nlab-mock/4", "faker": "fake/4.4.0", "seed": args.seed,
         "locale": scenario_rules.locale, "referenceDate": scenario_rules.reference_date,
         "rulesSha256": sha256(&serde_json::to_vec(&scenario_rules)?),
         "openapiSha256": sha256(openapi_source.as_bytes()), "openapiSource": openapi_path,
         "query": scenario_rules.query, "dryRun": args.dry_run,
         "status": if args.dry_run { "planned" } else if failed > 0 { "complete-with-errors" } else { "complete" },
-        "assumptions": ["基础样例不证明状态、按钮、金额、时间或标识之间的业务关系；跨接口关联由 base 明确固定。", "图片为商品布局示意素材，不代表实物或质检照片。", "行政区划使用广东省深圳市南山区固定样例，街道门牌和商户组名称为开发示意，不代表实际位置或组织。"],
+        "assumptions": ["基础样例不证明状态、按钮、金额、时间或标识之间的业务关系；跨接口关联由 base 明确固定。", "图片为商品布局示意素材，不代表实物或质检照片。", "行政区划使用广东省深圳市南山区固定样例，街道门牌和商户组名称为开发示意，不代表实际位置或组织。商品示例使用捷安特 ATX 810 山地自行车及固定开发标识，不代表真实品类库映射。"],
         "operations": coverage,
     });
     files.insert(
@@ -287,14 +287,32 @@ fn generate_operation(
         rules,
         rng: operation_rng(seed, key),
         gaps: BTreeSet::new(),
+        fixed: BTreeSet::new(),
     };
     let mut base = generator.generate(schema)?;
     generator.apply_generators(&mut base, &operation_rules.generators)?;
     scenarios::apply_values(&mut base, &operation_rules.base)?;
+    let fixed: BTreeSet<String> = operation_rules
+        .base
+        .keys()
+        .chain(operation_rules.generators.keys())
+        .chain(generator.fixed.iter())
+        .cloned()
+        .collect();
+    schema::align_pages(&mut base, "", &fixed)?;
     let mut samples = BTreeMap::from([("base".to_owned(), base.clone())]);
     for (name, scenario) in &operation_rules.scenarios {
         let mut sample = base.clone();
         scenarios::apply_values(&mut sample, &scenario.values)?;
+        schema::align_pages(
+            &mut sample,
+            "",
+            &fixed
+                .iter()
+                .chain(scenario.values.keys())
+                .cloned()
+                .collect(),
+        )?;
         samples.insert(name.clone(), sample);
     }
     for (name, sample) in &samples {
