@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use fake::{
     Fake,
-    faker::{address::raw::CityName, internet::raw::SafeEmail, name::raw::Name},
+    faker::{internet::raw::SafeEmail, name::raw::Name},
     locales::ZH_CN,
 };
 use rand::Rng;
@@ -230,7 +230,17 @@ impl Generator<'_> {
         let words = format!("{pointer} {context}").to_lowercase();
         let contains = |terms: &[&str]| terms.iter().any(|term| words.contains(term));
         let local_contains = |terms: &[&str]| terms.iter().any(|term| local.contains(term));
-        let inferred = if field.contains("status") {
+        let inferred = if matches!(field.as_str(), "province" | "provincename") {
+            "province"
+        } else if matches!(field.as_str(), "city" | "cityname") {
+            "city"
+        } else if matches!(field.as_str(), "district" | "districtname") {
+            "district"
+        } else if field == "merchantgroupname" {
+            "merchantGroupName"
+        } else if field == "rolename" {
+            "roleLabel"
+        } else if field.contains("status") {
             "statusLabel"
         } else if format == "date-time" || field.ends_with("time") {
             "dateTime"
@@ -284,14 +294,29 @@ impl Generator<'_> {
             self.gaps
                 .insert(format!("{pointer}: 状态文案尚未确认，仅使用占位内容"));
         }
+        if matches!(inferred, "roleLabel" | "label") && generator.is_none() {
+            self.gaps.insert(format!(
+                "{pointer}: 字段语义或业务文案尚未确认，仅使用占位内容"
+            ));
+        }
         Ok(match generator.unwrap_or(inferred) {
             "personName" => Name(ZH_CN).fake_with_rng(&mut self.rng),
             "email" => SafeEmail(ZH_CN).fake_with_rng(&mut self.rng),
+            // Keep administrative divisions consistent; fake's ZH_CN CityName uses English suffixes.
+            "province" => "广东省".to_owned(),
+            "city" => "深圳市".to_owned(),
+            "district" => "南山区".to_owned(),
             "address" => format!(
-                "{}中山路{}号",
-                CityName(ZH_CN).fake_with_rng::<String, _>(&mut self.rng),
+                "{}科苑路{}号",
+                if field.contains("detail") {
+                    ""
+                } else {
+                    "广东省深圳市南山区"
+                },
                 self.rng.random_range(1..200)
             ),
+            "merchantGroupName" => "南山示例商户组".to_owned(),
+            "roleLabel" => "角色文案待确认".to_owned(),
             "phone" => format!("138{:08}", self.rng.random_range(0..100_000_000)),
             "productName" => {
                 ["山地自行车", "公路自行车", "折叠自行车"][self.rng.random_range(0..3)].to_owned()

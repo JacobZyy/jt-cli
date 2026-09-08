@@ -441,3 +441,52 @@ fn independent_manifest_preserves_old_root_and_manual_changes() {
             .is_file()
     );
 }
+
+#[test]
+fn chinese_address_fields_form_one_locale_and_unknown_roles_remain_gaps() {
+    let rules = scenarios::Rules::default();
+    let schema = json!({"type":"object", "properties":{
+        "province":{"type":"string"}, "city":{"type":"string"}, "district":{"type":"string"},
+        "detailAddress":{"type":"string"}, "address":{"type":"string"},
+        "merchantGroupName":{"type":"string"}, "roleName":{"type":"string"}, "unrecognized":{"type":"string"}
+    }});
+    let operation = operation(schema);
+    let empty = scenarios::Operation::default();
+    let (samples, gaps) =
+        generate_operation(&operation, &json!({}), &rules, &empty, 42, "address").unwrap();
+    let base = &samples["base"];
+    assert_eq!(base["province"], "广东省");
+    assert_eq!(base["city"], "深圳市");
+    assert_eq!(base["district"], "南山区");
+    assert!(
+        base["address"]
+            .as_str()
+            .unwrap()
+            .starts_with("广东省深圳市南山区")
+    );
+    assert!(
+        base["detailAddress"]
+            .as_str()
+            .unwrap()
+            .starts_with("科苑路")
+    );
+    for field in ["province", "city", "district", "address", "detailAddress"] {
+        assert!(
+            !base[field]
+                .as_str()
+                .unwrap()
+                .chars()
+                .any(|c| c.is_ascii_alphabetic())
+        );
+    }
+    assert_eq!(base["merchantGroupName"], "南山示例商户组");
+    assert_eq!(base["roleName"], "角色文案待确认");
+    assert!(gaps.iter().any(|gap| gap.starts_with("/roleName:")));
+    assert!(gaps.iter().any(|gap| gap.starts_with("/unrecognized:")));
+    assert_eq!(
+        samples,
+        generate_operation(&operation, &json!({}), &rules, &empty, 42, "address")
+            .unwrap()
+            .0
+    );
+}
