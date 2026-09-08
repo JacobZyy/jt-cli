@@ -189,7 +189,7 @@ fn run_inner(args: MockArgs) -> Result<Value> {
         safe_segment(app_name)
     );
     let report = json!({
-        "version": 1, "generator": "jt-nlab-mock/4", "faker": "fake/4.4.0", "seed": args.seed,
+        "version": 1, "generator": "jt-nlab-mock/5", "faker": "fake/4.4.0", "seed": args.seed,
         "locale": scenario_rules.locale, "referenceDate": scenario_rules.reference_date,
         "rulesSha256": sha256(&serde_json::to_vec(&scenario_rules)?),
         "openapiSha256": sha256(openapi_source.as_bytes()), "openapiSource": openapi_path,

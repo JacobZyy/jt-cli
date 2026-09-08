@@ -598,3 +598,27 @@ fn pagination_keeps_declared_contract_samples_ahead_of_inference() {
     assert_eq!(samples["base"]["pageSize"], 10);
     assert_eq!(samples["base"]["total"], "20");
 }
+
+#[test]
+fn nested_status_description_does_not_use_product_description() {
+    let op = operation(
+        json!({"type":"object","properties":{"recycleStatusDesc":{"type":"object","properties":{"desc":{"type":"string"}}}}}),
+    );
+    let (samples, gaps) = generate_operation(
+        &op,
+        &json!({}),
+        &scenarios::Rules::default(),
+        &scenarios::Operation::default(),
+        42,
+        "nested-status",
+    )
+    .unwrap();
+    assert_eq!(
+        samples["base"]["recycleStatusDesc"]["desc"],
+        "状态文案待确认"
+    );
+    assert!(
+        gaps.iter()
+            .any(|gap| gap.starts_with("/recycleStatusDesc/desc:"))
+    );
+}

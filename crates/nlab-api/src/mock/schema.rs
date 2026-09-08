@@ -276,7 +276,10 @@ impl Generator<'_> {
             "merchantGroupName"
         } else if field == "rolename" {
             "roleLabel"
-        } else if field.contains("status") {
+        } else if field.contains("status")
+            || (matches!(field.as_str(), "desc" | "description")
+                && pointer.to_lowercase().contains("status"))
+        {
             "statusLabel"
         } else if format == "date-time" || field.ends_with("time") {
             "dateTime"
