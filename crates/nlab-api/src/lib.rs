@@ -291,6 +291,15 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     } else {
         None
     };
+    if let Some(result) = &mock_result {
+        if result["failedOperations"].as_u64().unwrap_or(0) > 0 {
+            diagnostics.push(json!({
+                "level": "warning", "stage": "mock", "code": "MOCK_GENERATION_PARTIAL",
+                "message": "Some Mock operations failed validation; successful outputs remain available.",
+                "coverageFile": result["coverageFile"], "failedOperations": result["failedOperations"],
+            }));
+        }
+    }
     let mock_generated = mock_result
         .as_ref()
         .and_then(|value| value["operations"].as_u64())

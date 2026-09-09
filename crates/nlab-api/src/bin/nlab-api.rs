@@ -33,6 +33,11 @@ enum Command {
     Init(nlab_api::InitArgs),
     #[command(name = "generate", about = "Run complete frontend API generation")]
     Generate(nlab_api::GenerateArgs),
+    #[command(
+        name = "mock",
+        about = "Generate semantic mock JSON and native Whistle rules"
+    )]
+    Mock(nlab_api::MockArgs),
     #[command(name = "config", about = "Configure the project-local nlab-api runner")]
     Config(nlab_api::ConfigArgs),
     #[command(name = "update", about = "Check and update nlab-api")]
@@ -56,6 +61,7 @@ fn main() -> ExitCode {
     let status = match cli.command {
         Command::Init(args) => nlab_api::init(args),
         Command::Generate(args) => nlab_api::generate(args),
+        Command::Mock(args) => nlab_api::mock(args),
         Command::Config(args) => nlab_api::configure(args),
         Command::Update(args) => update::run(args),
     };

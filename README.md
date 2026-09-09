@@ -252,6 +252,14 @@ jt nlab-api init \
 jt nlab-api generate --project /path/to/frontend
 ```
 
+Generate semantic Mock responses directly from existing OpenAPI, without synchronizing the backend:
+
+```bash
+nlab-api mock --project /path/to/frontend --rules mock-rules.json --output-root mock
+```
+
+The standalone command and optional Mock phase in `generate` share one implementation. `jt nlab-api mock` follows the project runner: standalone by default, embedded when explicitly configured as `jt`. See [Mock scenarios and native Whistle rules](apps/nlab-api-docs/docs/mock.md) for per-operation coverage, shared scenario objects, fixed seeds, and independent manifests.
+
 Both binaries write the same project-local runner config:
 
 ```bash

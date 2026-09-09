@@ -35,7 +35,8 @@ fn exposes_public_commands() {
     assert!(stdout.contains("generate"));
     assert!(stdout.contains("config"));
     assert!(stdout.contains("update"));
-    for hidden in ["routes", "migrate", "mock", "accept"] {
+    assert!(stdout.contains("mock"));
+    for hidden in ["routes", "migrate", "accept"] {
         assert!(!stdout.contains(hidden));
     }
 }
@@ -314,4 +315,45 @@ fn init_clones_backend_splits_config_and_generate_switches_branches() {
         serde_json::from_slice(&fs::read(frontend.join(".nlab/nlab-api.config.json")).unwrap())
             .unwrap();
     assert_eq!(shared["backend"]["branch"], "main");
+
+    write(
+        &frontend,
+        ".nlab/openapi.json",
+        r#"{"x-nlab":{"appName":"demo"},"paths":{"/api/detail":{"post":{"x-nlab-operation-key":"Demo#detail","x-nlab-facade":"Demo","x-nlab-method-name":"detail","responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string"}}}}}}}}}}}"#,
+    );
+    write(
+        &frontend,
+        "mock-rules.json",
+        r#"{"version":1,"locale":"zh_CN","referenceDate":"2026-09-08T00:00:00Z","query":"__mock","operations":{"Demo#detail":{"scenarios":{"done":{"values":{"/name":"Completed sample"}}}}}}"#,
+    );
+    let mock = nlab_api()
+        .args([
+            "mock",
+            "--project",
+            frontend.to_str().unwrap(),
+            "--rules",
+            "mock-rules.json",
+            "--output-root",
+            "mock",
+            "--manifest",
+            ".nlab/isolated-mock.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        mock.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mock.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&mock.stdout).unwrap();
+    assert_eq!(report["operations"], 1);
+    let scenario: serde_json::Value = serde_json::from_slice(
+        &fs::read(frontend.join("mock/demo/Demo/detail.done.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(scenario["data"]["name"], "Completed sample");
+    let rules = fs::read_to_string(frontend.join("mock/demo/whistle.rules")).unwrap();
+    assert!(rules.contains("*/api/detail?__mock=done file://<"));
+    assert!(!rules.contains("includeFilter"));
+    assert!(!rules.contains("excludeFilter"));
 }

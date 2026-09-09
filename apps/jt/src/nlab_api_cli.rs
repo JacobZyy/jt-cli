@@ -21,7 +21,7 @@ pub fn forward_if_standalone(arguments: &[OsString]) -> Result<Option<u8>, Strin
     let Some(command) = arguments.first() else {
         return Ok(None);
     };
-    if command != "init" && command != "generate" {
+    if command != "init" && command != "generate" && command != "mock" {
         return Ok(None);
     }
     let project = project_argument(&arguments[1..])?;

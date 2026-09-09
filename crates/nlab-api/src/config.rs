@@ -72,6 +72,12 @@ pub struct MockSettings {
     pub enabled: bool,
     pub output_root: String,
     pub seed: u64,
+    /// Optional scenario rules, resolved relative to the generated project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<PathBuf>,
+    /// Optional independent manifest inside the generated project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
 }
 
 impl Default for MockSettings {
@@ -80,6 +86,8 @@ impl Default for MockSettings {
             enabled: false,
             output_root: ".nlab/generated-mock".to_owned(),
             seed: 42,
+            rules: None,
+            manifest: None,
         }
     }
 }

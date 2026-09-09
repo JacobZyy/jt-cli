@@ -4,11 +4,14 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+
+mod scenarios;
+mod schema;
 
 #[derive(Clone, Debug, Args)]
 pub struct MockArgs {
@@ -21,6 +24,12 @@ pub struct MockArgs {
     /// Stable global seed
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Optional scenario rules JSON (relative to project, or absolute)
+    #[arg(long, value_name = "path")]
+    rules: Option<PathBuf>,
+    /// Independent manifest path inside project (default: .nlab/mock-manifest.json)
+    #[arg(long, value_name = "path")]
+    manifest: Option<String>,
     /// Calculate output without writing files
     #[arg(long)]
     dry_run: bool,
@@ -46,7 +55,7 @@ pub fn run(args: MockArgs) -> u8 {
                 "{}",
                 serde_json::to_string_pretty(&result).expect("serialize mock result")
             );
-            0
+            u8::from(result["failedOperations"].as_u64().unwrap_or(0) > 0)
         }
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -60,6 +69,8 @@ pub(crate) fn automatic(project: &Path, settings: &super::config::MockSettings) 
         project: project.to_owned(),
         output_root: settings.output_root.clone(),
         seed: settings.seed,
+        rules: settings.rules.clone(),
+        manifest: settings.manifest.clone(),
         dry_run: false,
         force: false,
     })
@@ -78,8 +89,18 @@ fn run_inner(args: MockArgs) -> Result<Value> {
     let app_name = openapi["x-nlab"]["appName"]
         .as_str()
         .context("OpenAPI x-nlab.appName missing")?;
+    let rules_path = args.rules.as_ref().or(config.mock.rules.as_ref());
+    let scenario_rules = match rules_path {
+        Some(path) => {
+            serde_json::from_str::<scenarios::Rules>(&fs::read_to_string(project.join(path))?)?
+        }
+        None => scenarios::Rules::default(),
+    };
+    scenario_rules.validate()?;
     let mut files = BTreeMap::new();
     let mut rules = Vec::new();
+    let mut coverage = Vec::new();
+    let mut seen = BTreeSet::new();
     for (path, path_item) in openapi["paths"]
         .as_object()
         .context("OpenAPI paths missing")?
@@ -88,39 +109,116 @@ fn run_inner(args: MockArgs) -> Result<Value> {
             if !is_http_method(method) {
                 continue;
             }
-            let operation_key = operation["x-nlab-operation-key"]
+            let key = operation["x-nlab-operation-key"]
                 .as_str()
                 .context("operation key missing")?;
+            seen.insert(key.to_owned());
             let facade = operation["x-nlab-facade"].as_str().unwrap_or("Facade");
-            let method_name = operation["x-nlab-method-name"]
+            let name = operation["x-nlab-method-name"]
                 .as_str()
                 .or_else(|| operation["operationId"].as_str())
                 .unwrap_or("operation");
-            let Some(schema) = success_schema(operation) else {
-                continue;
-            };
-            let mut rng = operation_rng(args.seed, operation_key);
-            let data = generate_value(schema, &openapi, "$", 0, &mut BTreeSet::new(), &mut rng)?;
-            let response = response_envelope(&config.frontend.response, data);
             let relative = format!(
                 "{}/{}/{}/{}.json",
                 args.output_root.trim_end_matches('/'),
                 safe_segment(app_name),
                 safe_segment(facade),
-                safe_segment(method_name)
+                safe_segment(name)
             );
-            files.insert(
-                relative.clone(),
-                format!("{}\n", serde_json::to_string_pretty(&response)?),
+            let fallback = scenarios::Operation::default();
+            let operation_rules = scenario_rules.operations.get(key).unwrap_or(&fallback);
+            let result = generate_operation(
+                operation,
+                &openapi,
+                &scenario_rules,
+                operation_rules,
+                args.seed,
+                key,
             );
-            rules.push(format!(
-                "{} file://{}",
-                path,
-                project.join(&relative).display()
-            ));
+            let pattern = scenarios::request_pattern(path)?;
+            match result {
+                Ok((samples, inferred_gaps)) => {
+                    let mut artifacts = BTreeMap::new();
+                    let mut mappings = Vec::new();
+                    for (scenario, data) in samples {
+                        let filename = if scenario == "default" {
+                            relative.clone()
+                        } else {
+                            format!("{}.{}.json", relative.trim_end_matches(".json"), scenario)
+                        };
+                        let source = format!(
+                            "{}\n",
+                            serde_json::to_string_pretty(&response_envelope(
+                                &config.frontend.response,
+                                data
+                            ))?
+                        );
+                        if files.insert(filename.clone(), source).is_some() {
+                            bail!("mock filename collision: {filename}");
+                        }
+                        let query = if scenario == "default" {
+                            String::new()
+                        } else {
+                            format!("?{}={scenario}", scenario_rules.query)
+                        };
+                        mappings.push((
+                            scenario == "default",
+                            std::cmp::Reverse(scenario.len()),
+                            format!(
+                                "{pattern}{query} file://<{}>",
+                                whistle_file(&project.join(&filename))?
+                            ),
+                        ));
+                        artifacts.insert(scenario, filename);
+                    }
+                    mappings.sort_by_key(|(default, length, _)| (*default, *length));
+                    rules.extend(mappings.into_iter().map(|(_, _, rule)| rule));
+                    coverage.push(json!({"operation": key, "method": method, "path": path,
+                        "generation": if args.dry_run { "planned" } else { "success" },
+                        "tier": if operation_rules.tier() == 3 && !inferred_gaps.is_empty() { 2 } else { operation_rules.tier() }, "files": artifacts,
+                        "scenarios": operation_rules.scenarios,
+                        "sources": operation_rules.sources, "gaps": operation_rules.gaps,
+                        "assumptions": operation_rules.assumptions, "inferredGaps": inferred_gaps,
+                    }));
+                }
+                Err(error) => {
+                    rules.push(format!("{pattern} statusCode://502"));
+                    coverage.push(json!({"operation": key, "method": method, "path": path,
+                    "generation": "failed", "tier": operation_rules.tier(), "error": format!("{error:#}"),
+                    "files": {}, "gaps": operation_rules.gaps, "sources": operation_rules.sources}));
+                }
+            }
         }
     }
-    rules.sort();
+    for key in scenario_rules.operations.keys() {
+        if !seen.contains(key) {
+            bail!("mock rules operation absent from OpenAPI: {key}");
+        }
+    }
+    let succeeded = coverage
+        .iter()
+        .filter(|item| item["generation"] != "failed")
+        .count();
+    let failed = coverage.len() - succeeded;
+    let report_file = format!(
+        "{}/{}/coverage.json",
+        args.output_root.trim_end_matches('/'),
+        safe_segment(app_name)
+    );
+    let report = json!({
+        "version": 1, "generator": "jt-nlab-mock/7", "faker": "fake/4.4.0", "seed": args.seed,
+        "locale": scenario_rules.locale, "referenceDate": scenario_rules.reference_date,
+        "rulesSha256": sha256(&serde_json::to_vec(&scenario_rules)?),
+        "openapiSha256": sha256(openapi_source.as_bytes()), "openapiSource": openapi_path,
+        "query": scenario_rules.query, "dryRun": args.dry_run,
+        "status": if args.dry_run { "planned" } else if failed > 0 { "complete-with-errors" } else { "complete" },
+        "assumptions": ["基础样例不证明状态、按钮、金额、时间或标识之间的业务关系；跨接口关联由 base 明确固定。", "图片为商品布局示意素材，不代表实物或质检照片。", "行政区划使用广东省深圳市南山区固定样例，街道门牌和商户组名称为开发示意，不代表实际位置或组织。商品示例使用捷安特 ATX 810 山地自行车及固定开发标识，不代表真实品类库映射。"],
+        "operations": coverage,
+    });
+    files.insert(
+        report_file.clone(),
+        format!("{}\n", serde_json::to_string_pretty(&report)?),
+    );
     let rules_file = format!(
         "{}/{}/whistle.rules",
         args.output_root.trim_end_matches('/'),
@@ -128,55 +226,148 @@ fn run_inner(args: MockArgs) -> Result<Value> {
     );
     let rules_source = format!(
         "# >>> jt nlab-api {app_name}\n{}\n# <<< jt nlab-api {app_name}\n",
-        rules.join("\n")
+        rules.join("\n").replace('#', "\\x23")
     );
-    let manifest_path = project.join(".nlab/mock-manifest.json");
-    let previous = fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|source| serde_json::from_str::<MockManifest>(&source).ok())
-        .filter(|manifest| {
-            manifest
-                .rules_file
-                .starts_with(&format!("{}/", args.output_root.trim_end_matches('/')))
-        })
-        .unwrap_or_default();
-    let hashes = files
-        .iter()
-        .map(|(path, source)| (path.clone(), sha256(source.as_bytes())))
-        .collect::<BTreeMap<_, _>>();
+    let manifest_relative = args
+        .manifest
+        .as_ref()
+        .or(config.mock.manifest.as_ref())
+        .map(String::as_str)
+        .unwrap_or(".nlab/mock-manifest.json");
+    if files.contains_key(manifest_relative) || manifest_relative == rules_file {
+        bail!("manifest path collides with a generated artifact: {manifest_relative}");
+    }
+    let manifest_path = safe_target(&project, manifest_relative)?;
+    let previous = if manifest_path.exists() {
+        let manifest: MockManifest = serde_json::from_str(&fs::read_to_string(&manifest_path)?)
+            .with_context(|| format!("invalid mock manifest: {}", manifest_path.display()))?;
+        let prefix = format!("{}/", args.output_root.trim_end_matches('/'));
+        if !manifest.rules_file.starts_with(&prefix)
+            || manifest.files.keys().any(|path| !path.starts_with(&prefix))
+        {
+            bail!(
+                "mock manifest {} belongs to another output root; choose --manifest <unused-relative-path> for isolated output",
+                manifest_path.display()
+            );
+        }
+        manifest
+    } else {
+        MockManifest::default()
+    };
     let manifest = MockManifest {
-        version: 1,
+        version: 2,
         openapi_sha256: sha256(openapi_source.as_bytes()),
-        files: hashes,
+        files: files
+            .iter()
+            .map(|(path, source)| (path.clone(), sha256(source.as_bytes())))
+            .collect(),
         rules_file: rules_file.clone(),
         rules_sha256: sha256(rules_source.as_bytes()),
     };
     preflight(&project, &files, &rules_file, &previous, args.force)?;
     preflight_stale(&project, &previous, &manifest, args.force)?;
     if !args.dry_run {
-        for (relative, source) in &files {
+        for (relative, source) in files.iter().filter(|(path, _)| **path != report_file) {
             atomic_write(&safe_target(&project, relative)?, source)?;
         }
         atomic_write(&safe_target(&project, &rules_file)?, &rules_source)?;
         remove_stale(&project, &previous, &manifest, args.force)?;
+        // Publish successful coverage only after its fixtures and rules exist.
+        atomic_write(&safe_target(&project, &report_file)?, &files[&report_file])?;
         atomic_write(
             &manifest_path,
             &format!("{}\n", serde_json::to_string_pretty(&manifest)?),
         )?;
     }
-    Ok(serde_json::json!({
-        "status": "complete",
-        "operations": files.len(),
-        "rules": rules.len(),
-        "rulesFile": rules_file,
-        "manifest": manifest_path,
-        "dryRun": args.dry_run,
-        "force": args.force,
-        "envelope": {
-            "codeField": config.frontend.response.mock_code_field,
-            "dataField": config.frontend.response.mock_data_field,
-        }
+    Ok(json!({
+        "status": if args.dry_run { "planned" } else if failed > 0 { "complete-with-errors" } else { "complete" },
+        "operations": if args.dry_run { 0 } else { succeeded }, "plannedOperations": succeeded,
+        "failedOperations": failed, "coverageFile": report_file,
+        "rules": rules.len(), "rulesFile": rules_file, "manifest": manifest_path,
+        "dryRun": args.dry_run, "force": args.force,
+        "envelope": {"codeField": config.frontend.response.mock_code_field, "dataField": config.frontend.response.mock_data_field}
     }))
+}
+
+fn generate_operation(
+    operation: &Value,
+    document: &Value,
+    rules: &scenarios::Rules,
+    operation_rules: &scenarios::Operation,
+    seed: u64,
+    key: &str,
+) -> Result<(BTreeMap<String, Value>, BTreeSet<String>)> {
+    let schema = success_schema(operation).context("success response schema missing")?;
+    let validator = schema::validator(schema, document)?;
+    let mut generator = schema::Generator {
+        document,
+        rules,
+        rng: operation_rng(seed, key),
+        gaps: BTreeSet::new(),
+        fixed: BTreeSet::new(),
+    };
+    let mut base = generator.generate(schema)?;
+    generator.apply_generators(&mut base, &operation_rules.generators)?;
+    scenarios::apply_values(&mut base, &operation_rules.base)?;
+    let fixed: BTreeSet<String> = operation_rules
+        .base
+        .keys()
+        .chain(operation_rules.generators.keys())
+        .chain(generator.fixed.iter())
+        .cloned()
+        .collect();
+    schema::align_pages(&mut base, "", &fixed)?;
+    let mut samples = BTreeMap::from([("base".to_owned(), base.clone())]);
+    for (name, scenario) in &operation_rules.scenarios {
+        let mut sample = base.clone();
+        scenarios::apply_values(&mut sample, &scenario.values)?;
+        schema::align_pages(
+            &mut sample,
+            "",
+            &fixed
+                .iter()
+                .chain(scenario.values.keys())
+                .cloned()
+                .collect(),
+        )?;
+        samples.insert(name.clone(), sample);
+    }
+    for (name, sample) in &samples {
+        if let Err(error) = validator.validate(sample) {
+            bail!("{name}{}: {error}", error.instance_path);
+        }
+    }
+    generator.gaps.retain(|gap| {
+        let pointer = gap.split(':').next().unwrap_or("");
+        let covered = |values: &BTreeMap<String, Value>| {
+            values
+                .keys()
+                .any(|p| pointer == p || pointer.starts_with(&format!("{p}/")))
+        };
+        !covered(&operation_rules.base)
+            && (operation_rules.scenarios.is_empty()
+                || !operation_rules
+                    .scenarios
+                    .values()
+                    .all(|s| covered(&s.values)))
+    });
+    let default = operation_rules
+        .default_scenario
+        .as_deref()
+        .unwrap_or("base");
+    samples.insert("default".to_owned(), samples[default].clone());
+    Ok((samples, generator.gaps))
+}
+
+fn whistle_file(path: &Path) -> Result<String> {
+    let path = path.to_str().context("Whistle file path is not UTF-8")?;
+    if path
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '#' | '<' | '>'))
+    {
+        bail!("Whistle file path contains unsupported whitespace or delimiters: {path}");
+    }
+    Ok(path.to_owned())
 }
 
 fn response_envelope(config: &super::config::ResponseEnvelope, data: Value) -> Value {
@@ -202,143 +393,6 @@ fn success_schema(operation: &Value) -> Option<&Value> {
         }
     }
     None
-}
-
-fn generate_value(
-    schema: &Value,
-    document: &Value,
-    field_path: &str,
-    depth: usize,
-    visiting: &mut BTreeSet<String>,
-    rng: &mut ChaCha8Rng,
-) -> Result<Value> {
-    if depth > 32 {
-        return Ok(Value::Null);
-    }
-    for key in ["example", "default", "const"] {
-        if let Some(value) = schema.get(key) {
-            return Ok(value.clone());
-        }
-    }
-    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        if !values.is_empty() {
-            return Ok(values[rng.random_range(0..values.len())].clone());
-        }
-    }
-    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-        if !visiting.insert(reference.to_owned()) {
-            return Ok(Value::Null);
-        }
-        let target = resolve_reference(document, reference)?;
-        let result = generate_value(target, document, field_path, depth + 1, visiting, rng);
-        visiting.remove(reference);
-        return result;
-    }
-    if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
-        let mut object = Map::new();
-        for item in all_of {
-            if let Value::Object(values) =
-                generate_value(item, document, field_path, depth + 1, visiting, rng)?
-            {
-                object.extend(values);
-            }
-        }
-        return Ok(Value::Object(object));
-    }
-    let schema_type = schema
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            if schema.get("properties").is_some() {
-                "object"
-            } else {
-                "string"
-            }
-        });
-    match schema_type {
-        "object" => {
-            let mut object = Map::new();
-            for (name, property) in schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-            {
-                object.insert(
-                    name.clone(),
-                    generate_value(
-                        property,
-                        document,
-                        &format!("{field_path}.{name}"),
-                        depth + 1,
-                        visiting,
-                        rng,
-                    )?,
-                );
-            }
-            Ok(Value::Object(object))
-        }
-        "array" => {
-            let item = schema.get("items").unwrap_or(&Value::Null);
-            Ok(Value::Array(
-                (0..2)
-                    .map(|_| generate_value(item, document, field_path, depth + 1, visiting, rng))
-                    .collect::<Result<Vec<_>>>()?,
-            ))
-        }
-        "integer" => Ok(json!(rng.random_range(1..=100))),
-        "number" => Ok(json!(rng.random_range(1..=1000))),
-        "boolean" => Ok(Value::Bool(rng.random_bool(0.5))),
-        "null" => Ok(Value::Null),
-        _ => Ok(Value::String(semantic_string(field_path, schema, rng))),
-    }
-}
-
-fn semantic_string(field_path: &str, schema: &Value, rng: &mut ChaCha8Rng) -> String {
-    let field = field_path
-        .rsplit('.')
-        .next()
-        .unwrap_or(field_path)
-        .to_ascii_lowercase();
-    let format = schema.get("format").and_then(Value::as_str).unwrap_or("");
-    if format == "date-time" || field.ends_with("time") {
-        return "2026-08-21T10:30:00+08:00".to_owned();
-    }
-    if format == "date" || field.ends_with("date") {
-        return "2026-08-21".to_owned();
-    }
-    if format == "email" || field.contains("email") {
-        return "mock@example.com".to_owned();
-    }
-    if field.contains("phone") || field.contains("mobile") {
-        return format!("138{:08}", rng.random_range(0..100_000_000));
-    }
-    if field.contains("image") || field.contains("pic") || field.contains("avatar") {
-        return "https://example.com/mock.png".to_owned();
-    }
-    if field.ends_with("url") {
-        return "https://example.com/mock".to_owned();
-    }
-    if field.ends_with("id") || field == "uid" {
-        return rng.random_range(100_000..=999_999).to_string();
-    }
-    if field.contains("name") {
-        return "示例名称".to_owned();
-    }
-    format!(
-        "MOCK_{}_{:04}",
-        safe_segment(&field).to_ascii_uppercase(),
-        rng.random_range(0..10_000)
-    )
-}
-
-fn resolve_reference<'a>(document: &'a Value, reference: &str) -> Result<&'a Value> {
-    let pointer = reference
-        .strip_prefix('#')
-        .context("external OpenAPI references are unsupported")?;
-    document
-        .pointer(pointer)
-        .with_context(|| format!("OpenAPI reference missing: {reference}"))
 }
 
 fn preflight(
@@ -481,12 +535,14 @@ fn validate_relative_root(value: &str) -> Result<()> {
 }
 
 fn atomic_write(path: &Path, source: &str) -> Result<()> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&temporary, source)?;
-    fs::rename(temporary, path)?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(path.parent().context("mock target has no parent")?)?;
+    temporary.write_all(source.as_bytes())?;
+    temporary.persist(path)?;
     Ok(())
 }
 
@@ -517,6 +573,7 @@ fn is_http_method(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     #[test]
     fn operation_seed_is_repeatable_and_operation_scoped() {
@@ -525,19 +582,6 @@ mod tests {
         let mut other = operation_rng(42, "Facade#b");
         assert_eq!(first.random::<u64>(), second.random::<u64>());
         assert_ne!(first.random::<u64>(), other.random::<u64>());
-    }
-
-    #[test]
-    fn semantic_values_are_readable() {
-        let mut rng = operation_rng(42, "Facade#query");
-        assert_eq!(
-            semantic_string("$.userName", &json!({}), &mut rng),
-            "示例名称"
-        );
-        assert_eq!(
-            semantic_string("$.createdTime", &json!({}), &mut rng),
-            "2026-08-21T10:30:00+08:00"
-        );
     }
 
     #[test]
@@ -556,3 +600,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mock/tests.rs"]
+mod integration_tests;
