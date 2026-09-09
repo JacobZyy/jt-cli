@@ -116,20 +116,17 @@ jt nlab-api mock --project /path/to/frontend \
 /api/detail?__mock=base
 ```
 
-Query 只控制静态样例，不修改请求类型。参数顺序不影响匹配。选择参数名和场景值按规则中的 ASCII 原文发送，例如 `__mock=qc-completed`；对它们逐字百分号编码的特殊写法返回本地 400。普通业务参数值仍可正常 URL 编码，例如 `q=%E4%B8%AD%E6%96%87&__mock=qc-completed`。没有选择参数时返回默认样例；未知值、空值、重复选择参数返回本地 400。已知场景文件丢失由 Whistle `file://` 返回 404，不回源。
-
-普通接口采用 Whistle 原生精确路径与域名通配符，方法使用原生过滤器。例子中的路径和文件名应换成实际产物：
+Query 只控制静态样例，不修改请求类型。本轮开发约定是接口路径唯一、默认 POST、业务参数放在 body，URL 只携带一个 Mock 参数。直接按下面的原生规则生成（示例目录替换为真实项目绝对路径）：
 
 ```text
-$http*://*/api/detail file://</path/to/detail.json> includeFilter://m:POST excludeFilter:///^[^?]*\?(?:[^&]*&)*__mock(?:=|&|$)/ lineProps://important
-$http*://*/api/detail file://</path/to/detail.qc-completed.json> includeFilter:///^[^?]*\?(?:[^&]*&)*__mock=qc-completed(?:&|$)/ excludeFilter://m:!POST lineProps://important
+*/api/detail?__mock=qc-completed file://</Users/example/project/.nlab/mock/detail.qc-completed.json>
+*/api/detail?__mock=refurbishing file://</Users/example/project/.nlab/mock/detail.refurbishing.json>
+*/api/detail file://</Users/example/project/.nlab/mock/detail.json>
 ```
 
-`$` 前缀精确限定路径，同时允许任意 Query；文件路径的尖括号禁止自动追加请求路径。场景行用 Query 的一个 `includeFilter` 加上排除非目标方法的 `excludeFilter`，不会把两个 `includeFilter` 错当 AND。Query 正则只负责参数边界和顺序，不再重复接口 URL。
+具体场景在前，默认最后。无需 HTTP 协议前缀、精确匹配前缀、方法过滤、includeFilter/excludeFilter、Query 正则或未知场景守卫。文件始终采用真实绝对路径；尖括号固定文件目标，避免追加剩余请求路径。找不到文件时返回本地 404。
 
-同一接口的规则按顺序组织：先拒绝重复或编码的选择参数，再匹配基础/场景文件，最后本地 400 兜底。Whistle 首个匹配的文件/状态规则生效，因此兜底无需重新列出所有有效场景。不要重排这些规则。多个拒绝条件的 `includeFilter` 使用 OR，并单独排除错误方法。
-
-保留短正则是因为通配符无法同时表达完整参数值、参数顺序与重复键。识别编码选择参数的表达式只在每接口拒绝守卫出现一次，不参与常规场景匹配。含 OpenAPI 路径参数的接口保留路径边界正则；常规静态路径没有 URL 正则。未匹配路径或方法不受 Mock 规则影响。该行为已用 Whistle 2.10.9 实测，路径语义见[官方说明](https://wproxy.org/docs/rules/pattern.html)。
+本轮不处理 GET 业务查询参数、多 Query 顺序、特殊编码和其他未出现的输入需求。沿用 Whistle 原生前缀匹配与默认响应行为，不保证未知、空或重复场景返回 400；以后遇到真实需求再调整。JSON、三档策略、场景实体与文件保护不因此改变。
 
 ## 文件保护与验证
 

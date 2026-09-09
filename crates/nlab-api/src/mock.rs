@@ -136,28 +136,43 @@ fn run_inner(args: MockArgs) -> Result<Value> {
                 key,
             );
             let pattern = scenarios::request_pattern(path)?;
-            let method_upper = method.to_uppercase();
-            let failed = result.is_err();
             match result {
                 Ok((samples, inferred_gaps)) => {
-                    // The first matching file/status rule wins. Reject ambiguous selectors first.
-                    rules.push(format!("{pattern} statusCode://400 includeFilter:///{}/ includeFilter:///{}/ excludeFilter://m:!{method_upper} lineProps://important", scenarios::duplicate_pattern(&scenario_rules.query), scenarios::encoded_selector_pattern(&scenario_rules.query)));
                     let mut artifacts = BTreeMap::new();
+                    let mut mappings = Vec::new();
                     for (scenario, data) in samples {
-                        let filename = if scenario == "default" { relative.clone() }
-                            else { format!("{}.{}.json", relative.trim_end_matches(".json"), scenario) };
-                        let source = format!("{}\n", serde_json::to_string_pretty(&response_envelope(&config.frontend.response, data))?);
-                        if files.insert(filename.clone(), source).is_some() { bail!("mock filename collision: {filename}"); }
-                        let selector = if scenario == "default" { None } else { Some(scenario.as_str()) };
-                        let query = scenarios::selector_pattern(&scenario_rules.query, selector);
-                        let filters = if selector.is_none() {
-                            format!("includeFilter://m:{method_upper} excludeFilter:///{query}/")
+                        let filename = if scenario == "default" {
+                            relative.clone()
                         } else {
-                            format!("includeFilter:///{query}/ excludeFilter://m:!{method_upper}")
+                            format!("{}.{}.json", relative.trim_end_matches(".json"), scenario)
                         };
-                        rules.push(format!("{pattern} file://<{}> {filters} lineProps://important", whistle_file(&project.join(&filename))?));
+                        let source = format!(
+                            "{}\n",
+                            serde_json::to_string_pretty(&response_envelope(
+                                &config.frontend.response,
+                                data
+                            ))?
+                        );
+                        if files.insert(filename.clone(), source).is_some() {
+                            bail!("mock filename collision: {filename}");
+                        }
+                        let query = if scenario == "default" {
+                            String::new()
+                        } else {
+                            format!("?{}={scenario}", scenario_rules.query)
+                        };
+                        mappings.push((
+                            scenario == "default",
+                            std::cmp::Reverse(scenario.len()),
+                            format!(
+                                "{pattern}{query} file://<{}>",
+                                whistle_file(&project.join(&filename))?
+                            ),
+                        ));
                         artifacts.insert(scenario, filename);
                     }
+                    mappings.sort_by_key(|(default, length, _)| (*default, *length));
+                    rules.extend(mappings.into_iter().map(|(_, _, rule)| rule));
                     coverage.push(json!({"operation": key, "method": method, "path": path,
                         "generation": if args.dry_run { "planned" } else { "success" },
                         "tier": if operation_rules.tier() == 3 && !inferred_gaps.is_empty() { 2 } else { operation_rules.tier() }, "files": artifacts,
@@ -166,15 +181,13 @@ fn run_inner(args: MockArgs) -> Result<Value> {
                         "assumptions": operation_rules.assumptions, "inferredGaps": inferred_gaps,
                     }));
                 }
-                Err(error) => coverage.push(json!({"operation": key, "method": method, "path": path,
+                Err(error) => {
+                    rules.push(format!("{pattern} statusCode://502"));
+                    coverage.push(json!({"operation": key, "method": method, "path": path,
                     "generation": "failed", "tier": operation_rules.tier(), "error": format!("{error:#}"),
-                    "files": {}, "gaps": operation_rules.gaps, "sources": operation_rules.sources})),
+                    "files": {}, "gaps": operation_rules.gaps, "sources": operation_rules.sources}));
+                }
             }
-            // Keep the local error after the valid mappings; no repeated selector exclusions.
-            rules.push(format!(
-                "{pattern} statusCode://{} includeFilter://m:{method_upper} lineProps://important",
-                if failed { 502 } else { 400 }
-            ));
         }
     }
     for key in scenario_rules.operations.keys() {
@@ -193,7 +206,7 @@ fn run_inner(args: MockArgs) -> Result<Value> {
         safe_segment(app_name)
     );
     let report = json!({
-        "version": 1, "generator": "jt-nlab-mock/6", "faker": "fake/4.4.0", "seed": args.seed,
+        "version": 1, "generator": "jt-nlab-mock/7", "faker": "fake/4.4.0", "seed": args.seed,
         "locale": scenario_rules.locale, "referenceDate": scenario_rules.reference_date,
         "rulesSha256": sha256(&serde_json::to_vec(&scenario_rules)?),
         "openapiSha256": sha256(openapi_source.as_bytes()), "openapiSource": openapi_path,

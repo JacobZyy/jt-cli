@@ -622,3 +622,20 @@ fn nested_status_description_does_not_use_product_description() {
             .any(|gap| gap.starts_with("/recycleStatusDesc/desc:"))
     );
 }
+
+#[test]
+fn native_rules_keep_specific_scenarios_before_fixed_default_files() {
+    let dir = project();
+    run_inner(args(dir.path())).unwrap();
+    let source = fs::read_to_string(dir.path().join("mock/demo/whistle.rules")).unwrap();
+    assert!(!source.contains("includeFilter"));
+    assert!(!source.contains("excludeFilter"));
+    assert!(!source.contains("$http"));
+    let lines: Vec<_> = source
+        .lines()
+        .filter(|line| line.starts_with("*/partial"))
+        .collect();
+    assert!(lines[0].starts_with("*/partial?__mock="));
+    assert!(lines.last().unwrap().starts_with("*/partial file://<"));
+    assert!(lines.iter().all(|line| line.contains("file://</")));
+}
