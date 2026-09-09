@@ -174,69 +174,113 @@ pub(super) fn path_pattern(path: &str) -> Result<String> {
     Ok(format!("^https?://[^/?#]+{escaped}"))
 }
 
-pub(super) fn selection_pattern(path: &str, query: &str, scenario: Option<&str>) -> Result<String> {
-    let path = path_pattern(path)?;
-    let key = encoded_literal(query);
-    let other = format!("(?!{key}(?:=|&|$))[^&#]*");
-    Ok(match scenario {
-        Some(value) => format!(
-            "{path}\\?(?:{other}&)*{key}={}(?:&{other})*$",
-            encoded_literal(value)
-        ),
-        None => format!("{path}(?:\\?{other}(?:&{other})*)?$"),
-    })
+pub(super) fn request_pattern(path: &str) -> Result<String> {
+    let regular = path_pattern(path)?;
+    if path.contains('{') {
+        Ok(format!("/{regular}(?:\\?[^#]*)?$/"))
+    } else {
+        Ok(format!("$http*://*{path}"))
+    }
+}
+
+pub(super) fn selector_pattern(query: &str, scenario: Option<&str>) -> String {
+    let key = query;
+    let suffix = scenario.map_or_else(
+        || "(?:=|&|$)".to_owned(),
+        |value| format!("={}(?:&|$)", value),
+    );
+    format!("^[^?]*\\?(?:[^&]*&)*{key}{suffix}")
+}
+
+pub(super) fn duplicate_pattern(query: &str) -> String {
+    let key = query;
+    format!("^[^?]*\\?(?:[^&]*&)*{key}(?:=[^&]*)?&(?:[^&]*&)*{key}(?:=|&|$)")
+}
+
+pub(super) fn encoded_selector_pattern(query: &str) -> String {
+    format!(
+        "^[^?]*\\?(?:[^&]*&)*(?!{}(?:=|&|$)){}(?:=|&|$)",
+        regex::escape(query),
+        encoded_literal(query)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
     fn matches(pattern: &str, url: &str) -> bool {
-        jsonschema::is_valid(&json!({"type": "string", "pattern": pattern}), &json!(url))
+        jsonschema::is_valid(&json!({"type":"string","pattern":pattern}), &json!(url))
     }
-
     #[test]
-    fn query_selection_is_exact_order_independent_and_rejects_duplicates() {
-        let done = selection_pattern("/orders/{id}", "__mock", Some("done")).unwrap();
-        let base = selection_pattern("/orders/{id}", "__mock", None).unwrap();
+    fn query_filters_keep_order_encoding_and_duplicate_boundaries() {
+        let selected = selector_pattern("__mock", Some("done"));
+        let present = selector_pattern("__mock", None);
+        let duplicate = duplicate_pattern("__mock");
+        let encoded = encoded_selector_pattern("__mock");
+        for query in [
+            "%5F_mock=done",
+            "__mock=done&%5f_mock=done",
+            "%5f%5f%6d%6f%63%6b=done",
+        ] {
+            assert!(matches(
+                &encoded,
+                &format!("https://example.test/api?{query}")
+            ));
+        }
+        assert!(!matches(&encoded, "https://example.test/api?__mock=done"));
         for query in [
             "__mock=done",
             "a=1&__mock=done",
             "__mock=done&a=1",
             "a=1&__mock=done&b=2",
-            "%5F_mock=%64one",
         ] {
-            assert!(
-                matches(&done, &format!("https://example.test/orders/123?{query}")),
-                "{query}"
-            );
+            let url = format!("https://example.test/orders/123?{query}");
+            assert!(matches(&selected, &url));
+            assert!(!matches(&duplicate, &url));
         }
         for query in [
             "__mock=done-extra",
             "__mock=undone",
             "other__mock=done",
             "q=__mock=done",
-            "__mock=done&__mock=done",
-            "__mock=bad&__mock=done",
-            "__mock=done&__mock",
-            "__mock=done&%5f_mock=done",
+            "q=?__mock=done",
         ] {
             assert!(
-                !matches(&done, &format!("https://example.test/orders/123?{query}")),
+                !matches(
+                    &selected,
+                    &format!("https://example.test/orders/123?{query}")
+                ),
                 "{query}"
             );
         }
-        assert!(!matches(
-            &done,
-            "https://example.test/orders/123/extra?__mock=done"
-        ));
-        assert!(matches(&base, "https://example.test/orders/123?a=1"));
-        for query in ["__mock=unknown", "__mock", "%5f_mock=unknown"] {
-            assert!(!matches(
-                &base,
+        for query in [
+            "__mock=done&__mock=done",
+            "__mock=bad&__mock=done",
+            "__mock=done&__mock",
+        ] {
+            assert!(
+                matches(
+                    &duplicate,
+                    &format!("https://example.test/orders/123?{query}")
+                ),
+                "{query}"
+            );
+        }
+        for query in ["__mock=unknown", "__mock"] {
+            assert!(matches(
+                &present,
                 &format!("https://example.test/orders/123?{query}")
             ));
         }
+        assert!(!matches(
+            &present,
+            "https://example.test/orders/123?q=?__mock=done"
+        ));
+        assert_eq!(
+            request_pattern("/orders/detail").unwrap(),
+            "$http*://*/orders/detail"
+        );
+        assert!(request_pattern("/orders/{id}").unwrap().starts_with('/'));
     }
 }

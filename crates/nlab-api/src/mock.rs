@@ -135,9 +135,13 @@ fn run_inner(args: MockArgs) -> Result<Value> {
                 args.seed,
                 key,
             );
-            let mut valid_patterns = Vec::new();
+            let pattern = scenarios::request_pattern(path)?;
+            let method_upper = method.to_uppercase();
+            let failed = result.is_err();
             match result {
                 Ok((samples, inferred_gaps)) => {
+                    // The first matching file/status rule wins. Reject ambiguous selectors first.
+                    rules.push(format!("{pattern} statusCode://400 includeFilter:///{}/ includeFilter:///{}/ excludeFilter://m:!{method_upper} lineProps://important", scenarios::duplicate_pattern(&scenario_rules.query), scenarios::encoded_selector_pattern(&scenario_rules.query)));
                     let mut artifacts = BTreeMap::new();
                     for (scenario, data) in samples {
                         let filename = if scenario == "default" { relative.clone() }
@@ -145,10 +149,13 @@ fn run_inner(args: MockArgs) -> Result<Value> {
                         let source = format!("{}\n", serde_json::to_string_pretty(&response_envelope(&config.frontend.response, data))?);
                         if files.insert(filename.clone(), source).is_some() { bail!("mock filename collision: {filename}"); }
                         let selector = if scenario == "default" { None } else { Some(scenario.as_str()) };
-                        let pattern = scenarios::selection_pattern(path, &scenario_rules.query, selector)?;
-                        // Pattern owns path+query; the single includeFilter owns the method.
-                        rules.push(format!("/{pattern}/ file://{} includeFilter://m:/^{}$/ lineProps://important", whistle_file(&project.join(&filename))?, method.to_uppercase()));
-                        valid_patterns.push(pattern);
+                        let query = scenarios::selector_pattern(&scenario_rules.query, selector);
+                        let filters = if selector.is_none() {
+                            format!("includeFilter://m:{method_upper} excludeFilter:///{query}/")
+                        } else {
+                            format!("includeFilter:///{query}/ excludeFilter://m:!{method_upper}")
+                        };
+                        rules.push(format!("{pattern} file://<{}> {filters} lineProps://important", whistle_file(&project.join(&filename))?));
                         artifacts.insert(scenario, filename);
                     }
                     coverage.push(json!({"operation": key, "method": method, "path": path,
@@ -163,14 +170,11 @@ fn run_inner(args: MockArgs) -> Result<Value> {
                     "generation": "failed", "tier": operation_rules.tier(), "error": format!("{error:#}"),
                     "files": {}, "gaps": operation_rules.gaps, "sources": operation_rules.sources})),
             }
-            // Exclusions are OR: every valid selection is excluded from the local error.
-            // Unknown/duplicate selectors and failed operations never hit the backend.
-            let exclusions = valid_patterns
-                .iter()
-                .map(|p| format!(" excludeFilter:///{p}/"))
-                .collect::<String>();
-            rules.push(format!("/{}(?:\\?[^#]*)?$/ statusCode://{} includeFilter://m:/^{}$/ lineProps://important{exclusions}",
-                scenarios::path_pattern(path)?, if valid_patterns.is_empty() { 502 } else { 400 }, method.to_uppercase()));
+            // Keep the local error after the valid mappings; no repeated selector exclusions.
+            rules.push(format!(
+                "{pattern} statusCode://{} includeFilter://m:{method_upper} lineProps://important",
+                if failed { 502 } else { 400 }
+            ));
         }
     }
     for key in scenario_rules.operations.keys() {
@@ -189,7 +193,7 @@ fn run_inner(args: MockArgs) -> Result<Value> {
         safe_segment(app_name)
     );
     let report = json!({
-        "version": 1, "generator": "jt-nlab-mock/5", "faker": "fake/4.4.0", "seed": args.seed,
+        "version": 1, "generator": "jt-nlab-mock/6", "faker": "fake/4.4.0", "seed": args.seed,
         "locale": scenario_rules.locale, "referenceDate": scenario_rules.reference_date,
         "rulesSha256": sha256(&serde_json::to_vec(&scenario_rules)?),
         "openapiSha256": sha256(openapi_source.as_bytes()), "openapiSource": openapi_path,
