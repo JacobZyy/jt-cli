@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.4](https://github.com/JacobZyy/jt-cli/compare/v1.11.3...v1.11.4) (2026-09-09)
+
+
+### Features
+
+* **nlab-api:** add semantic scenarios and standalone mock ([#64](https://github.com/JacobZyy/jt-cli/issues/64)) ([a303ac4](https://github.com/JacobZyy/jt-cli/commit/a303ac4fe861d7911af3c5461c9f886f73022ff9))
+
 ## [1.11.3](https://github.com/JacobZyy/jt-cli/compare/v1.11.2...v1.11.3) (2026-09-07)
 
 ## [1.11.2](https://github.com/JacobZyy/jt-cli/compare/v1.11.1...v1.11.2) (2026-09-03)
