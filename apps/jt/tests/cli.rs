@@ -678,10 +678,10 @@ fn nlab_api_help_and_invalid_repo_are_non_mutating() {
     let group_help = jt().args(["nlab-api", "--help"]).output().unwrap();
     assert!(group_help.status.success());
     let group_help = String::from_utf8(group_help.stdout).unwrap();
-    for command in ["init", "generate", "config"] {
+    for command in ["init", "generate", "config", "mock"] {
         assert!(group_help.contains(command), "missing nlab-api {command}");
     }
-    for command in ["routes", "migrate", "mock", "accept"] {
+    for command in ["routes", "migrate", "accept"] {
         assert!(
             !group_help.contains(command),
             "visible debug command {command}"
@@ -783,6 +783,29 @@ fn nlab_api_runner_config_selects_explicit_cli_and_reads_legacy_jt() {
         )
     );
 
+    let mock_forwarded = jt()
+        .args([
+            "nlab-api",
+            "mock",
+            "--project",
+            project_path,
+            "--rules",
+            "mock-rules.json",
+            "--manifest",
+            ".nlab/mock-custom.json",
+        ])
+        .env("PATH", &path)
+        .env("NLAB_API_TEST_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(mock_forwarded.status.success());
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!(
+            "mock\n--project\n{project_path}\n--rules\nmock-rules.json\n--manifest\n.nlab/mock-custom.json\n"
+        )
+    );
+
     fs::create_dir_all(project.path().join(".nlab")).unwrap();
     fs::write(
         project.path().join(".nlab/cli.local.json"),
@@ -858,6 +881,16 @@ fn nlab_api_runner_config_selects_explicit_cli_and_reads_legacy_jt() {
         .unwrap();
     assert_eq!(embedded.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&embedded.stderr).contains("read nlab-api config"));
+    assert!(!log.exists());
+
+    let mock_embedded = jt()
+        .args(["nlab-api", "mock", "--project", project_path])
+        .env("PATH", &path)
+        .env("NLAB_API_TEST_LOG", &log)
+        .output()
+        .unwrap();
+    assert_eq!(mock_embedded.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&mock_embedded.stderr).contains("read nlab-api config"));
     assert!(!log.exists());
 
     let unset = jt()

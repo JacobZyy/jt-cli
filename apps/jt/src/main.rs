@@ -156,8 +156,7 @@ enum NlabApiCommand {
     Migrate(nlab_api::MigrateArgs),
     #[command(
         name = "mock",
-        about = "Generate deterministic mock JSON and Whistle rules",
-        hide = true
+        about = "Generate semantic mock JSON and native Whistle rules"
     )]
     Mock(nlab_api::MockArgs),
     #[command(

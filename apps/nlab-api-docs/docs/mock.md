@@ -2,15 +2,17 @@
 
 已有 OpenAPI 就能生成固定基础样例。业务资料是可选输入；同一个项目可同时生成基础、部分覆盖和完整覆盖三档数据。Mock 不执行按钮后的持久化流转，也不需要后端在线或独立 Mock 服务。
 
+独立 `nlab-api mock` 和 `generate` 中的可选 Mock 阶段复用同一个 Rust 生成器。`jt nlab-api mock` 是兼容入口：未配置 runner 或配置为 `nlab-api` 时转发独立命令，显式 `runner: jt` 时使用内嵌的同一实现；不会自动改写用户选择。
+
 ## 直接复用已有契约
 
 ```bash
-jt nlab-api mock --project /path/to/frontend --output-root .nlab/generated-mock
+nlab-api mock --project /path/to/frontend --output-root .nlab/generated-mock
 ```
 
 命令依次读取 `.nlab/openapi.pending.json`、`.nlab/openapi.json`、根目录 `openapi.json`，并复用项目响应包装配置。它不重新提取后端接口，也不修改业务请求 DTO。
 
-`--project` 必填；`--output-root` 默认 `mock`，`--seed` 默认 `42`。`--dry-run` 只校验并报告计划，不写文件，也不把计划数计为已生成数。通过 `jt nlab-api mock --help` 查看实际参数。
+`--project` 必填；`--output-root` 默认 `mock`，`--seed` 默认 `42`。`--dry-run` 只校验并报告计划，不写文件，也不把计划数计为已生成数。通过 `nlab-api mock --help` 查看实际参数。
 
 生成阶段的可选 Mock 开关继续使用同一实现：
 
@@ -70,7 +72,7 @@ jt nlab-api mock --project /path/to/frontend --output-root .nlab/generated-mock
 ```
 
 ```bash
-jt nlab-api mock --project /path/to/frontend \
+nlab-api mock --project /path/to/frontend \
   --rules docs/mock-rules.json --output-root .nlab/generated-mock --seed 42
 ```
 
@@ -135,7 +137,7 @@ Query 只控制静态样例，不修改请求类型。本轮开发约定是接�
 保留有手改的旧 Mock 时，必须同时隔离输出目录和清单。已有清单属于另一输出根时，命令拒绝执行，不会覆盖旧清单：
 
 ```bash
-jt nlab-api mock --project /path/to/frontend --rules docs/mock-rules.json \
+nlab-api mock --project /path/to/frontend --rules docs/mock-rules.json \
   --output-root .nlab/semantic-mock --manifest .nlab/semantic-mock-manifest.json
 ```
 
