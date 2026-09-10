@@ -72,7 +72,7 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<FrontendArtif
         insert_file(
             &mut files,
             &target.path,
-            render_enum(&target.name, values, identity),
+            render_enum(&target.name, values, identity, config.enum_erasable),
         )?;
         enum_files.push(target.path.clone());
     }
@@ -787,24 +787,28 @@ fn type_expression(
     result
 }
 
-fn render_enum(name: &str, values: &[CodedValue], identity: &str) -> String {
+fn render_enum(name: &str, values: &[CodedValue], identity: &str, erasable: bool) -> String {
     let (origin, reference) = match identity.strip_prefix("comment:") {
         Some(field) => ("字段注释/注解", field),
         None => ("Java 枚举类", identity),
     };
     let description = render_doc(&format!("来源：{origin}\n引用：{reference}"), "");
+    let separator = if erasable { ":" } else { " =" };
     let entries = values
         .iter()
         .map(|value| {
             let key = value.key.clone().unwrap_or_else(|| enum_key(&value.value));
             format!(
-                "  /** {} */\n  {}: {},\n",
+                "  /** {} */\n  {}{separator} {},\n",
                 value.label.replace("*/", "* /"),
                 sanitize_identifier(&key),
                 wire_literal(&value.value)
             )
         })
         .collect::<String>();
+    if !erasable {
+        return format!("{GENERATED_HEADER}\n{description}export enum {name} {{\n{entries}}}\n");
+    }
     format!(
         "{GENERATED_HEADER}\n{description}export const {name} = {{\n{entries}}} as const;\n\nexport type {name} = typeof {name}[keyof typeof {name}];\n"
     )
@@ -1354,6 +1358,17 @@ mod tests {
         assert!(enum_source.contains("引用：p.RefurbOrderVO#status"));
         assert!(enum_source.contains("STATUS_90: 90"));
         assert!(enum_source.contains("export type RefurbOrderVOStatus ="));
+        let mut native_config = config.clone();
+        native_config.enum_erasable = false;
+        let native = generate(&ir, &native_config).unwrap();
+        assert_eq!(native.enum_files, artifact.enum_files);
+        let native_source = &native.files[&native.enum_files[0]];
+        assert!(native_source.contains("export enum RefurbOrderVOStatus {"));
+        assert!(native_source.contains("STATUS_10 = 10,"));
+        assert!(native_source.contains("STATUS_90 = 90,"));
+        assert!(native_source.contains("引用：p.RefurbOrderVO#status"));
+        assert!(!native_source.contains("export type"));
+        assert!(!native_source.contains("as const"));
         let type_source = artifact
             .files
             .values()
@@ -1473,6 +1488,17 @@ mod tests {
         assert!(enum_source.contains("来源：Java 枚举类"));
         assert!(enum_source.contains("引用：p.RefurbButtonEnum#getActionCode"));
         assert!(enum_source.contains("START_REFURB: \"start_refurb\""));
+        let mut serialized = serde_json::to_value(config()).unwrap();
+        assert_eq!(serialized["EnumIrisable"], true);
+        serialized["EnumIrisable"] = serde_json::json!(false);
+        let native_config = serde_json::from_value(serialized).unwrap();
+        let native = generate(&ir, &native_config).unwrap();
+        assert_eq!(native.enum_files, artifact.enum_files);
+        let native_source = &native.files[&native.enum_files[0]];
+        assert!(native_source.contains("export enum RefurbButtonActionCode {"));
+        assert!(native_source.contains("START_REFURB = \"start_refurb\","));
+        assert!(native_source.contains("引用：p.RefurbButtonEnum#getActionCode"));
+        assert!(!native_source.contains("export type"));
         let patched_type = artifact
             .files
             .values()

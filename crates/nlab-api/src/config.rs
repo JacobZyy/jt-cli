@@ -20,6 +20,8 @@ const LOCAL_CONFIG_VERSION: u8 = 1;
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
     pub version: u8,
+    #[serde(rename = "EnumIrisable", default = "default_enum_erasable")]
+    pub enum_erasable: bool,
     pub backend: BackendConfig,
     pub frontend: FrontendConfig,
     #[serde(default)]
@@ -30,6 +32,10 @@ pub struct ProjectConfig {
     pub mock: MockSettings,
     #[serde(default)]
     pub after_generate: Vec<AfterGenerateHook>,
+}
+
+fn default_enum_erasable() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -852,6 +858,7 @@ mod tests {
         assert!(validate_relative_path("../service", "path").is_err());
 
         let mut config = ProjectConfig {
+            enum_erasable: true,
             version: CONFIG_VERSION,
             backend: BackendConfig {
                 repository: Some("git@example.com:team/backend.git".to_owned()),

@@ -238,8 +238,35 @@ fn init_and_generate_case(vite: bool) {
         serde_json::from_slice(&fs::read(frontend.join(".nlab/nlab-api.config.json")).unwrap())
             .unwrap();
     assert_eq!(shared["version"], 2);
+    assert_eq!(shared["EnumIrisable"], true);
     assert_eq!(shared["backend"]["repository"], remote.to_str().unwrap());
     assert!(shared["backend"].get("repoPath").is_none());
+    let mut native_config = shared.clone();
+    native_config["EnumIrisable"] = serde_json::json!(false);
+    write(
+        &frontend,
+        ".nlab/nlab-api.config.json",
+        &serde_json::to_string_pretty(&native_config).unwrap(),
+    );
+    let repeated = nlab_api()
+        .args([
+            "init",
+            "--project",
+            frontend.to_str().unwrap(),
+            "--repo-path",
+            backend.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let repeated_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(frontend.join(".nlab/nlab-api.config.json")).unwrap())
+            .unwrap();
+    assert_eq!(repeated_config["EnumIrisable"], false);
     assert_eq!(shared["backend"]["branch"], "main");
     assert_eq!(shared["backend"]["appName"], "backend");
     assert_eq!(shared["frontend"]["aliases"]["enabled"], vite);
