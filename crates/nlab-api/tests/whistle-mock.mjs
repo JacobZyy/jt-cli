@@ -1,4 +1,4 @@
-// Validate the project's agreed single-selector native Whistle mapping.
+// Validate one fixed response per interface with native Whistle mapping.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,8 +22,8 @@ for (const rule of [base, selected]) {
   assert(path.isAbsolute(rule.files[0]));
   JSON.parse(fs.readFileSync(rule.files[0], 'utf8'));
 }
-assert.notEqual(base.files[0], selected.files[0], 'Known scenario must precede the default');
+assert.equal(base.files[0], selected.files[0], 'Legacy state selectors must use the single response');
 assert.equal(resolve(`?${query}=unknown`).files[0], base.files[0]);
 assert.equal(resolve('/extra').files[0], base.files[0], 'A remaining path cannot change the fixed file target');
-console.log('Whistle native mappings: default, explicit scenario, absolute fixed file and fallback passed');
+console.log('Whistle native mappings: single response, ignored state selector and absolute fixed file passed');
 process.exit(0);

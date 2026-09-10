@@ -377,7 +377,7 @@ fn init_and_generate_case(vite: bool) {
     write(
         &frontend,
         "mock-rules.json",
-        r#"{"version":1,"locale":"zh_CN","referenceDate":"2026-09-08T00:00:00Z","query":"__mock","operations":{"Demo#detail":{"scenarios":{"done":{"values":{"/name":"Completed sample"}}}}}}"#,
+        r#"{"version":1,"locale":"zh_CN","referenceDate":"2026-09-08T00:00:00Z","query":"__mock","operations":{"Demo#detail":{"base":{"/name":"Base sample"},"scenarios":{"done":{"values":{"/name":"Completed sample"}}}}}}"#,
     );
     let mock = nlab_api()
         .args([
@@ -400,13 +400,19 @@ fn init_and_generate_case(vite: bool) {
     );
     let report: serde_json::Value = serde_json::from_slice(&mock.stdout).unwrap();
     assert_eq!(report["operations"], 1);
-    let scenario: serde_json::Value = serde_json::from_slice(
-        &fs::read(frontend.join("mock/demo/Demo/detail.done.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(scenario["data"]["name"], "Completed sample");
+    let sample: serde_json::Value =
+        serde_json::from_slice(&fs::read(frontend.join("mock/demo/Demo/detail.json")).unwrap())
+            .unwrap();
+    assert_eq!(sample["data"]["name"], "Base sample");
+    assert_eq!(
+        fs::read_dir(frontend.join("mock/demo/Demo"))
+            .unwrap()
+            .count(),
+        1
+    );
     let rules = fs::read_to_string(frontend.join("mock/demo/whistle.rules")).unwrap();
-    assert!(rules.contains("*/api/detail?__mock=done file://<"));
+    assert!(rules.contains("*/api/detail file://<"));
+    assert!(!rules.contains("__mock"));
     assert!(!rules.contains("includeFilter"));
     assert!(!rules.contains("excludeFilter"));
 }

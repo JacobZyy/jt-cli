@@ -101,18 +101,6 @@ impl Rules {
     }
 }
 
-impl Operation {
-    pub fn tier(&self) -> u8 {
-        if self.scenarios.is_empty() {
-            1
-        } else if self.coverage == Coverage::Complete {
-            3
-        } else {
-            2
-        }
-    }
-}
-
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty()
         || !name
