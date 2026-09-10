@@ -118,6 +118,7 @@ fn run_inner(args: InitArgs) -> Result<Value> {
     };
     let config = ProjectConfig {
         version: CONFIG_VERSION,
+        enum_erasable: previous.as_ref().is_none_or(|config| config.enum_erasable),
         backend: BackendConfig {
             repository: Some(prepared.origin.clone()),
             repo_path: backend.root.clone(),

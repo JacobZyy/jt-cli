@@ -329,6 +329,13 @@ from that object. No per-operation URL getter functions are generated.
 Each generated enum has a source comment identifying a Java enum class or field comment/annotation,
 with the qualified class and accessor or field reference.
 
+The top-level `EnumIrisable` boolean in `.nlab/nlab-api.config.json` controls TypeScript enum syntax.
+It defaults to `true`, including when omitted from existing configs: generation uses an `as const`
+object and a same-name type alias. Set `"EnumIrisable": false` to generate native `export enum`
+declarations instead. Both modes preserve member values, labels, source comments, and import paths.
+Initialization writes the setting and preserves an existing value on subsequent runs. Native enums
+require TypeScript enum transformation and cannot be used with `erasableSyntaxOnly` enabled.
+
 Generated output includes:
 
 ```text
