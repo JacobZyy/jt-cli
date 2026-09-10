@@ -258,7 +258,7 @@ Generate semantic Mock responses directly from existing OpenAPI, without synchro
 nlab-api mock --project /path/to/frontend --rules mock-rules.json --output-root mock
 ```
 
-The standalone command and optional Mock phase in `generate` share one implementation. `jt nlab-api mock` follows the project runner: standalone by default, embedded when explicitly configured as `jt`. See [Mock scenarios and native Whistle rules](apps/nlab-api-docs/docs/mock.md) for per-operation coverage, shared scenario objects, fixed seeds, and independent manifests.
+The standalone command and optional Mock phase in `generate` share one implementation. `jt nlab-api mock` follows the project runner: standalone by default, embedded when explicitly configured as `jt`. See [Semantic Mock and native Whistle rules](apps/nlab-api-docs/docs/mock.md) for one response per operation, semantic samples, fixed seeds, and independent manifests.
 
 Both binaries write the same project-local runner config:
 

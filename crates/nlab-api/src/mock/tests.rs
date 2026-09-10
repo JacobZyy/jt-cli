@@ -25,36 +25,33 @@ fn scenario_rules() -> scenarios::Operation {
     serde_json::from_value(
         json!({"coverage":"partial", "base":{"/orderId":"ORDER-123", "/buttons":[]},
         "scenarios":{"pending":{"values":{"/status":10}}, "done":{"values":{"/status":20}}},
-        "defaultScenario":"pending", "gaps":["未覆盖取消规则"], "sources":["fixture spec"]}),
+        "defaultScenario":"done", "gaps":["未覆盖取消规则"], "sources":["fixture spec"]}),
     )
     .unwrap()
 }
 
 #[test]
-fn semantic_generation_uses_context_and_reuses_entity_across_states() {
+fn semantic_generation_uses_context_and_ignores_state_variants() {
     let rules = scenarios::Rules::default();
     let operation = operation(fixture_schema());
     let scenarios = scenario_rules();
     let (samples, _) =
         generate_operation(&operation, &json!({}), &rules, &scenarios, 42, "detail").unwrap();
-    assert_eq!(samples["pending"]["orderId"], "ORDER-123");
-    assert_eq!(samples["pending"]["goods"], samples["done"]["goods"]);
-    assert_eq!(samples["pending"]["contact"], samples["done"]["contact"]);
-    assert_eq!(samples["pending"]["status"], 10);
-    assert_eq!(samples["done"]["status"], 20);
+    assert_eq!(samples["orderId"], "ORDER-123");
+    assert_eq!(samples["status"], 10);
     assert!(
-        samples["done"]["goods"]["name"]
+        samples["goods"]["name"]
             .as_str()
             .unwrap()
             .contains("自行车")
     );
     assert!(
-        !samples["done"]["contact"]["name"]
+        !samples["contact"]["name"]
             .as_str()
             .unwrap()
             .contains("自行车")
     );
-    assert_eq!(samples["done"]["date"], "2026-09-08");
+    assert_eq!(samples["date"], "2026-09-08");
     assert_eq!(
         samples,
         generate_operation(&operation, &json!({}), &rules, &scenarios, 42, "detail")
@@ -147,13 +144,19 @@ fn read_json(path: &Path) -> Value {
 }
 
 #[test]
-fn mixed_tiers_continue_past_failed_operation_and_report_only_written_outputs() {
+fn single_samples_continue_past_failed_operation_and_report_only_written_outputs() {
     let dir = project();
     let result = run_inner(args(dir.path())).unwrap();
     assert_eq!(result["operations"], 3);
     assert_eq!(result["failedOperations"], 1);
+    assert_eq!(
+        fs::read_dir(dir.path().join("mock/demo/Facade"))
+            .unwrap()
+            .count(),
+        3
+    );
     let report = read_json(&dir.path().join("mock/demo/coverage.json"));
-    for (name, tier) in [("basic", 1), ("partial", 2), ("complete", 3)] {
+    for (name, tier) in [("basic", 1), ("partial", 1), ("complete", 1)] {
         let entry = report["operations"]
             .as_array()
             .unwrap()
@@ -162,6 +165,8 @@ fn mixed_tiers_continue_past_failed_operation_and_report_only_written_outputs() 
             .unwrap();
         assert_eq!(entry["tier"], tier);
         assert_eq!(entry["generation"], "success");
+        assert_eq!(entry["files"].as_object().unwrap().len(), 1);
+        assert_eq!(entry["scenarios"], json!({}));
         assert!(
             dir.path()
                 .join(entry["files"]["default"].as_str().unwrap())
@@ -182,15 +187,18 @@ fn modified_files_and_stale_files_are_protected_before_any_write() {
     let dir = project();
     run_inner(args(dir.path())).unwrap();
     let manifest = fs::read(dir.path().join(".nlab/mock-manifest.json")).unwrap();
-    let file = dir.path().join("mock/demo/Facade/partial.done.json");
+    let file = dir.path().join("mock/demo/Facade/partial.json");
     fs::write(&file, "user edit").unwrap();
     let error = run_inner(args(dir.path())).unwrap_err();
     assert!(error.to_string().contains("refuse to overwrite"));
+    let mut openapi = read_json(&dir.path().join(".nlab/openapi.json"));
+    openapi["paths"].as_object_mut().unwrap().remove("/partial");
+    fs::write(dir.path().join(".nlab/openapi.json"), openapi.to_string()).unwrap();
     let mut rules = read_json(&dir.path().join("rules.json"));
-    rules["operations"]["partial"]["scenarios"]
+    rules["operations"]
         .as_object_mut()
         .unwrap()
-        .remove("done");
+        .remove("partial");
     fs::write(dir.path().join("rules.json"), rules.to_string()).unwrap();
     assert!(
         run_inner(args(dir.path()))
@@ -250,21 +258,16 @@ fn recursive_tree_ends_with_empty_children_without_hiding_other_arrays() {
         "tree",
     )
     .unwrap();
-    assert_eq!(samples["base"]["children"], json!([]));
-    assert_eq!(samples["base"]["buttonList"], json!([]));
-    assert_eq!(samples["base"]["goodsImages"].as_array().unwrap().len(), 2);
+    assert_eq!(samples["children"], json!([]));
+    assert_eq!(samples["buttonList"], json!([]));
+    assert_eq!(samples["goodsImages"].as_array().unwrap().len(), 2);
     assert!(
-        samples["base"]["goodsImages"][0]
+        samples["goodsImages"][0]
             .as_str()
             .unwrap()
             .starts_with("https://")
     );
-    assert!(
-        samples["base"]["goodsTitle"]
-            .as_str()
-            .unwrap()
-            .contains("自行车")
-    );
+    assert!(samples["goodsTitle"].as_str().unwrap().contains("自行车"));
 }
 
 #[test]
@@ -315,22 +318,22 @@ fn automatic_stage_consumes_same_rules_and_removes_managed_stale_samples() {
         before,
         fs::read(dir.path().join(".nlab/mock-manifest.json")).unwrap()
     );
-    let mut rules = read_json(&dir.path().join("rules.json"));
-    rules["operations"]["partial"]["scenarios"]
-        .as_object_mut()
-        .unwrap()
-        .remove("done");
-    fs::write(dir.path().join("rules.json"), rules.to_string()).unwrap();
+    let stale = "mock/demo/Facade/partial.done.json";
+    fs::write(dir.path().join(stale), "{}").unwrap();
+    let mut manifest = read_json(&dir.path().join(".nlab/mock-manifest.json"));
+    manifest["files"][stale] = json!(sha256(b"{}"));
+    fs::write(
+        dir.path().join(".nlab/mock-manifest.json"),
+        manifest.to_string(),
+    )
+    .unwrap();
     automatic(dir.path(), &settings).unwrap();
+    assert!(!dir.path().join(stale).exists());
+    assert!(dir.path().join("mock/demo/Facade/partial.json").is_file());
     assert!(
         !dir.path()
-            .join("mock/demo/Facade/partial.done.json")
+            .join("mock/demo/Facade/partial.base.json")
             .exists()
-    );
-    assert!(
-        dir.path()
-            .join("mock/demo/Facade/partial.pending.json")
-            .is_file()
     );
 }
 
@@ -454,7 +457,7 @@ fn chinese_address_fields_form_one_locale_and_unknown_roles_remain_gaps() {
     let empty = scenarios::Operation::default();
     let (samples, gaps) =
         generate_operation(&operation, &json!({}), &rules, &empty, 42, "address").unwrap();
-    let base = &samples["base"];
+    let base = &samples;
     assert_eq!(base["province"], "广东省");
     assert_eq!(base["city"], "深圳市");
     assert_eq!(base["district"], "南山区");
@@ -507,7 +510,7 @@ fn java_long_overrides_name_inference_and_validates_explicit_samples() {
     )
     .unwrap();
     assert!(
-        samples["base"]["merchantGroupName"]
+        samples["merchantGroupName"]
             .as_str()
             .unwrap()
             .parse::<i64>()
@@ -539,7 +542,7 @@ fn generated_pages_track_list_length_preserve_explicit_counts_and_catalog() {
         "page",
     )
     .unwrap();
-    let page = &samples["base"];
+    let page = &samples;
     assert_eq!(page["list"].as_array().unwrap().len(), 2);
     assert_eq!(page["pageSize"], 2);
     assert_eq!(page["total"], "2");
@@ -554,8 +557,8 @@ fn generated_pages_track_list_length_preserve_explicit_counts_and_catalog() {
     );
     let explicit = serde_json::from_value(json!({"base":{"/pageSize":10,"/total":"30"},"scenarios":{"empty":{"values":{"/list":[]}}}})).unwrap();
     let (samples, _) = generate_operation(&op, &json!({}), &rules, &explicit, 42, "page").unwrap();
-    assert_eq!(samples["empty"]["pageSize"], 10);
-    assert_eq!(samples["empty"]["total"], "30");
+    assert_eq!(samples["pageSize"], 10);
+    assert_eq!(samples["total"], "30");
     let invalid = serde_json::from_value(json!({"base":{"/pageSize":1}})).unwrap();
     assert!(generate_operation(&op, &json!({}), &rules, &invalid, 42, "page").is_err());
 }
@@ -575,7 +578,7 @@ fn unknown_tabs_use_one_placeholder_without_inventing_business_states() {
         "tabs",
     )
     .unwrap();
-    assert_eq!(samples["base"]["statusTabs"].as_array().unwrap().len(), 1);
+    assert_eq!(samples["statusTabs"].as_array().unwrap().len(), 1);
     assert!(gaps.iter().any(|g| g.contains("Tab 业务映射尚未确认")));
 }
 
@@ -595,8 +598,8 @@ fn pagination_keeps_declared_contract_samples_ahead_of_inference() {
         "declared-page",
     )
     .unwrap();
-    assert_eq!(samples["base"]["pageSize"], 10);
-    assert_eq!(samples["base"]["total"], "20");
+    assert_eq!(samples["pageSize"], 10);
+    assert_eq!(samples["total"], "20");
 }
 
 #[test]
@@ -613,10 +616,7 @@ fn nested_status_description_does_not_use_product_description() {
         "nested-status",
     )
     .unwrap();
-    assert_eq!(
-        samples["base"]["recycleStatusDesc"]["desc"],
-        "状态文案待确认"
-    );
+    assert_eq!(samples["recycleStatusDesc"]["desc"], "状态文案待确认");
     assert!(
         gaps.iter()
             .any(|gap| gap.starts_with("/recycleStatusDesc/desc:"))
@@ -624,7 +624,7 @@ fn nested_status_description_does_not_use_product_description() {
 }
 
 #[test]
-fn native_rules_keep_specific_scenarios_before_fixed_default_files() {
+fn native_rules_use_one_fixed_file_without_state_selectors() {
     let dir = project();
     run_inner(args(dir.path())).unwrap();
     let source = fs::read_to_string(dir.path().join("mock/demo/whistle.rules")).unwrap();
@@ -635,7 +635,34 @@ fn native_rules_keep_specific_scenarios_before_fixed_default_files() {
         .lines()
         .filter(|line| line.starts_with("*/partial"))
         .collect();
-    assert!(lines[0].starts_with("*/partial?__mock="));
+    assert_eq!(lines.len(), 1);
+    assert!(!source.contains("__mock"));
     assert!(lines.last().unwrap().starts_with("*/partial file://<"));
     assert!(lines.iter().all(|line| line.contains("file://</")));
+}
+
+#[test]
+fn modified_legacy_state_sample_blocks_cleanup_before_writes() {
+    let dir = project();
+    run_inner(args(dir.path())).unwrap();
+    let stale = "mock/demo/Facade/partial.done.json";
+    fs::write(dir.path().join(stale), "user edit").unwrap();
+    let manifest_path = dir.path().join(".nlab/mock-manifest.json");
+    let mut manifest = read_json(&manifest_path);
+    manifest["files"][stale] = json!(sha256(b"{}"));
+    fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let before = fs::read(&manifest_path).unwrap();
+    let response_path = dir.path().join("mock/demo/Facade/partial.json");
+    let response = fs::read(&response_path).unwrap();
+    let mut changed = args(dir.path());
+    changed.seed = 99;
+    assert!(
+        run_inner(changed)
+            .unwrap_err()
+            .to_string()
+            .contains("refuse to remove modified mock file")
+    );
+    assert_eq!(fs::read(&manifest_path).unwrap(), before);
+    assert_eq!(fs::read(&response_path).unwrap(), response);
+    assert_eq!(fs::read(dir.path().join(stale)).unwrap(), b"user edit");
 }

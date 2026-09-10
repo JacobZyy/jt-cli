@@ -24,7 +24,7 @@ pub struct MockArgs {
     /// Stable global seed
     #[arg(long, default_value_t = 42)]
     seed: u64,
-    /// Optional scenario rules JSON (relative to project, or absolute)
+    /// Optional base sample rules JSON (relative to project, or absolute)
     #[arg(long, value_name = "path")]
     rules: Option<PathBuf>,
     /// Independent manifest path inside project (default: .nlab/mock-manifest.json)
@@ -137,46 +137,25 @@ fn run_inner(args: MockArgs) -> Result<Value> {
             );
             let pattern = scenarios::request_pattern(path)?;
             match result {
-                Ok((samples, inferred_gaps)) => {
-                    let mut artifacts = BTreeMap::new();
-                    let mut mappings = Vec::new();
-                    for (scenario, data) in samples {
-                        let filename = if scenario == "default" {
-                            relative.clone()
-                        } else {
-                            format!("{}.{}.json", relative.trim_end_matches(".json"), scenario)
-                        };
-                        let source = format!(
-                            "{}\n",
-                            serde_json::to_string_pretty(&response_envelope(
-                                &config.frontend.response,
-                                data
-                            ))?
-                        );
-                        if files.insert(filename.clone(), source).is_some() {
-                            bail!("mock filename collision: {filename}");
-                        }
-                        let query = if scenario == "default" {
-                            String::new()
-                        } else {
-                            format!("?{}={scenario}", scenario_rules.query)
-                        };
-                        mappings.push((
-                            scenario == "default",
-                            std::cmp::Reverse(scenario.len()),
-                            format!(
-                                "{pattern}{query} file://<{}>",
-                                whistle_file(&project.join(&filename))?
-                            ),
-                        ));
-                        artifacts.insert(scenario, filename);
+                Ok((data, inferred_gaps)) => {
+                    let source = format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&response_envelope(
+                            &config.frontend.response,
+                            data
+                        ))?
+                    );
+                    if files.insert(relative.clone(), source).is_some() {
+                        bail!("mock filename collision: {relative}");
                     }
-                    mappings.sort_by_key(|(default, length, _)| (*default, *length));
-                    rules.extend(mappings.into_iter().map(|(_, _, rule)| rule));
+                    rules.push(format!(
+                        "{pattern} file://<{}>",
+                        whistle_file(&project.join(&relative))?
+                    ));
                     coverage.push(json!({"operation": key, "method": method, "path": path,
                         "generation": if args.dry_run { "planned" } else { "success" },
-                        "tier": if operation_rules.tier() == 3 && !inferred_gaps.is_empty() { 2 } else { operation_rules.tier() }, "files": artifacts,
-                        "scenarios": operation_rules.scenarios,
+                        "tier": 1, "files": {"default": relative},
+                        "scenarios": {},
                         "sources": operation_rules.sources, "gaps": operation_rules.gaps,
                         "assumptions": operation_rules.assumptions, "inferredGaps": inferred_gaps,
                     }));
@@ -184,7 +163,7 @@ fn run_inner(args: MockArgs) -> Result<Value> {
                 Err(error) => {
                     rules.push(format!("{pattern} statusCode://502"));
                     coverage.push(json!({"operation": key, "method": method, "path": path,
-                    "generation": "failed", "tier": operation_rules.tier(), "error": format!("{error:#}"),
+                    "generation": "failed", "tier": 1, "error": format!("{error:#}"),
                     "files": {}, "gaps": operation_rules.gaps, "sources": operation_rules.sources}));
                 }
             }
@@ -206,11 +185,11 @@ fn run_inner(args: MockArgs) -> Result<Value> {
         safe_segment(app_name)
     );
     let report = json!({
-        "version": 1, "generator": "jt-nlab-mock/7", "faker": "fake/4.4.0", "seed": args.seed,
+        "version": 1, "generator": "jt-nlab-mock/8", "faker": "fake/4.4.0", "seed": args.seed,
         "locale": scenario_rules.locale, "referenceDate": scenario_rules.reference_date,
         "rulesSha256": sha256(&serde_json::to_vec(&scenario_rules)?),
         "openapiSha256": sha256(openapi_source.as_bytes()), "openapiSource": openapi_path,
-        "query": scenario_rules.query, "dryRun": args.dry_run,
+        "dryRun": args.dry_run,
         "status": if args.dry_run { "planned" } else if failed > 0 { "complete-with-errors" } else { "complete" },
         "assumptions": ["基础样例不证明状态、按钮、金额、时间或标识之间的业务关系；跨接口关联由 base 明确固定。", "图片为商品布局示意素材，不代表实物或质检照片。", "行政区划使用广东省深圳市南山区固定样例，街道门牌和商户组名称为开发示意，不代表实际位置或组织。商品示例使用捷安特 ATX 810 山地自行车及固定开发标识，不代表真实品类库映射。"],
         "operations": coverage,
@@ -296,7 +275,7 @@ fn generate_operation(
     operation_rules: &scenarios::Operation,
     seed: u64,
     key: &str,
-) -> Result<(BTreeMap<String, Value>, BTreeSet<String>)> {
+) -> Result<(Value, BTreeSet<String>)> {
     let schema = success_schema(operation).context("success response schema missing")?;
     let validator = schema::validator(schema, document)?;
     let mut generator = schema::Generator {
@@ -317,46 +296,17 @@ fn generate_operation(
         .cloned()
         .collect();
     schema::align_pages(&mut base, "", &fixed)?;
-    let mut samples = BTreeMap::from([("base".to_owned(), base.clone())]);
-    for (name, scenario) in &operation_rules.scenarios {
-        let mut sample = base.clone();
-        scenarios::apply_values(&mut sample, &scenario.values)?;
-        schema::align_pages(
-            &mut sample,
-            "",
-            &fixed
-                .iter()
-                .chain(scenario.values.keys())
-                .cloned()
-                .collect(),
-        )?;
-        samples.insert(name.clone(), sample);
-    }
-    for (name, sample) in &samples {
-        if let Err(error) = validator.validate(sample) {
-            bail!("{name}{}: {error}", error.instance_path);
-        }
+    if let Err(error) = validator.validate(&base) {
+        bail!("base{}: {error}", error.instance_path);
     }
     generator.gaps.retain(|gap| {
         let pointer = gap.split(':').next().unwrap_or("");
-        let covered = |values: &BTreeMap<String, Value>| {
-            values
-                .keys()
-                .any(|p| pointer == p || pointer.starts_with(&format!("{p}/")))
-        };
-        !covered(&operation_rules.base)
-            && (operation_rules.scenarios.is_empty()
-                || !operation_rules
-                    .scenarios
-                    .values()
-                    .all(|s| covered(&s.values)))
+        !operation_rules
+            .base
+            .keys()
+            .any(|p| pointer == p || pointer.starts_with(&format!("{p}/")))
     });
-    let default = operation_rules
-        .default_scenario
-        .as_deref()
-        .unwrap_or("base");
-    samples.insert("default".to_owned(), samples[default].clone());
-    Ok((samples, generator.gaps))
+    Ok((base, generator.gaps))
 }
 
 fn whistle_file(path: &Path) -> Result<String> {

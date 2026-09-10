@@ -2,7 +2,7 @@
 
 本指南使用 standalone `nlab-api`。它是团队默认入口，不需要 Rust 或 Cargo。
 
-已有接口契约、需要固定或多场景 Mock 时，见[语义化与多场景 Mock](./mock.md)。
+已有接口契约、需要固定 Mock 时，见[语义化 Mock](./mock.md)。
 
 ## 前置条件
 
