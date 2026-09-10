@@ -233,6 +233,7 @@ pub struct FrontendConfig {
 #[serde(rename_all = "camelCase")]
 pub struct BuildToolConfig {
     pub kind: BuildToolKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub config_path: String,
     pub test_configs: Vec<TestConfig>,
 }
@@ -241,6 +242,7 @@ pub struct BuildToolConfig {
 #[serde(rename_all = "lowercase")]
 pub enum BuildToolKind {
     Vite,
+    Other,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -312,9 +314,15 @@ impl LayoutPreset {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportAliases {
+    #[serde(default = "default_aliases_enabled")]
+    pub enabled: bool,
     pub implementation: String,
     pub types: String,
     pub enums: String,
+}
+
+fn default_aliases_enabled() -> bool {
+    true
 }
 
 impl LocalProjectConfig {
@@ -573,10 +581,6 @@ impl ProjectConfig {
         for (name, value) in [
             ("frontend.sourceRoot", self.frontend.source_root.as_str()),
             (
-                "frontend.buildTool.configPath",
-                self.frontend.build_tool.config_path.as_str(),
-            ),
-            (
                 "frontend.tsconfigPath",
                 self.frontend.tsconfig_path.as_str(),
             ),
@@ -594,6 +598,29 @@ impl ProjectConfig {
             ),
         ] {
             validate_relative_path(value, name)?;
+        }
+        if self.frontend.aliases.enabled || !self.frontend.build_tool.config_path.is_empty() {
+            validate_relative_path(
+                &self.frontend.build_tool.config_path,
+                "frontend.buildTool.configPath",
+            )?;
+        }
+        if self.frontend.aliases.enabled && self.frontend.build_tool.kind != BuildToolKind::Vite {
+            bail!("extra alias injection requires Vite; set frontend.aliases.enabled to false");
+        }
+        if !self.frontend.aliases.enabled {
+            for directory in [
+                &self.frontend.layout.implementation_dir,
+                &self.frontend.layout.types_dir,
+                &self.frontend.layout.enums_dir,
+            ] {
+                if !Path::new(directory).starts_with(&self.frontend.source_root) {
+                    bail!(
+                        "@/ imports require generated directory {directory} inside frontend.sourceRoot {}",
+                        self.frontend.source_root
+                    );
+                }
+            }
         }
         for (name, value) in [
             (
@@ -642,10 +669,12 @@ impl ProjectConfig {
 
     pub fn validate_project(&self, project: &Path) -> Result<()> {
         self.validate()?;
-        for relative in [
-            self.frontend.build_tool.config_path.as_str(),
-            self.frontend.tsconfig_path.as_str(),
-        ] {
+        for relative in std::iter::once(self.frontend.tsconfig_path.as_str()).chain(
+            self.frontend
+                .aliases
+                .enabled
+                .then_some(self.frontend.build_tool.config_path.as_str()),
+        ) {
             if !project.join(relative).is_file() {
                 bail!(
                     "nlab-api config drift: referenced file is missing: {}",
@@ -653,38 +682,41 @@ impl ProjectConfig {
                 );
             }
         }
-        let build_source = fs::read_to_string(project.join(&self.frontend.build_tool.config_path))?;
-        for alias in [
-            &self.frontend.aliases.implementation,
-            &self.frontend.aliases.types,
-            &self.frontend.aliases.enums,
-        ] {
-            if !build_source.contains(&format!("'{alias}'"))
-                && !build_source.contains(&format!("\"{alias}\""))
-            {
-                bail!("nlab-api config drift: build alias {alias} is missing; rerun init");
-            }
-        }
-        for test_config in self
-            .frontend
-            .build_tool
-            .test_configs
-            .iter()
-            .filter(|test_config| !test_config.inherits_build_config)
-        {
-            let source = fs::read_to_string(project.join(&test_config.path))?;
+        if self.frontend.aliases.enabled {
+            let build_source =
+                fs::read_to_string(project.join(&self.frontend.build_tool.config_path))?;
             for alias in [
                 &self.frontend.aliases.implementation,
                 &self.frontend.aliases.types,
                 &self.frontend.aliases.enums,
             ] {
-                if !source.contains(&format!("'{alias}'"))
-                    && !source.contains(&format!("\"{alias}\""))
+                if !build_source.contains(&format!("'{alias}'"))
+                    && !build_source.contains(&format!("\"{alias}\""))
                 {
-                    bail!(
-                        "nlab-api config drift: test alias {alias} is missing in {}; rerun init",
-                        test_config.path
-                    );
+                    bail!("nlab-api config drift: build alias {alias} is missing; rerun init");
+                }
+            }
+            for test_config in self
+                .frontend
+                .build_tool
+                .test_configs
+                .iter()
+                .filter(|test_config| !test_config.inherits_build_config)
+            {
+                let source = fs::read_to_string(project.join(&test_config.path))?;
+                for alias in [
+                    &self.frontend.aliases.implementation,
+                    &self.frontend.aliases.types,
+                    &self.frontend.aliases.enums,
+                ] {
+                    if !source.contains(&format!("'{alias}'"))
+                        && !source.contains(&format!("\"{alias}\""))
+                    {
+                        bail!(
+                            "nlab-api config drift: test alias {alias} is missing in {}; rerun init",
+                            test_config.path
+                        );
+                    }
                 }
             }
         }
@@ -855,6 +887,7 @@ mod tests {
                     enums_dir: "src/types/service-enums".to_owned(),
                 },
                 aliases: ImportAliases {
+                    enabled: true,
                     implementation: "@service".to_owned(),
                     types: "@service-types".to_owned(),
                     enums: "@service-enums".to_owned(),

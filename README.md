@@ -290,11 +290,18 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 
 `init` accepts either `--repo-url` or an existing `--repo-path`. It clones missing repositories,
 writes team-owned settings to `.nlab/nlab-api.config.json`, writes the resolved machine path to ignored
-`.nlab/nlab-api.local.json`, then adds idempotent build-tool and TypeScript aliases. Current support
-targets Vite projects with an exported `nlabRequest` adapter. Vitest configs that merge the Vite config
-inherit those aliases without a duplicate edit. Existing `src/api` or `src/service` layout selects the
+`.nlab/nlab-api.local.json`. `frontend.aliases.enabled` controls additional API/type/enum aliases:
+init defaults it to `true` when it finds a Vite config and `false` otherwise. When disabled, generated
+imports use the existing `@/` source-root alias and init does not patch build, TypeScript, or test configs.
+When enabled, init adds idempotent Vite and TypeScript aliases; Vitest configs that merge the Vite config
+inherit them without a duplicate edit. An exported `nlabRequest` adapter is still required.
+Existing `src/api` or `src/service` layout selects the
 matching preset; `--layout` overrides it. Version 1 project config and `.nlab/cli.local.json` remain
 read-compatible; rerun `init` explicitly to write the split version 2 files.
+
+Existing configs without `frontend.aliases.enabled` retain the previous enabled behavior. Set it to
+`false` in `.nlab/nlab-api.config.json` to opt out, including in Vite projects. Generated directories
+must then remain inside `frontend.sourceRoot`; the project owns its existing `@/` alias configuration.
 
 `generate` loads both config scopes, serializes access to the shared backend checkout, clones it when
 missing, rejects tracked changes, switches to the configured or one-run `--branch`, and

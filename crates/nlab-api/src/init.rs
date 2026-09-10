@@ -146,42 +146,15 @@ fn run_inner(args: InitArgs) -> Result<Value> {
     config.validate()?;
     ensure_state_directory(&project)?;
 
-    let build_config = project.join(&config.frontend.build_tool.config_path);
-    let tsconfig = project.join(&config.frontend.tsconfig_path);
-    let vite_source = fs::read_to_string(&build_config)
-        .with_context(|| format!("read Vite config {}", build_config.display()))?;
-    let tsconfig_source = fs::read_to_string(&tsconfig)
-        .with_context(|| format!("read TypeScript config {}", tsconfig.display()))?;
-    let vite_patched = patch_vite_aliases(&vite_source, &config.frontend)?;
-    let tsconfig_patched = patch_tsconfig_aliases(&tsconfig_source, &config.frontend)?;
+    let mut changes = alias_changes(&project, &config.frontend)?;
+    let mut updated = changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
     let config_source = config.shared_source()?;
     let mut local_config = LocalProjectConfig::load(&project)?;
     local_config.backend.repo_path = Some(backend.root.clone());
     let local_config_source = local_config.source()?;
-    let mut changes = vec![
-        FileChange::existing(build_config.clone(), vite_source, vite_patched),
-        FileChange::existing(tsconfig.clone(), tsconfig_source, tsconfig_patched),
-    ];
-    let mut updated = vec![build_config.clone(), tsconfig.clone()];
-    for test_config in config
-        .frontend
-        .build_tool
-        .test_configs
-        .iter()
-        .filter(|test_config| !test_config.inherits_build_config)
-    {
-        let path = project.join(&test_config.path);
-        let source = fs::read_to_string(&path)
-            .with_context(|| format!("read test config {}", path.display()))?;
-        let patched = patch_vite_aliases(&source, &config.frontend).with_context(|| {
-            format!(
-                "test config {} neither inherits Vite config nor exposes resolve.alias",
-                path.display()
-            )
-        })?;
-        changes.push(FileChange::existing(path.clone(), source, patched));
-        updated.push(path);
-    }
     let config_path = project.join(CONFIG_FILE);
     changes.push(FileChange::load(config_path.clone(), config_source)?);
     updated.push(config_path.clone());
@@ -216,6 +189,42 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         "mock": config.mock,
         "updated": updated,
     }))
+}
+
+fn alias_changes(project: &Path, frontend: &FrontendConfig) -> Result<Vec<FileChange>> {
+    if !frontend.aliases.enabled {
+        return Ok(Vec::new());
+    }
+    let build_config = project.join(&frontend.build_tool.config_path);
+    let tsconfig = project.join(&frontend.tsconfig_path);
+    let vite_source = fs::read_to_string(&build_config)
+        .with_context(|| format!("read Vite config {}", build_config.display()))?;
+    let tsconfig_source = fs::read_to_string(&tsconfig)
+        .with_context(|| format!("read TypeScript config {}", tsconfig.display()))?;
+    let vite_patched = patch_vite_aliases(&vite_source, frontend)?;
+    let tsconfig_patched = patch_tsconfig_aliases(&tsconfig_source, frontend)?;
+    let mut changes = vec![
+        FileChange::existing(build_config.clone(), vite_source, vite_patched),
+        FileChange::existing(tsconfig.clone(), tsconfig_source, tsconfig_patched),
+    ];
+    for test_config in frontend
+        .build_tool
+        .test_configs
+        .iter()
+        .filter(|test_config| !test_config.inherits_build_config)
+    {
+        let path = project.join(&test_config.path);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("read test config {}", path.display()))?;
+        let patched = patch_vite_aliases(&source, frontend).with_context(|| {
+            format!(
+                "test config {} neither inherits Vite config nor exposes resolve.alias",
+                path.display()
+            )
+        })?;
+        changes.push(FileChange::existing(path.clone(), source, patched));
+    }
+    Ok(changes)
 }
 
 fn ensure_state_directory(project: &Path) -> Result<()> {
@@ -266,11 +275,19 @@ fn probe_frontend(
         "vite.config.mjs",
     ]
     .into_iter()
-    .find(|candidate| project.join(candidate).is_file())
-    .context("Vite config not found")?
-    .to_owned();
+    .find(|candidate| project.join(candidate).is_file());
+    let layout = detect_layout(project, &source_root, requested_layout, previous);
+    let aliases = ImportAliases {
+        enabled: vite_config.is_some()
+            && previous.is_none_or(|config| config.frontend.aliases.enabled),
+        ..previous
+            .filter(|_| requested_layout.is_none())
+            .map(|config| config.frontend.aliases.clone())
+            .unwrap_or_else(|| aliases_for(layout.preset))
+    };
     let test_configs = ["vitest.config.ts", "vitest.config.mts", "vitest.config.js"]
         .into_iter()
+        .filter(|_| aliases.enabled)
         .filter(|candidate| project.join(candidate).is_file())
         .map(|path| {
             let source = fs::read_to_string(project.join(path))
@@ -278,21 +295,20 @@ fn probe_frontend(
             Ok(TestConfig {
                 path: path.to_owned(),
                 inherits_build_config: source.contains("mergeConfig")
-                    && source.contains(&vite_config),
+                    && vite_config.is_some_and(|config| source.contains(config)),
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let layout = detect_layout(project, &source_root, requested_layout, previous);
-    let aliases = previous
-        .filter(|_| requested_layout.is_none())
-        .map(|config| config.frontend.aliases.clone())
-        .unwrap_or_else(|| aliases_for(layout.preset));
     let (request, response) = detect_request(project, &source_root)?;
     Ok(FrontendConfig {
         source_root,
         build_tool: BuildToolConfig {
-            kind: BuildToolKind::Vite,
-            config_path: vite_config,
+            kind: if vite_config.is_some() {
+                BuildToolKind::Vite
+            } else {
+                BuildToolKind::Other
+            },
+            config_path: vite_config.unwrap_or_default().to_owned(),
             test_configs,
         },
         tsconfig_path,
@@ -366,6 +382,7 @@ fn detect_layout(
 fn aliases_for(preset: LayoutPreset) -> ImportAliases {
     let noun = preset.noun();
     ImportAliases {
+        enabled: true,
         implementation: format!("@{noun}"),
         types: format!("@{noun}-types"),
         enums: format!("@{noun}-enums"),
@@ -842,6 +859,30 @@ mod tests {
             },
             aliases: aliases_for(LayoutPreset::Service),
         }
+    }
+
+    #[test]
+    fn disabled_aliases_do_not_read_or_patch_build_configs() {
+        let root = tempfile::tempdir().unwrap();
+        let mut frontend = frontend();
+        frontend.aliases.enabled = false;
+        fs::write(
+            root.path().join("vite.config.ts"),
+            "export default () => ({})",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("tsconfig.json"),
+            "// unrelated configuration",
+        )
+        .unwrap();
+        assert!(alias_changes(root.path(), &frontend).unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(root.path().join("tsconfig.json")).unwrap(),
+            "// unrelated configuration"
+        );
+        fs::remove_file(root.path().join("vite.config.ts")).unwrap();
+        assert!(alias_changes(root.path(), &frontend).unwrap().is_empty());
     }
 
     #[test]

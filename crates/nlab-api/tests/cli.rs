@@ -140,6 +140,17 @@ fn config_detect_prefers_jt_then_falls_back_to_nlab_api() {
 #[cfg(unix)]
 #[test]
 fn init_clones_backend_splits_config_and_generate_switches_branches() {
+    init_and_generate_case(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn non_vite_init_disables_extra_aliases_and_generate_passes_project_validation() {
+    init_and_generate_case(false);
+}
+
+#[cfg(unix)]
+fn init_and_generate_case(vite: bool) {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempdir().unwrap();
@@ -185,11 +196,13 @@ fn init_clones_backend_splits_config_and_generate_switches_branches() {
     git(&upstream, &["switch", "main"]);
 
     write(&frontend, "package.json", r#"{"private":true}"#);
-    write(
-        &frontend,
-        "vite.config.ts",
-        "export default {\n  resolve: {\n    alias: {\n      '@': fileURLToPath(new URL('./src', import.meta.url)),\n    },\n  },\n}\n",
-    );
+    if vite {
+        write(
+            &frontend,
+            "vite.config.ts",
+            "export default {\n  resolve: {\n    alias: {\n      '@': fileURLToPath(new URL('./src', import.meta.url)),\n    },\n  },\n}\n",
+        );
+    }
     write(
         &frontend,
         "tsconfig.json",
@@ -229,6 +242,19 @@ fn init_clones_backend_splits_config_and_generate_switches_branches() {
     assert!(shared["backend"].get("repoPath").is_none());
     assert_eq!(shared["backend"]["branch"], "main");
     assert_eq!(shared["backend"]["appName"], "backend");
+    assert_eq!(shared["frontend"]["aliases"]["enabled"], vite);
+    assert_eq!(
+        shared["frontend"]["buildTool"]["kind"],
+        if vite { "vite" } else { "other" }
+    );
+    if !vite {
+        assert!(!frontend.join("vite.config.ts").exists());
+        assert_eq!(
+            fs::read_to_string(frontend.join("tsconfig.json")).unwrap(),
+            r#"{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}"#
+        );
+        assert!(shared["frontend"]["buildTool"].get("configPath").is_none());
+    }
 
     let local: serde_json::Value =
         serde_json::from_slice(&fs::read(frontend.join(".nlab/nlab-api.local.json")).unwrap())
