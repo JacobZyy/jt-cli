@@ -125,42 +125,66 @@ impl<'a> SemanticAnalyzer<'a> {
 
     fn build_reachability(&mut self, root: &GraphNode) -> Result<Reachability> {
         let graph = self.project.graph();
-        let initial = graph.reachable_calls(&root.id)?;
-        let mut nodes = initial.nodes;
-        let mut parent = initial.parent;
-        let mut queue = VecDeque::from(nodes.iter().cloned().collect::<Vec<_>>());
-        while let Some(method_id) = queue.pop_front() {
-            let method = graph
-                .nodes
-                .get(&method_id)
-                .context("reachable method disappeared")?;
-            let targets = if let Some(targets) = self.call_target_cache.get(&method_id) {
+        graph.reachable_calls(&root.id, |method| {
+            let method_id = &method.id;
+            let targets = if let Some(targets) = self.call_target_cache.get(method_id) {
                 targets.clone()
             } else {
-                let mut targets = graph
-                    .outgoing(&method_id)
+                let mut edges = graph
+                    .outgoing(method_id)
                     .filter(|edge| edge.kind == "calls")
-                    .map(|edge| edge.target.clone())
-                    .collect::<BTreeSet<_>>();
+                    .collect::<Vec<_>>();
+                let mut targets = BTreeSet::new();
+                targets.extend(self.implementation_method(method));
                 for invocation in self.method_invocations(method)? {
-                    targets.extend(self.resolve_invocation(method, &invocation)?);
+                    let resolved = self.resolve_invocation(method, &invocation)?;
+                    if !resolved.is_empty() {
+                        // Receiver types and imports override CodeGraph's same-name fallback edges.
+                        edges.retain(|edge| {
+                            edge.line != invocation.line
+                                || edge.column != invocation.column
+                                || graph.nodes[&edge.target].name != invocation.name
+                        });
+                        targets.extend(resolved);
+                    }
                 }
+                targets.extend(edges.into_iter().map(|edge| edge.target.clone()));
                 let targets = targets.into_iter().collect::<Vec<_>>();
                 self.call_target_cache
                     .insert(method_id.clone(), targets.clone());
                 targets
             };
-            for target in targets {
-                if nodes.insert(target.clone()) {
-                    parent.insert(target.clone(), method_id.clone());
-                    queue.push_back(target);
-                    if nodes.len() > 25_000 {
-                        anyhow::bail!("operation call graph exceeded 25000 nodes");
-                    }
-                }
-            }
+            Ok(targets)
+        })
+    }
+
+    fn implementation_method(&self, method: &GraphNode) -> Option<String> {
+        let graph = self.project.graph();
+        let owner = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == "contains" && edge.target == method.id)
+            .and_then(|edge| graph.nodes.get(&edge.source))?;
+        if owner.kind != "interface" {
+            return None;
         }
-        Ok(Reachability { nodes, parent })
+        let parameter_types = |method: &GraphNode| {
+            method_parameters(&method.signature)
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>()
+        };
+        let expected = parameter_types(method);
+        let candidates = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == "implements" && edge.target == owner.id)
+            .flat_map(|edge| graph.contained(&edge.source, "method"))
+            .filter(|candidate| {
+                candidate.name == method.name && parameter_types(candidate) == expected
+            })
+            .collect::<Vec<_>>();
+        (candidates.len() == 1).then(|| candidates[0].id.clone())
     }
 
     fn method_invocations(&mut self, method: &GraphNode) -> Result<Vec<InvocationSite>> {
@@ -217,7 +241,13 @@ impl<'a> SemanticAnalyzer<'a> {
                         .collect(),
                     offset: node.start_byte(),
                     line: node.start_position().row + 1,
-                    column: node.start_position().column,
+                    // CodeGraph columns count characters; Tree-sitter columns count UTF-8 bytes.
+                    column: parsed.source[..node.start_byte()]
+                        .rsplit('\n')
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .count(),
                 }
             })
             .collect::<Vec<_>>();
@@ -263,19 +293,37 @@ impl<'a> SemanticAnalyzer<'a> {
         let Some(owner) = owner else {
             return Ok(Vec::new());
         };
-        let mut candidates = self
-            .project
-            .graph()
-            .contained(&owner.id, "method")
-            .into_iter()
-            .filter(|target| {
-                target.name == invocation.name
-                    && (!invocation.exact_arity
-                        || signature_arity(&target.signature)
-                            .is_none_or(|arity| arity == invocation.arity))
-            })
-            .map(|target| target.id.clone())
-            .collect::<Vec<_>>();
+        let graph = self.project.graph();
+        let mut owners = BTreeSet::from([owner.id.clone()]);
+        let mut visited = BTreeSet::new();
+        let mut candidates = Vec::new();
+        while !owners.is_empty() && candidates.is_empty() {
+            let mut parents = BTreeSet::new();
+            for owner in owners {
+                if !visited.insert(owner.clone()) {
+                    continue;
+                }
+                candidates.extend(
+                    graph
+                        .contained(&owner, "method")
+                        .into_iter()
+                        .filter(|target| {
+                            target.name == invocation.name
+                                && (!invocation.exact_arity
+                                    || signature_arity(&target.signature)
+                                        .is_none_or(|arity| arity == invocation.arity))
+                        })
+                        .map(|target| target.id.clone()),
+                );
+                parents.extend(
+                    graph
+                        .outgoing(&owner)
+                        .filter(|edge| matches!(edge.kind.as_str(), "extends" | "implements"))
+                        .map(|edge| edge.target.clone()),
+                );
+            }
+            owners = parents;
+        }
         candidates.sort();
         candidates.dedup();
         Ok(if candidates.len() == 1 {
@@ -890,9 +938,10 @@ fn visit_type_paths(
         return;
     }
     output.insert((fqn.clone(), path.to_owned()));
+    let bindings = schema.bindings_for(type_ref);
     for field in &schema.fields {
         visit_type_paths(
-            &field.java_type,
+            &field.java_type.substitute(&bindings),
             &join_path(path, &field.name),
             schemas,
             depth + 1,
@@ -1516,7 +1565,7 @@ mod tests {
 
     #[test]
     fn response_paths_keep_wrapper_and_array_segments() {
-        let schemas = BTreeMap::from([(
+        let mut schemas = BTreeMap::from([(
             "p.Row".to_owned(),
             Schema {
                 fqn: "p.Row".to_owned(),
@@ -1540,6 +1589,148 @@ mod tests {
             response_schema_paths(&response, &schemas),
             vec![("p.Row".to_owned(), "list[]".to_owned())]
         );
+        schemas.insert(
+            "p.PageResp".to_owned(),
+            Schema {
+                fqn: "p.PageResp".to_owned(),
+                name: "PageResp".to_owned(),
+                source_path: "PageResp.java".to_owned(),
+                description: None,
+                type_parameters: vec!["T".to_owned()],
+                fields: vec![crate::model::Field {
+                    name: "list".to_owned(),
+                    java_type: parse_java_type("List<T>").unwrap(),
+                    optional: false,
+                    description: None,
+                    declared_values: None,
+                    linked_enum: None,
+                }],
+            },
+        );
+        let generic_response = TypeRef {
+            name: "p.PageResp".to_owned(),
+            ..response
+        };
+        assert_eq!(
+            response_schema_paths(&generic_response, &schemas),
+            vec![
+                ("p.PageResp".to_owned(), String::new()),
+                ("p.Row".to_owned(), "list[]".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn inherited_receiver_replaces_wrong_package_call_edge() {
+        let repo = tempfile::tempdir().unwrap();
+        write(
+            repo.path(),
+            "Facade.java",
+            "package p; import good.ButtonsModule; class Facade { ButtonsModule buttons; void query() { log(\"中文\"); buttons.render(); } }",
+        );
+        write(
+            repo.path(),
+            "ButtonsModule.java",
+            "package good; class ButtonsModule extends Base {}",
+        );
+        write(
+            repo.path(),
+            "Base.java",
+            "package good; class Base { void render() {} }",
+        );
+        write(
+            repo.path(),
+            "OtherBase.java",
+            "package other; class Base { void render() {} }",
+        );
+        let graph = test_snapshot(
+            vec![
+                node(
+                    "facade",
+                    "class",
+                    "Facade",
+                    "p::Facade",
+                    "Facade.java",
+                    1,
+                    "",
+                ),
+                node(
+                    "field",
+                    "field",
+                    "buttons",
+                    "p::Facade::buttons",
+                    "Facade.java",
+                    1,
+                    "ButtonsModule buttons",
+                ),
+                node(
+                    "root",
+                    "method",
+                    "query",
+                    "p::Facade::query",
+                    "Facade.java",
+                    1,
+                    "void ()",
+                ),
+                node(
+                    "module",
+                    "class",
+                    "ButtonsModule",
+                    "good::ButtonsModule",
+                    "ButtonsModule.java",
+                    1,
+                    "",
+                ),
+                node("base", "class", "Base", "good::Base", "Base.java", 1, ""),
+                node(
+                    "render",
+                    "method",
+                    "render",
+                    "good::Base::render",
+                    "Base.java",
+                    1,
+                    "void ()",
+                ),
+                node(
+                    "other",
+                    "class",
+                    "Base",
+                    "other::Base",
+                    "OtherBase.java",
+                    1,
+                    "",
+                ),
+                node(
+                    "wrong-render",
+                    "method",
+                    "render",
+                    "other::Base::render",
+                    "OtherBase.java",
+                    1,
+                    "void ()",
+                ),
+            ],
+            vec![
+                contains("facade", "root"),
+                contains("facade", "field"),
+                contains("base", "render"),
+                contains("other", "wrong-render"),
+                GraphEdge {
+                    kind: "extends".to_owned(),
+                    ..contains("module", "base")
+                },
+                GraphEdge {
+                    column: "package p; import good.ButtonsModule; class Facade { ButtonsModule buttons; void query() { log(\"中文\"); ".chars().count(),
+                    ..call("root", "wrong-render", 1)
+                },
+            ],
+        );
+        let project = JavaProject::load(repo.path(), &graph).unwrap();
+        let reachable = SemanticAnalyzer::new(&project)
+            .build_reachability(&graph.nodes["root"])
+            .unwrap();
+        assert!(reachable.nodes.contains("render"));
+        assert!(!reachable.nodes.contains("wrong-render"));
     }
 
     #[test]
@@ -1709,7 +1900,10 @@ mod tests {
                 contains("dto", "field"),
                 contains("dto", "setter"),
                 contains("dto", "of"),
-                call("root", "impl", 4),
+                GraphEdge {
+                    kind: "implements".to_owned(),
+                    ..contains("impl-class", "facade")
+                },
                 call("of", "setter", 5),
             ],
         );
@@ -1746,6 +1940,31 @@ mod tests {
                 &WireValue::String("a".to_owned()),
                 &WireValue::String("b".to_owned())
             ]
+        );
+        let no_implementation = test_snapshot(
+            graph.nodes.values().cloned().collect(),
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind != "implements")
+                .cloned()
+                .collect(),
+        );
+        let project = JavaProject::load(repo.path(), &no_implementation).unwrap();
+        let (mut operations, schemas) = project
+            .build_contracts(&identity, &["contract/src/main/java/p".to_owned()])
+            .unwrap();
+        SemanticAnalyzer::new(&project)
+            .enrich(&mut operations, &schemas)
+            .unwrap();
+        assert!(operations[0].service.is_none());
+        assert!(
+            operations[0]
+                .semantic_patches
+                .iter()
+                .all(
+                    |patch| patch.status == ProvenanceStatus::Unresolved && patch.values.is_empty()
+                )
         );
     }
 

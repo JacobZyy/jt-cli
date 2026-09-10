@@ -309,6 +309,19 @@ configured `afterGenerate` hooks may run project-owned commands. A DTO field
 uses a complete code-provenance enum first, then a complete linked Java enum, then explicit comment or
 annotation values; otherwise it remains its original scalar type.
 
+Generated request arguments and the outermost request DTO fields are optional, including inherited
+fields flattened into that DTO. Nested object and array-item fields retain their original requiredness.
+OpenAPI request bodies follow the same policy. This is a client
+typing convention, not a claim that the backend accepts every omitted value. Response fields keep
+their existing requiredness; DTOs shared by requests and responses use separate response views.
+API clients return the backend response type directly, including generic responses and primitives;
+the generator does not create an extra per-operation `*Data` alias file. Import migration recognizes
+the configured API, type, and enum aliases as well as relative imports and `@/`.
+Each API file keeps its paths in one local `API_URLS` object, and request functions read their paths
+from that object. No per-operation URL getter functions are generated.
+Each generated enum has a source comment identifying a Java enum class or field comment/annotation,
+with the qualified class and accessor or field reference.
+
 Generated output includes:
 
 ```text

@@ -251,6 +251,20 @@ fn run_inner(args: MigrateArgs) -> Result<Value> {
             types: &types,
             enum_members: &enum_members,
             source_directory: &config.frontend.source_root,
+            aliases: &[
+                (
+                    &config.frontend.aliases.implementation,
+                    &config.frontend.layout.implementation_dir,
+                ),
+                (
+                    &config.frontend.aliases.types,
+                    &config.frontend.layout.types_dir,
+                ),
+                (
+                    &config.frontend.aliases.enums,
+                    &config.frontend.layout.enums_dir,
+                ),
+            ],
             unresolved: &mut unresolved,
             apply: args.apply,
         })?;
@@ -923,6 +937,7 @@ struct SourceMigration<'a> {
     types: &'a [TypeReplacement],
     enum_members: &'a [EnumMemberReplacement],
     source_directory: &'a str,
+    aliases: &'a [(&'a str, &'a str)],
     unresolved: &'a mut Vec<String>,
     apply: bool,
 }
@@ -935,6 +950,7 @@ fn migrate_relative_imports(migration: SourceMigration<'_>) -> Result<Vec<String
         types,
         enum_members,
         source_directory,
+        aliases,
         unresolved,
         apply,
     } = migration;
@@ -968,7 +984,7 @@ fn migrate_relative_imports(migration: SourceMigration<'_>) -> Result<Vec<String
         }))
         .collect::<BTreeMap<_, _>>();
     let declaration_pattern = Regex::new(
-        r#"(?ms)^(?P<indent>[ \t]*)(?P<keyword>(?:import|export)(?:\s+type)?)\s*\{(?P<names>[^}]*)\}\s+from\s+(?P<quote>['\"])(?P<path>(?:\.\.?/|@/)[^'\"]+)['\"](?P<semi>;?)"#,
+        r#"(?ms)^(?P<indent>[ \t]*)(?P<keyword>(?:import|export)(?:\s+type)?)\s*\{(?P<names>[^}]*)\}\s+from\s+(?P<quote>['\"])(?P<path>[^'\"]+)['\"](?P<semi>;?)"#,
     )
     .expect("static import/export regex");
     let mut changed = Vec::new();
@@ -988,8 +1004,16 @@ fn migrate_relative_imports(migration: SourceMigration<'_>) -> Result<Vec<String
         for captures in declaration_pattern.captures_iter(&source) {
             let declaration = captures.get(0).expect("declaration capture");
             let specifier = captures.name("path").expect("module path capture").as_str();
-            let old_file =
-                resolve_module(path, source_root, project_root, source_directory, specifier);
+            let Some(old_file) = resolve_module(
+                path,
+                source_root,
+                project_root,
+                source_directory,
+                aliases,
+                specifier,
+            ) else {
+                continue;
+            };
             let mut groups = BTreeMap::<String, Vec<String>>::new();
             let mut declaration_changed = false;
             for imported in captures
@@ -1043,6 +1067,17 @@ fn migrate_relative_imports(migration: SourceMigration<'_>) -> Result<Vec<String
                 .map(|(target, names)| {
                     let module = if specifier.starts_with("@/") {
                         alias_module(project_root, source_directory, &target)
+                            .unwrap_or_else(|| relative_module(path, &target))
+                    } else if !specifier.starts_with('.') {
+                        aliases
+                            .iter()
+                            .find_map(|(alias, directory)| {
+                                let root = normalize_path(&project_root.join(directory));
+                                target
+                                    .strip_prefix(&format!("{root}/"))
+                                    .map(|relative| format!("{alias}/{relative}"))
+                            })
+                            .or_else(|| alias_module(project_root, source_directory, &target))
                             .unwrap_or_else(|| relative_module(path, &target))
                     } else {
                         relative_module(path, &target)
@@ -1106,13 +1141,26 @@ fn resolve_module(
     source_root: &Path,
     project_root: &Path,
     source_directory: &str,
+    aliases: &[(&str, &str)],
     specifier: &str,
-) -> String {
+) -> Option<String> {
     if let Some(relative) = specifier.strip_prefix("@/") {
-        normalize_without_extension(&project_root.join(source_directory).join(relative))
-    } else {
-        normalize_without_extension(&source_file.parent().unwrap_or(source_root).join(specifier))
+        return Some(normalize_without_extension(
+            &project_root.join(source_directory).join(relative),
+        ));
     }
+    if specifier.starts_with('.') {
+        return Some(normalize_without_extension(
+            &source_file.parent().unwrap_or(source_root).join(specifier),
+        ));
+    }
+    aliases.iter().find_map(|(alias, directory)| {
+        specifier
+            .strip_prefix(&format!("{alias}/"))
+            .map(|relative| {
+                normalize_without_extension(&project_root.join(directory).join(relative))
+            })
+    })
 }
 
 fn alias_module(project_root: &Path, source_directory: &str, target: &str) -> Option<String> {
@@ -1412,6 +1460,7 @@ mod tests {
             "import { OldEnum } from '@/types/oldEnum'\nconst value = OldEnum.OLD_ONE\n",
         )
         .unwrap();
+        fs::write(source_root.join("page/custom.ts"), "import type { OldType } from '@service-types/old'\nimport { untouched } from '@vendor/package'\n").unwrap();
         let interfaces = vec![
             InterfaceReplacement {
                 operation_key: "F#first".to_owned(),
@@ -1461,12 +1510,13 @@ mod tests {
             types: &types,
             enum_members: &enum_members,
             source_directory: "src",
+            aliases: &[("@service-types", "src/types")],
             unresolved: &mut unresolved,
             apply: true,
         })
         .unwrap();
 
-        assert_eq!(changed.len(), 3);
+        assert_eq!(changed.len(), 4);
         assert!(unresolved.is_empty());
         assert_eq!(
             fs::read_to_string(source_root.join("service/index.ts")).unwrap(),
@@ -1479,6 +1529,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(source_root.join("page/metric.ts")).unwrap(),
             "import { NewEnum as OldEnum } from '@/types/newEnum'\nconst value = OldEnum.NEW_ONE\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source_root.join("page/custom.ts")).unwrap(),
+            "import type { NewType as OldType } from '@service-types/new'\nimport { untouched } from '@vendor/package'\n"
         );
     }
 }

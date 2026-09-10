@@ -126,7 +126,7 @@ impl Snapshot {
         let mut edge_statement = connection.prepare(
             "SELECT source, target, kind, COALESCE(line, 0), COALESCE(col, 0), \
                     COALESCE(metadata, ''), COALESCE(provenance, '') \
-             FROM edges WHERE kind IN ('calls', 'contains', 'references')",
+             FROM edges WHERE kind IN ('calls', 'contains', 'references', 'implements', 'extends')",
         )?;
         let edge_rows = edge_statement.query_map([], |row| {
             Ok(GraphEdge {
@@ -260,15 +260,23 @@ impl Snapshot {
             .collect()
     }
 
-    pub fn reachable_calls(&self, root_id: &str) -> Result<Reachability> {
+    pub fn reachable_calls(
+        &self,
+        root_id: &str,
+        mut resolve: impl FnMut(&GraphNode) -> Result<Vec<String>>,
+    ) -> Result<Reachability> {
         let mut nodes = HashSet::from([root_id.to_owned()]);
         let mut parent = HashMap::new();
         let mut queue = VecDeque::from([root_id.to_owned()]);
         while let Some(current) = queue.pop_front() {
-            for edge in self.outgoing(&current).filter(|edge| edge.kind == "calls") {
-                if nodes.insert(edge.target.clone()) {
-                    parent.insert(edge.target.clone(), current.clone());
-                    queue.push_back(edge.target.clone());
+            let method = self
+                .nodes
+                .get(&current)
+                .context("reachable method disappeared")?;
+            for target in resolve(method)? {
+                if nodes.insert(target.clone()) {
+                    parent.insert(target.clone(), current.clone());
+                    queue.push_back(target);
                     if nodes.len() > MAX_REACHABLE_NODES {
                         bail!("operation call graph exceeded {MAX_REACHABLE_NODES} nodes");
                     }
@@ -458,7 +466,15 @@ mod tests {
             extraction_version: "test".to_owned(),
         };
 
-        let reachable = graph.reachable_calls("root").unwrap();
+        let reachable = graph
+            .reachable_calls("root", |node| {
+                Ok(graph
+                    .outgoing(&node.id)
+                    .filter(|edge| edge.kind == "calls")
+                    .map(|edge| edge.target.clone())
+                    .collect())
+            })
+            .unwrap();
 
         assert_eq!(
             reachable.nodes,
