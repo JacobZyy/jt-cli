@@ -251,6 +251,7 @@ fn run_inner(args: MigrateArgs) -> Result<Value> {
             types: &types,
             enum_members: &enum_members,
             source_directory: &config.frontend.source_root,
+            generate_aliases: config.frontend.aliases.enabled,
             aliases: &[
                 (
                     &config.frontend.aliases.implementation,
@@ -931,6 +932,7 @@ fn enum_targets(document: &Value) -> BTreeMap<String, BTreeMap<String, String>> 
 }
 
 struct SourceMigration<'a> {
+    generate_aliases: bool,
     source_root: &'a Path,
     project_root: &'a Path,
     interfaces: &'a [InterfaceReplacement],
@@ -944,6 +946,7 @@ struct SourceMigration<'a> {
 
 fn migrate_relative_imports(migration: SourceMigration<'_>) -> Result<Vec<String>> {
     let SourceMigration {
+        generate_aliases,
         source_root,
         project_root,
         interfaces,
@@ -1015,7 +1018,8 @@ fn migrate_relative_imports(migration: SourceMigration<'_>) -> Result<Vec<String
                 continue;
             };
             let mut groups = BTreeMap::<String, Vec<String>>::new();
-            let mut declaration_changed = false;
+            let mut declaration_changed =
+                !generate_aliases && !specifier.starts_with("@/") && !specifier.starts_with('.');
             for imported in captures
                 .name("names")
                 .expect("import names capture")
@@ -1065,7 +1069,7 @@ fn migrate_relative_imports(migration: SourceMigration<'_>) -> Result<Vec<String
             let declarations = groups
                 .into_iter()
                 .map(|(target, names)| {
-                    let module = if specifier.starts_with("@/") {
+                    let module = if specifier.starts_with("@/") || !generate_aliases {
                         alias_module(project_root, source_directory, &target)
                             .unwrap_or_else(|| relative_module(path, &target))
                     } else if !specifier.starts_with('.') {
@@ -1510,6 +1514,7 @@ mod tests {
             types: &types,
             enum_members: &enum_members,
             source_directory: "src",
+            generate_aliases: true,
             aliases: &[("@service-types", "src/types")],
             unresolved: &mut unresolved,
             apply: true,
@@ -1533,6 +1538,31 @@ mod tests {
         assert_eq!(
             fs::read_to_string(source_root.join("page/custom.ts")).unwrap(),
             "import type { NewType as OldType } from '@service-types/new'\nimport { untouched } from '@vendor/package'\n"
+        );
+        let unchanged = [TypeReplacement {
+            old_file: "src/types/new.ts".to_owned(),
+            new_file: "src/types/new.ts".to_owned(),
+            old_export: "NewType".to_owned(),
+            new_export: "NewType".to_owned(),
+            status: ReplacementStatus::Unchanged,
+        }];
+        let changed = migrate_relative_imports(SourceMigration {
+            source_root: &source_root,
+            project_root: root.path(),
+            interfaces: &[],
+            types: &unchanged,
+            enum_members: &[],
+            source_directory: "src",
+            generate_aliases: false,
+            aliases: &[("@service-types", "src/types")],
+            unresolved: &mut unresolved,
+            apply: true,
+        })
+        .unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(
+            fs::read_to_string(source_root.join("page/custom.ts")).unwrap(),
+            "import type { NewType as OldType } from '@/types/new'\nimport { untouched } from '@vendor/package'\n"
         );
     }
 }

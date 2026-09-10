@@ -41,6 +41,7 @@ struct TargetPlan {
 }
 
 pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<FrontendArtifact> {
+    config.validate()?;
     let plan = target_plan(ir, config)?;
     let requests = request_schemas(ir);
     let mut files = BTreeMap::new();
@@ -435,6 +436,14 @@ fn resolve_generated_module(
     specifier: &str,
     config: &ProjectConfig,
 ) -> Result<String> {
+    if let Some(relative) = specifier.strip_prefix("@/") {
+        if !config.frontend.aliases.enabled {
+            return Ok(format!(
+                "{}.ts",
+                join_path(&config.frontend.source_root, relative)
+            ));
+        }
+    }
     for (alias, root) in [
         (
             &config.frontend.aliases.implementation,
@@ -452,6 +461,12 @@ fn resolve_generated_module(
         if let Some(relative) = specifier.strip_prefix(&format!("{alias}/")) {
             return Ok(format!("{}.ts", join_path(root, relative)));
         }
+    }
+    if let Some(relative) = specifier.strip_prefix("@/") {
+        return Ok(format!(
+            "{}.ts",
+            join_path(&config.frontend.source_root, relative)
+        ));
     }
     resolve_relative_module(from_file, specifier)
 }
@@ -858,6 +873,15 @@ fn relative_import(from_file: &str, to_file: &str) -> String {
 }
 
 fn import_specifier(from_file: &str, to_file: &str, config: &ProjectConfig) -> String {
+    if !config.frontend.aliases.enabled {
+        let relative = Path::new(to_file)
+            .strip_prefix(&config.frontend.source_root)
+            .expect("validated generated directories are inside sourceRoot");
+        return format!(
+            "@/{}",
+            normal_components(&relative.with_extension("")).join("/")
+        );
+    }
     for (root, alias) in [
         (
             &config.frontend.layout.types_dir,
@@ -1414,6 +1438,32 @@ mod tests {
         assert!(api.contains("queryButtons: \"/query\""));
         assert!(api.contains("url: API_URLS.queryButtons"));
         assert!(!api.contains("getQueryButtonsUrl"));
+        let mut no_aliases = config();
+        no_aliases.frontend.aliases.enabled = false;
+        let plain = generate(&ir, &no_aliases).unwrap();
+        assert!(
+            plain
+                .files
+                .values()
+                .any(|source| source.contains("from \"@/types/service-enums/"))
+        );
+        assert!(
+            plain
+                .files
+                .values()
+                .any(|source| source.contains("from \"@/types/service-type/"))
+        );
+        assert!(
+            plain
+                .files
+                .values()
+                .all(|source| !source.contains("from \"@service"))
+        );
+        assert_eq!(
+            resolve_generated_module("src/service/a.ts", "@/types/service-type/item", &no_aliases)
+                .unwrap(),
+            "src/types/service-type/item.ts"
+        );
         assert!(api.contains("from \"@/utils/request\""));
         assert!(api.contains("return nlabRequest<"));
         assert!(!api.contains("fetch("));

@@ -108,7 +108,22 @@ nlab-api init \
 - clone 或复用后端仓库，校验 origin，安全切换并 fast-forward 目标分支。
 - 将团队配置写入 `.nlab/nlab-api.config.json`。
 - 将本机 `repoPath` 写入 `.nlab/nlab-api.local.json`，并加入 `.gitignore`。
-- 幂等补充构建工具和 TypeScript alias。
+- 发现 Vite 配置时，默认启用额外 alias 并幂等补充 Vite、TypeScript 和必要的测试配置。
+- 非 Vite 项目默认关闭额外 alias，生成代码直接使用现有 `@/`，不改构建、TypeScript 或测试配置。
+
+开关保存于 `.nlab/nlab-api.config.json` 的 `frontend.aliases.enabled`。Vite 项目也可以手动关闭：
+
+```json
+{
+  "frontend": {
+    "aliases": {
+      "enabled": false
+    }
+  }
+}
+```
+
+上面仅展示需要修改的开关，保留配置中的其他字段。旧配置未写该字段时保持启用行为；重新初始化非 Vite 项目会写入 `false`。关闭后，生成目录必须位于 `frontend.sourceRoot` 内，项目自身负责已有 `@/` 的解析。
 
 提交前先检查生成配置：
 
