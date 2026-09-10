@@ -22,12 +22,20 @@ pub struct OpenApiArtifact {
 
 pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifact> {
     let names = schema_names(&ir.schemas);
-    let aliases_by_operation = response_aliases(ir, &names);
+    let requests = request_schemas(ir);
+    let aliases_by_operation = response_aliases(ir, &names, &requests);
     let mut components = Map::new();
     for (fqn, schema) in &ir.schemas {
         components.insert(
             names[fqn].clone(),
-            schema_object(schema, &names, None, &HashMap::new(), &BTreeMap::new()),
+            schema_object(
+                schema,
+                &names,
+                None,
+                &HashMap::new(),
+                &BTreeMap::new(),
+                requests.contains(fqn),
+            ),
         );
     }
 
@@ -44,7 +52,14 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifa
             let schema = &ir.schemas[fqn];
             components.insert(
                 alias.clone(),
-                schema_object(schema, &names, Some(operation), &aliases, &BTreeMap::new()),
+                schema_object(
+                    schema,
+                    &names,
+                    Some(operation),
+                    &aliases,
+                    &BTreeMap::new(),
+                    false,
+                ),
             );
         }
         let operation_value = operation_object(operation, &ir.schemas, &names, &aliases, config)?;
@@ -242,7 +257,7 @@ fn operation_object(
         value.insert(
             "requestBody".to_owned(),
             json!({
-                "required": true,
+                "required": false,
                 "content": {
                     "application/json": {
                         "schema": operation_schema(
@@ -251,6 +266,7 @@ fn operation_object(
                             names,
                             operation,
                             &HashMap::new(),
+                            true,
                         )
                     }
                 }
@@ -274,6 +290,7 @@ fn operation_object(
                             names,
                             operation,
                             aliases,
+                            false,
                         )
                     }
                 }
@@ -289,6 +306,7 @@ fn operation_schema(
     names: &BTreeMap<String, String>,
     operation: &Operation,
     aliases: &HashMap<String, String>,
+    optional_fields: bool,
 ) -> Value {
     let fqn = type_ref.name.replace("::", ".");
     let Some(schema) = schemas.get(&fqn) else {
@@ -304,6 +322,7 @@ fn operation_schema(
             Some(operation),
             aliases,
             &schema.bindings_for(type_ref),
+            optional_fields,
         );
     }
     type_schema(type_ref, names, aliases)
@@ -315,8 +334,10 @@ fn schema_object(
     operation: Option<&Operation>,
     aliases: &HashMap<String, String>,
     bindings: &BTreeMap<String, TypeRef>,
+    optional_fields: bool,
 ) -> Value {
     let patches = operation
+        .filter(|_| !optional_fields)
         .map(|operation| {
             operation
                 .semantic_patches
@@ -362,7 +383,7 @@ fn schema_object(
                 .insert("x-nlab-known-values".to_owned(), json!(values));
         }
         properties.insert(field.name.clone(), property);
-        if !field.optional {
+        if !optional_fields && !field.optional {
             required.push(Value::String(field.name.clone()));
         }
     }
@@ -509,18 +530,20 @@ fn semantic_patch(patch: &SemanticPatch) -> Value {
 fn response_aliases(
     ir: &ContractIr,
     names: &BTreeMap<String, String>,
+    requests: &BTreeSet<String>,
 ) -> HashMap<String, HashMap<String, String>> {
     let mut seeds = BTreeMap::new();
     let mut reachable_by_operation = HashMap::new();
     for operation in &ir.operations {
-        if !operation
-            .semantic_patches
-            .iter()
-            .any(|patch| patch.status == ProvenanceStatus::Closed)
+        let reachable = reachable_schemas(&operation.response, &ir.schemas);
+        if reachable.is_disjoint(requests)
+            && !operation
+                .semantic_patches
+                .iter()
+                .any(|patch| patch.status == ProvenanceStatus::Closed)
         {
             continue;
         }
-        let reachable = reachable_schemas(&operation.response, &ir.schemas);
         for fqn in &reachable {
             seeds.insert(
                 alias_symbol(&operation.key, fqn),
@@ -552,6 +575,15 @@ fn response_aliases(
 
 fn alias_symbol(operation_key: &str, fqn: &str) -> String {
     format!("{operation_key}:{fqn}")
+}
+
+pub(crate) fn request_schemas(ir: &ContractIr) -> BTreeSet<String> {
+    ir.operations
+        .iter()
+        .filter_map(|operation| operation.request.as_ref())
+        .map(|request| request.name.replace("::", "."))
+        .filter(|fqn| ir.schemas.contains_key(fqn))
+        .collect()
 }
 
 pub(crate) fn reachable_schemas(
