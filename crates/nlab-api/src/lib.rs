@@ -418,6 +418,7 @@ fn semantic_diagnostics(ir: &ContractIr) -> Vec<Value> {
                         "stage": "generate",
                         "code": format!("ENUM_{:?}", patch.status).to_ascii_uppercase(),
                         "operationKey": operation.key,
+                        "source": patch.target.source,
                         "schemaFqn": patch.target.schema_fqn,
                         "fieldPath": patch.target.field_path,
                         "message": patch.warning,

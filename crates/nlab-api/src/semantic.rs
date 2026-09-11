@@ -1,3 +1,6 @@
+mod lookup;
+mod request;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use anyhow::{Context, Result};
@@ -6,8 +9,8 @@ use tree_sitter::{Node, Parser, Tree};
 use super::graph::{GraphEdge, GraphNode, Reachability, Snapshot};
 use super::java::{JavaProject, parse_java_type};
 use super::model::{
-    CodedValue, FieldTarget, LinkedEnum, Operation, ProvenanceStatus, Schema, SemanticPatch,
-    ServiceOwner, TypeRef, WireValue,
+    CodedValue, FieldSource, FieldTarget, LinkedEnum, Operation, ProvenanceStatus, Schema,
+    SemanticPatch, ServiceOwner, TypeRef, WireValue,
 };
 
 const MAX_RESPONSE_DEPTH: usize = 32;
@@ -61,6 +64,8 @@ pub struct SemanticAnalyzer<'a> {
     call_target_cache: HashMap<String, Vec<String>>,
     invocation_cache: HashMap<String, Vec<InvocationSite>>,
     parameter_cache: HashMap<(String, String, usize), Domain>,
+    enum_lookups: HashMap<String, lookup::EnumLookup>,
+    request_domains: HashMap<(String, String), Domain>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -72,6 +77,8 @@ impl<'a> SemanticAnalyzer<'a> {
             call_target_cache: HashMap::new(),
             invocation_cache: HashMap::new(),
             parameter_cache: HashMap::new(),
+            enum_lookups: HashMap::new(),
+            request_domains: HashMap::new(),
         }
     }
 
@@ -80,6 +87,7 @@ impl<'a> SemanticAnalyzer<'a> {
         operations: &mut [Operation],
         schemas: &BTreeMap<String, Schema>,
     ) -> Result<()> {
+        self.index_enum_lookups()?;
         for operation in operations {
             let root = operation_root(self.project.graph(), operation)?;
             let reachable = self.build_reachability(root)?;
@@ -89,7 +97,10 @@ impl<'a> SemanticAnalyzer<'a> {
                     .warnings
                     .push("no unique delegated Service; using Facade output layout".to_owned());
             }
-            operation.semantic_patches = self.operation_patches(operation, schemas, &reachable)?;
+            let mut patches = self.request_patches(operation, schemas, &reachable)?;
+            patches.extend(self.operation_patches(operation, schemas, &reachable)?);
+            reconcile_schema_paths(&mut patches);
+            operation.semantic_patches = patches;
         }
         Ok(())
     }
@@ -192,20 +203,7 @@ impl<'a> SemanticAnalyzer<'a> {
             return Ok(invocations.clone());
         }
         let parsed = self.parsed(&method.file_path)?;
-        let declaration = descendants(parsed.tree.root_node())
-            .into_iter()
-            .filter(|node| {
-                matches!(
-                    node.kind(),
-                    "method_declaration" | "constructor_declaration"
-                )
-            })
-            .find(|node| {
-                node.start_position().row + 1 == method.start_line
-                    && node
-                        .child_by_field_name("name")
-                        .is_some_and(|name| text_of(&parsed.source, name) == method.name)
-            });
+        let declaration = lookup::method_declaration(parsed, method);
         let Some(declaration) = declaration else {
             self.invocation_cache.insert(method.id.clone(), Vec::new());
             return Ok(Vec::new());
@@ -371,7 +369,10 @@ impl<'a> SemanticAnalyzer<'a> {
             }
         }
         let parsed = self.parsed(&method.file_path)?;
-        let local = descendants(parsed.tree.root_node())
+        let Some(declaration) = lookup::method_declaration(parsed, method) else {
+            return Ok(None);
+        };
+        let local = descendants(declaration)
             .into_iter()
             .rfind(|node| {
                 node.kind() == "variable_declarator"
@@ -379,6 +380,11 @@ impl<'a> SemanticAnalyzer<'a> {
                     && node
                         .child_by_field_name("name")
                         .is_some_and(|name| text_of(&parsed.source, name) == receiver)
+                    && lookup::ancestors(*node)
+                        .find(|node| node.kind() == "block")
+                        .is_some_and(|block| {
+                            block.start_byte() <= before_offset && before_offset < block.end_byte()
+                        })
             })
             .and_then(|variable| {
                 let declaration = variable.parent()?;
@@ -441,6 +447,7 @@ impl<'a> SemanticAnalyzer<'a> {
             .into_iter()
             .find(|method| method.name == setter_name);
         let target = FieldTarget {
+            source: FieldSource::Response,
             operation_key: operation.key.clone(),
             schema_fqn: class.qualified_name.replace("::", "."),
             field_path,
@@ -465,7 +472,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 .nodes
                 .get(&edge.source)
                 .context("CodeGraph writer disappeared")?;
-            let Some((expression, source)) = self.setter_argument(&edge, &setter.name)? else {
+            let Some((expression, source, offset)) = self.setter_argument(&edge, &setter.name)?
+            else {
                 let mut domain = Domain::default();
                 domain.unknown.insert(format!(
                     "unindexed setter argument at {}:{}:{}",
@@ -475,9 +483,10 @@ impl<'a> SemanticAnalyzer<'a> {
                 continue;
             };
             let mut domain = self.analyze_expression(
-                &operation.key,
+                operation,
                 writer,
                 expression,
+                offset,
                 reachable,
                 &mut BTreeSet::new(),
             )?;
@@ -550,7 +559,7 @@ impl<'a> SemanticAnalyzer<'a> {
         &mut self,
         edge: &GraphEdge,
         setter_name: &str,
-    ) -> Result<Option<(Expression, String)>> {
+    ) -> Result<Option<(Expression, String, usize)>> {
         let parsed = self.parsed(&self.project.graph().nodes[&edge.source].file_path)?;
         let mut candidates = descendants(parsed.tree.root_node())
             .into_iter()
@@ -576,20 +585,31 @@ impl<'a> SemanticAnalyzer<'a> {
         Ok(Some((
             expression_from_node(&parsed.source, argument),
             source,
+            argument.start_byte(),
         )))
     }
 
     fn analyze_expression(
         &mut self,
-        operation_key: &str,
+        operation: &Operation,
         writer: &GraphNode,
         expression: Expression,
+        offset: usize,
         reachable: &Reachability,
         visiting: &mut BTreeSet<(String, usize)>,
     ) -> Result<Domain> {
+        if let Some(domain) = self.request_expression_domain(
+            operation,
+            writer,
+            expression.clone(),
+            offset,
+            reachable,
+        )? {
+            return Ok(domain);
+        }
         match expression {
             Expression::Getter { receiver, accessor } => {
-                if let Some(enum_node) = self.enum_for_receiver(writer, &receiver).cloned() {
+                if let Some(enum_node) = self.enum_for_receiver(writer, &receiver, offset)? {
                     return self.enum_domain(&enum_node, &accessor);
                 }
                 let mut domain = Domain::default();
@@ -620,13 +640,22 @@ impl<'a> SemanticAnalyzer<'a> {
                     .iter()
                     .position(|(_, name)| name == &value)
                 {
-                    return self.resolve_parameter_domain(
-                        operation_key,
-                        writer,
-                        index,
-                        reachable,
-                        visiting,
-                    );
+                    return self
+                        .resolve_parameter_domain(operation, writer, index, reachable, visiting);
+                }
+                if let Some((expression, declaration_offset)) =
+                    self.local_value(writer, &value, offset)?
+                {
+                    if declaration_offset < offset {
+                        return self.analyze_expression(
+                            operation,
+                            writer,
+                            expression,
+                            declaration_offset,
+                            reachable,
+                            visiting,
+                        );
+                    }
                 }
                 let mut domain = Domain::default();
                 domain.unknown.insert(value);
@@ -643,11 +672,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     merge_domain(
                         &mut result,
                         self.analyze_expression(
-                            operation_key,
-                            writer,
-                            expression,
-                            reachable,
-                            visiting,
+                            operation, writer, expression, offset, reachable, visiting,
                         )?,
                     );
                 }
@@ -671,13 +696,13 @@ impl<'a> SemanticAnalyzer<'a> {
 
     fn resolve_parameter_domain(
         &mut self,
-        operation_key: &str,
+        operation: &Operation,
         method: &GraphNode,
         parameter_index: usize,
         reachable: &Reachability,
         visiting: &mut BTreeSet<(String, usize)>,
     ) -> Result<Domain> {
-        let cache_key = (operation_key.to_owned(), method.id.clone(), parameter_index);
+        let cache_key = (operation.key.clone(), method.id.clone(), parameter_index);
         if let Some(domain) = self.parameter_cache.get(&cache_key) {
             return Ok(domain.clone());
         }
@@ -713,9 +738,10 @@ impl<'a> SemanticAnalyzer<'a> {
                     continue;
                 }
                 domains.push(self.analyze_expression(
-                    operation_key,
+                    operation,
                     &caller,
                     invocation.arguments[parameter_index].clone(),
+                    invocation.offset,
                     reachable,
                     visiting,
                 )?);
@@ -741,32 +767,29 @@ impl<'a> SemanticAnalyzer<'a> {
         Ok(domain)
     }
 
-    fn enum_for_receiver(&self, writer: &GraphNode, receiver: &str) -> Option<&GraphNode> {
+    fn enum_for_receiver(
+        &mut self,
+        writer: &GraphNode,
+        receiver: &str,
+        offset: usize,
+    ) -> Result<Option<GraphNode>> {
         let owner = writer
             .qualified_name
             .rsplit_once("::")
             .map(|(owner, _)| owner)
             .unwrap_or(&writer.qualified_name);
         let receiver_root = receiver.split('.').next().unwrap_or(receiver);
-        if let Some(type_name) = method_parameters(&writer.signature)
-            .into_iter()
-            .find_map(|(type_name, name)| (name == receiver_root).then_some(type_name))
-        {
-            let type_ref = parse_java_type(&type_name)?;
-            let node = self
-                .project
-                .resolve_type(&writer.file_path, owner, &type_ref)?;
-            return (node.kind == "enum").then_some(node);
-        }
-        let type_name = receiver_root
-            .rsplit([':', '.'])
-            .next()
-            .unwrap_or(receiver_root);
-        let type_ref = parse_java_type(type_name)?;
-        let node = self
+        let type_name = self
+            .receiver_type(writer, receiver_root, offset)?
+            .unwrap_or_else(|| receiver_root.to_owned());
+        let Some(type_ref) = parse_java_type(&type_name) else {
+            return Ok(None);
+        };
+        Ok(self
             .project
-            .resolve_type(&writer.file_path, owner, &type_ref)?;
-        (node.kind == "enum").then_some(node)
+            .resolve_type(&writer.file_path, owner, &type_ref)
+            .filter(|node| node.kind == "enum")
+            .cloned())
     }
 
     fn enum_domain(&mut self, enum_node: &GraphNode, accessor: &str) -> Result<Domain> {
@@ -1222,9 +1245,15 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
     };
     let warning = match status {
         ProvenanceStatus::Closed => None,
-        ProvenanceStatus::Known => {
-            Some("enum evidence does not prove a complete field domain".to_owned())
-        }
+        ProvenanceStatus::Known => Some(format!(
+            "enum evidence does not prove a complete field domain{}",
+            merged
+                .unknown
+                .iter()
+                .next()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        )),
         ProvenanceStatus::External => Some("field value stops at an external boundary".to_owned()),
         ProvenanceStatus::Unresolved => Some(if merged.unknown.is_empty() {
             "field domain unresolved".to_owned()
@@ -1267,6 +1296,36 @@ fn unresolved_patch(target: FieldTarget, reason: &str) -> SemanticPatch {
         values: Vec::new(),
         evidence: Vec::new(),
         warning: Some(reason.to_owned()),
+    }
+}
+
+fn reconcile_schema_paths(patches: &mut [SemanticPatch]) {
+    let conflicts = patches
+        .iter()
+        .filter(|patch| patch.status == ProvenanceStatus::Closed)
+        .filter(|patch| {
+            patches.iter().any(|other| {
+                other.target.source == patch.target.source
+                    && other.target.schema_fqn == patch.target.schema_fqn
+                    && other.target.field_name == patch.target.field_name
+                    && (other.status != ProvenanceStatus::Closed
+                        || other.enum_fqn != patch.enum_fqn
+                        || other.accessor != patch.accessor
+                        || other.values != patch.values)
+            })
+        })
+        .map(|patch| patch.target.clone())
+        .collect::<BTreeSet<_>>();
+    for patch in patches
+        .iter_mut()
+        .filter(|patch| conflicts.contains(&patch.target))
+    {
+        patch.status = ProvenanceStatus::Known;
+        patch.values.clear();
+        patch.warning = Some(
+            "field has different domains at different paths; shared schema is not narrowed"
+                .to_owned(),
+        );
     }
 }
 
@@ -1534,6 +1593,7 @@ mod tests {
     #[test]
     fn closed_requires_every_write_to_share_complete_enum() {
         let target = FieldTarget {
+            source: FieldSource::Response,
             operation_key: "Facade#query".to_owned(),
             schema_fqn: "p.DTO".to_owned(),
             field_path: "code".to_owned(),
@@ -1731,6 +1791,282 @@ mod tests {
             .unwrap();
         assert!(reachable.nodes.contains("render"));
         assert!(!reachable.nodes.contains("wrong-render"));
+    }
+
+    fn request_fixture(body: &str, fallback: &str) -> crate::model::ContractIr {
+        let repo = tempfile::tempdir().unwrap();
+        let contract = "contract/src/main/java/p/contract/IFacade.java";
+        let implementation = "service/src/main/java/p/Facade.java";
+        let payload = "contract/src/main/java/p/Payload.java";
+        let kind = "service/src/main/java/p/Kind.java";
+        write(
+            repo.path(),
+            contract,
+            "package p.contract;\nimport p.Payload;\n@ServiceContract\ninterface IFacade { Payload query(Payload req); }\n",
+        );
+        write(
+            repo.path(),
+            payload,
+            "package p;\nclass Payload {\n int code;\n int getCode() { return code; }\n void setCode(int code) { this.code = code; }\n}\n",
+        );
+        write(
+            repo.path(),
+            implementation,
+            &format!("package p;\nclass Facade {{\n Payload query(Payload req) {{ {body} }}\n}}\n"),
+        );
+        write(
+            repo.path(),
+            kind,
+            &format!(
+                "package p;\nenum Kind {{\n A(1), B(2);\n final int type;\n Kind(int type) {{ this.type = type; }}\n int getType() {{ return type; }}\n static Kind decode(int input) {{ for (Kind item : values()) {{ if (item.type == input) {{ return item; }} }} return {fallback}; }}\n}}\n"
+            ),
+        );
+        let graph = test_snapshot(
+            vec![
+                node(
+                    "contract",
+                    "interface",
+                    "IFacade",
+                    "p.contract::IFacade",
+                    contract,
+                    4,
+                    "",
+                ),
+                node(
+                    "root",
+                    "method",
+                    "query",
+                    "p.contract::IFacade::query",
+                    contract,
+                    4,
+                    "Payload (Payload req)",
+                ),
+                node(
+                    "facade",
+                    "class",
+                    "Facade",
+                    "p::Facade",
+                    implementation,
+                    2,
+                    "",
+                ),
+                node(
+                    "query",
+                    "method",
+                    "query",
+                    "p::Facade::query",
+                    implementation,
+                    3,
+                    "Payload (Payload req)",
+                ),
+                node("payload", "class", "Payload", "p::Payload", payload, 2, ""),
+                node(
+                    "code",
+                    "field",
+                    "code",
+                    "p::Payload::code",
+                    payload,
+                    3,
+                    "int code",
+                ),
+                node(
+                    "getter",
+                    "method",
+                    "getCode",
+                    "p::Payload::getCode",
+                    payload,
+                    4,
+                    "int ()",
+                ),
+                node(
+                    "setter",
+                    "method",
+                    "setCode",
+                    "p::Payload::setCode",
+                    payload,
+                    5,
+                    "void (int code)",
+                ),
+                node("kind", "enum", "Kind", "p::Kind", kind, 2, ""),
+                node(
+                    "decode",
+                    "method",
+                    "decode",
+                    "p::Kind::decode",
+                    kind,
+                    7,
+                    "Kind (int input)",
+                ),
+            ],
+            vec![
+                contains("contract", "root"),
+                contains("facade", "query"),
+                contains("payload", "code"),
+                contains("payload", "getter"),
+                contains("payload", "setter"),
+                contains("kind", "decode"),
+                call("root", "query", 4),
+                call("query", "setter", 3),
+            ],
+        );
+        let project = JavaProject::load(repo.path(), &graph).unwrap();
+        let target = TargetIdentity {
+            app_name: "demo".into(),
+            branch: "feature".into(),
+            commit: "test".into(),
+            codegraph_version: "test".into(),
+            codegraph_extraction_version: "test".into(),
+        };
+        let (mut operations, schemas) = project
+            .build_contracts(&target, &["contract/src/main/java/p/contract".into()])
+            .unwrap();
+        SemanticAnalyzer::new(&project)
+            .enrich(&mut operations, &schemas)
+            .unwrap();
+        crate::model::ContractIr {
+            target,
+            operations,
+            schemas,
+        }
+    }
+
+    #[test]
+    fn request_lookup_and_response_write_keep_separate_domains() {
+        let ir = request_fixture(
+            "int code = req.getCode(); Kind kind = Kind.decode(code); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+            "null",
+        );
+        let patches = &ir.operations[0].semantic_patches;
+        let request = patches
+            .iter()
+            .find(|patch| patch.target.source == FieldSource::Request)
+            .unwrap();
+        let response = patches
+            .iter()
+            .find(|patch| patch.target.source == FieldSource::Response)
+            .unwrap();
+        assert_eq!(request.status, ProvenanceStatus::Closed, "{request:?}");
+        assert_eq!(request.enum_fqn.as_deref(), Some("p.Kind"));
+        assert_eq!(response.status, ProvenanceStatus::Unresolved);
+
+        let config = crate::typescript::tests::config();
+        let openapi: serde_json::Value =
+            serde_json::from_str(&crate::openapi::generate(&ir, &config).unwrap().source).unwrap();
+        let operation = openapi["x-nlab-contracts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap();
+        let request_ref = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+            .as_str()
+            .unwrap();
+        let response_ref =
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+                .as_str()
+                .unwrap();
+        assert_ne!(request_ref, response_ref);
+        assert_eq!(
+            openapi
+                .pointer(&format!(
+                    "{}/properties/code/enum",
+                    request_ref.trim_start_matches('#')
+                ))
+                .unwrap(),
+            &serde_json::json!([1, 2])
+        );
+        assert!(
+            openapi
+                .pointer(&format!(
+                    "{}/properties/code/enum",
+                    response_ref.trim_start_matches('#')
+                ))
+                .is_none()
+        );
+        let frontend = crate::typescript::generate(&ir, &config).unwrap();
+        let api = &frontend.files[&frontend.api_files[0]];
+        assert!(api.contains("RequestPayload"), "{api}");
+        assert!(
+            frontend
+                .files
+                .values()
+                .any(|file| file.contains("code?: Kind"))
+        );
+
+        let echoed = request_fixture(
+            "int code = req.getCode(); Kind kind = Kind.decode(code); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(code); return result;",
+            "null",
+        );
+        assert!(
+            echoed.operations[0]
+                .semantic_patches
+                .iter()
+                .all(|patch| patch.status == ProvenanceStatus::Closed)
+        );
+    }
+
+    #[test]
+    fn request_lookup_does_not_narrow_defaults_branches_or_unrelated_objects() {
+        for (body, fallback, expected) in [
+            (
+                "if (req.getCode() == 9) return new Payload(); Kind kind = Kind.decode(req.getCode()); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Known,
+            ),
+            (
+                "req = new Payload(); Kind kind = Kind.decode(req.getCode()); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Unresolved,
+            ),
+            (
+                "req.setCode(9); Kind kind = Kind.decode(req.getCode()); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Unresolved,
+            ),
+            (
+                "req.code = 9; Kind kind = Kind.decode(req.getCode()); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Unresolved,
+            ),
+            (
+                "try { Kind kind = Kind.decode(req.getCode()); Objects.requireNonNull(kind); } catch (Exception ignored) {} Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Known,
+            ),
+            (
+                "Kind kind = Kind.decode(req.getCode()); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Known,
+            ),
+            (
+                "Kind kind = Kind.decode(req.getCode()); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "A",
+                ProvenanceStatus::Known,
+            ),
+            (
+                "Kind kind = Kind.decode(req.getCode()); if (flag) Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Known,
+            ),
+            (
+                "Payload other = new Payload(); Kind kind = Kind.decode(other.getCode()); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Unresolved,
+            ),
+            (
+                "int code = req.getCode(); code = 9; Kind kind = Kind.decode(code); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;",
+                "null",
+                ProvenanceStatus::Unresolved,
+            ),
+        ] {
+            let ir = request_fixture(body, fallback);
+            let request = ir.operations[0]
+                .semantic_patches
+                .iter()
+                .find(|patch| patch.target.source == FieldSource::Request)
+                .unwrap();
+            assert_eq!(request.status, expected, "{body}: {request:?}");
+        }
     }
 
     #[test]
