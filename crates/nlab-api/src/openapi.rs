@@ -7,8 +7,8 @@ use super::coded_values;
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, type_output_path};
 use super::model::{
-    CodedValue, ContractIr, Operation, ProvenanceStatus, RouteSource, RouteStatus, Schema,
-    SemanticPatch, TypeRef, WireValue,
+    CodedValue, ContractIr, FieldSource, Operation, ProvenanceStatus, RouteSource, RouteStatus,
+    Schema, SemanticPatch, TypeRef, WireValue,
 };
 use super::naming::{
     fqn_seed, shortest_unique_names, shortest_unique_names_avoiding, without_interface_prefix,
@@ -23,7 +23,7 @@ pub struct OpenApiArtifact {
 pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifact> {
     let names = schema_names(&ir.schemas);
     let requests = request_schemas(ir);
-    let aliases_by_operation = response_aliases(ir, &names, &requests);
+    let aliases_by_operation = operation_aliases(ir, &names, &requests);
     let mut components = Map::new();
     for (fqn, schema) in &ir.schemas {
         components.insert(
@@ -32,6 +32,7 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifa
                 schema,
                 &names,
                 None,
+                FieldSource::Response,
                 &HashMap::new(),
                 &BTreeMap::new(),
                 requests.contains(fqn),
@@ -42,27 +43,48 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifa
     let mut paths = Map::new();
     let mut contracts = Map::new();
     for operation in &ir.operations {
+        for source in [FieldSource::Request, FieldSource::Response] {
+            let aliases = aliases_by_operation
+                .get(&source.operation_key(operation))
+                .cloned()
+                .unwrap_or_default();
+            let mut alias_entries = aliases.iter().collect::<Vec<_>>();
+            alias_entries.sort_by(|left, right| left.0.cmp(right.0));
+            for (fqn, alias) in alias_entries {
+                components.insert(
+                    alias.clone(),
+                    schema_object(
+                        &ir.schemas[fqn],
+                        &names,
+                        Some(operation),
+                        source,
+                        &aliases,
+                        &BTreeMap::new(),
+                        source == FieldSource::Request
+                            && operation
+                                .request
+                                .as_ref()
+                                .is_some_and(|request| request.name == *fqn),
+                    ),
+                );
+            }
+        }
         let aliases = aliases_by_operation
             .get(&operation.key)
             .cloned()
             .unwrap_or_default();
-        let mut alias_entries = aliases.iter().collect::<Vec<_>>();
-        alias_entries.sort_by(|left, right| left.0.cmp(right.0));
-        for (fqn, alias) in alias_entries {
-            let schema = &ir.schemas[fqn];
-            components.insert(
-                alias.clone(),
-                schema_object(
-                    schema,
-                    &names,
-                    Some(operation),
-                    &aliases,
-                    &BTreeMap::new(),
-                    false,
-                ),
-            );
-        }
-        let operation_value = operation_object(operation, &ir.schemas, &names, &aliases, config)?;
+        let request_aliases = aliases_by_operation
+            .get(&FieldSource::Request.operation_key(operation))
+            .cloned()
+            .unwrap_or_default();
+        let operation_value = operation_object(
+            operation,
+            &ir.schemas,
+            &names,
+            &aliases,
+            &request_aliases,
+            config,
+        )?;
         let mut path_item = Map::new();
         path_item.insert(
             operation.route.method.to_ascii_lowercase(),
@@ -156,6 +178,7 @@ fn operation_object(
     schemas: &BTreeMap<String, Schema>,
     names: &BTreeMap<String, String>,
     aliases: &HashMap<String, String>,
+    request_aliases: &HashMap<String, String>,
     config: &ProjectConfig,
 ) -> Result<Value> {
     let mut value = Map::new();
@@ -265,7 +288,8 @@ fn operation_object(
                             schemas,
                             names,
                             operation,
-                            &HashMap::new(),
+                            FieldSource::Request,
+                            request_aliases,
                             true,
                         )
                     }
@@ -289,6 +313,7 @@ fn operation_object(
                             schemas,
                             names,
                             operation,
+                            FieldSource::Response,
                             aliases,
                             false,
                         )
@@ -305,6 +330,7 @@ fn operation_schema(
     schemas: &BTreeMap<String, Schema>,
     names: &BTreeMap<String, String>,
     operation: &Operation,
+    source: FieldSource,
     aliases: &HashMap<String, String>,
     optional_fields: bool,
 ) -> Value {
@@ -320,6 +346,7 @@ fn operation_schema(
             schema,
             names,
             Some(operation),
+            source,
             aliases,
             &schema.bindings_for(type_ref),
             optional_fields,
@@ -332,18 +359,19 @@ fn schema_object(
     schema: &Schema,
     names: &BTreeMap<String, String>,
     operation: Option<&Operation>,
+    source: FieldSource,
     aliases: &HashMap<String, String>,
     bindings: &BTreeMap<String, TypeRef>,
     optional_fields: bool,
 ) -> Value {
     let patches = operation
-        .filter(|_| !optional_fields)
         .map(|operation| {
             operation
                 .semantic_patches
                 .iter()
                 .filter(|patch| {
                     patch.target.schema_fqn == schema.fqn
+                        && patch.target.source == source
                         && patch.status == ProvenanceStatus::Closed
                 })
                 .map(|patch| (patch.target.field_name.as_str(), patch))
@@ -527,7 +555,7 @@ fn semantic_patch(patch: &SemanticPatch) -> Value {
     Value::Object(value)
 }
 
-fn response_aliases(
+fn operation_aliases(
     ir: &ContractIr,
     names: &BTreeMap<String, String>,
     requests: &BTreeSet<String>,
@@ -535,26 +563,34 @@ fn response_aliases(
     let mut seeds = BTreeMap::new();
     let mut reachable_by_operation = HashMap::new();
     for operation in &ir.operations {
-        let reachable = reachable_schemas(&operation.response, &ir.schemas);
-        if reachable.is_disjoint(requests)
-            && !operation
-                .semantic_patches
-                .iter()
-                .any(|patch| patch.status == ProvenanceStatus::Closed)
-        {
-            continue;
-        }
-        for fqn in &reachable {
-            seeds.insert(
-                alias_symbol(&operation.key, fqn),
-                vec![
+        for source in [FieldSource::Request, FieldSource::Response] {
+            let Some(root) = source.root(operation) else {
+                continue;
+            };
+            let reachable = reachable_schemas(root, &ir.schemas);
+            let preserves_requiredness =
+                source == FieldSource::Response && !reachable.is_disjoint(requests);
+            if !preserves_requiredness
+                && !operation.semantic_patches.iter().any(|patch| {
+                    patch.target.source == source && patch.status == ProvenanceStatus::Closed
+                })
+            {
+                continue;
+            }
+            let key = source.operation_key(operation);
+            for fqn in &reachable {
+                let mut seed = vec![
                     without_interface_prefix(&operation.facade_name).to_owned(),
                     operation.method_name.clone(),
-                    ir.schemas[fqn].name.clone(),
-                ],
-            );
+                ];
+                if source == FieldSource::Request {
+                    seed.push("Request".to_owned());
+                }
+                seed.push(ir.schemas[fqn].name.clone());
+                seeds.insert(alias_symbol(&key, fqn), seed);
+            }
+            reachable_by_operation.insert(key, reachable);
         }
-        reachable_by_operation.insert(operation.key.clone(), reachable);
     }
     let reserved = names.values().cloned().collect::<BTreeSet<_>>();
     let alias_names = shortest_unique_names_avoiding(&seeds, &reserved);

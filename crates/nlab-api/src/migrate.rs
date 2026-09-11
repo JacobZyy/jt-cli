@@ -908,6 +908,11 @@ fn enum_targets(document: &Value) -> BTreeMap<String, BTreeMap<String, String>> 
         if target_key.matches('|').count() != 2 {
             continue;
         }
+        let target_key = if target["source"].as_str() == Some("request") {
+            format!("request|{target_key}")
+        } else {
+            target_key
+        };
         let values = operation
             .get("values")
             .and_then(Value::as_array)
@@ -1306,6 +1311,29 @@ fn join_path(left: &str, right: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_targets_preserve_legacy_response_identity_and_separate_requests() {
+        let document = serde_json::json!({"x-nlab-contracts": {"query": {"x-nlab-semantic-patches": [
+            {"target": {"operationKey": "Facade#query", "schemaFqn": "p.DTO", "fieldPath": "code"},
+             "values": [{"value": 1, "key": "OUTPUT"}]},
+            {"target": {"source": "request", "operationKey": "Facade#query", "schemaFqn": "p.DTO", "fieldPath": "code"},
+             "values": [{"value": 1, "key": "INPUT"}]}
+        ]}}});
+        let targets = enum_targets(&document);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            targets["Facade#query|p.DTO|code"].values().next().unwrap(),
+            "OUTPUT"
+        );
+        assert_eq!(
+            targets["request|Facade#query|p.DTO|code"]
+                .values()
+                .next()
+                .unwrap(),
+            "INPUT"
+        );
+    }
 
     #[test]
     fn generated_symbol_readers_skip_missing_manifest_files() {

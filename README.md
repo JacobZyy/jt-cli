@@ -336,6 +336,16 @@ declarations instead. Both modes preserve member values, labels, source comments
 Initialization writes the setting and preserves an existing value on subsequent runs. Native enums
 require TypeScript enum transformation and cannot be used with `erasableSyntaxOnly` enabled.
 
+Enum analysis indexes reverse lookups before tracing operations: a lookup must map its argument to
+an enum field through a complete `values()` iteration, stream filter, or private map populated from
+all enum constants. Method names such as `valueOfType` alone are not evidence. Request analysis follows
+DTO getters, local aliases, and delegated parameters to those lookups; response analysis retains
+setter provenance and can reuse a validated request value when it is echoed. A request domain is
+closed only when unmatched values are rejected on a mandatory path. Defaulting or uncertain lookups
+remain known evidence without narrowing from that evidence. Semantic targets record `source` as
+`request` or `response`; older snapshots without it mean `response`. Operation-specific request and
+response types remain separate, including when both use the same Java DTO.
+
 Generated output includes:
 
 ```text

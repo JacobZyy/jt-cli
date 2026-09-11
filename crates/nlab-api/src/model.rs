@@ -233,10 +233,38 @@ pub struct SemanticPatch {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldTarget {
+    #[serde(default)]
+    pub source: FieldSource,
     pub operation_key: String,
     pub schema_fqn: String,
     pub field_path: String,
     pub field_name: String,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldSource {
+    Request,
+    #[default]
+    Response,
+}
+
+impl FieldSource {
+    pub fn root(self, operation: &Operation) -> Option<&TypeRef> {
+        match self {
+            Self::Request => operation.request.as_ref(),
+            Self::Response => Some(&operation.response),
+        }
+    }
+
+    pub fn operation_key(self, operation: &Operation) -> String {
+        match self {
+            Self::Request => format!("{}:request", operation.key),
+            Self::Response => operation.key.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

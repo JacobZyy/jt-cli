@@ -7,7 +7,8 @@ use super::coded_values;
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, nearest_usage_directory, type_output_path};
 use super::model::{
-    CodedValue, ContractIr, Operation, ProvenanceStatus, Schema, SemanticPatch, TypeRef, WireValue,
+    CodedValue, ContractIr, FieldSource, Operation, ProvenanceStatus, Schema, SemanticPatch,
+    TypeRef, WireValue,
 };
 use super::naming::{
     fqn_seed, lower_camel, shortest_unique_names_avoiding, upper_camel, without_enum_suffix,
@@ -58,6 +59,7 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<FrontendArtif
                 base_targets: &plan.base,
                 aliases: &empty_aliases,
                 operation: None,
+                source: FieldSource::Response,
                 optional_fields: requests.contains(fqn),
                 enum_targets: &plan.enums_by_patch,
                 field_enum_targets: &plan.enums_by_field,
@@ -78,26 +80,32 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<FrontendArtif
     }
 
     for operation in &ir.operations {
-        let Some(alias_targets) = plan.aliases.get(&operation.key) else {
-            continue;
-        };
-        for (fqn, target) in alias_targets {
-            let schema = &ir.schemas[fqn];
-            let source = render_interface(
-                schema,
-                target,
-                InterfaceRender {
-                    base_targets: &plan.base,
-                    aliases: alias_targets,
-                    operation: Some(operation),
-                    optional_fields: false,
-                    enum_targets: &plan.enums_by_patch,
-                    field_enum_targets: &plan.enums_by_field,
-                    config,
-                },
-            )?;
-            insert_file(&mut files, &target.path, source)?;
-            type_files.push(target.path.clone());
+        for source in [FieldSource::Request, FieldSource::Response] {
+            let Some(alias_targets) = plan.aliases.get(&source.operation_key(operation)) else {
+                continue;
+            };
+            for (fqn, target) in alias_targets {
+                let output = render_interface(
+                    &ir.schemas[fqn],
+                    target,
+                    InterfaceRender {
+                        base_targets: &plan.base,
+                        aliases: alias_targets,
+                        operation: Some(operation),
+                        source,
+                        optional_fields: source == FieldSource::Request
+                            && operation
+                                .request
+                                .as_ref()
+                                .is_some_and(|request| request.name == *fqn),
+                        enum_targets: &plan.enums_by_patch,
+                        field_enum_targets: &plan.enums_by_field,
+                        config,
+                    },
+                )?;
+                insert_file(&mut files, &target.path, output)?;
+                type_files.push(target.path.clone());
+            }
         }
     }
 
@@ -166,24 +174,35 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
     let mut seeds = BTreeMap::<String, Vec<String>>::new();
     let mut alias_fqns = HashMap::<String, BTreeSet<String>>::new();
     for operation in &ir.operations {
-        let reachable = reachable_schemas(&operation.response, &ir.schemas);
-        if !reachable.is_disjoint(&requests)
-            || operation
-                .semantic_patches
-                .iter()
-                .any(|patch| patch.status == ProvenanceStatus::Closed && !patch.values.is_empty())
-        {
-            for fqn in &reachable {
-                seeds.insert(
-                    alias_symbol(&operation.key, fqn),
-                    vec![
-                        without_interface_prefix(&operation.facade_name).to_owned(),
-                        operation.method_name.clone(),
-                        ir.schemas[fqn].name.clone(),
-                    ],
-                );
+        for source in [FieldSource::Request, FieldSource::Response] {
+            let Some(root) = source.root(operation) else {
+                continue;
+            };
+            let reachable = reachable_schemas(root, &ir.schemas);
+            let preserves_requiredness =
+                source == FieldSource::Response && !reachable.is_disjoint(&requests);
+            if !preserves_requiredness
+                && !operation.semantic_patches.iter().any(|patch| {
+                    patch.target.source == source
+                        && patch.status == ProvenanceStatus::Closed
+                        && !patch.values.is_empty()
+                })
+            {
+                continue;
             }
-            alias_fqns.insert(operation.key.clone(), reachable);
+            let key = source.operation_key(operation);
+            for fqn in &reachable {
+                let mut seed = vec![
+                    without_interface_prefix(&operation.facade_name).to_owned(),
+                    operation.method_name.clone(),
+                ];
+                if source == FieldSource::Request {
+                    seed.push("Request".to_owned());
+                }
+                seed.push(ir.schemas[fqn].name.clone());
+                seeds.insert(alias_symbol(&key, fqn), seed);
+            }
+            alias_fqns.insert(key, reachable);
         }
     }
 
@@ -255,29 +274,32 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
     let names = shortest_unique_names_avoiding(&seeds, &reserved);
     let mut aliases = HashMap::new();
     for operation in &ir.operations {
-        let Some(fqns) = alias_fqns.get(&operation.key) else {
-            continue;
-        };
-        let directory = join_path(
-            &config.frontend.layout.types_dir,
-            &type_output_path(operation, &config.backend.contract_roots)?,
-        );
-        aliases.insert(
-            operation.key.clone(),
-            fqns.iter()
-                .map(|fqn| {
-                    let name = names[&alias_symbol(&operation.key, fqn)].clone();
-                    (
-                        fqn.clone(),
-                        TypeTarget {
-                            path: join_path(&directory, &format!("{}.ts", lower_camel(&name))),
-                            name,
-                            type_parameters: ir.schemas[fqn].type_parameters.clone(),
-                        },
-                    )
-                })
-                .collect(),
-        );
+        for source in [FieldSource::Request, FieldSource::Response] {
+            let key = source.operation_key(operation);
+            let Some(fqns) = alias_fqns.get(&key) else {
+                continue;
+            };
+            let directory = join_path(
+                &config.frontend.layout.types_dir,
+                &type_output_path(operation, &config.backend.contract_roots)?,
+            );
+            aliases.insert(
+                key.clone(),
+                fqns.iter()
+                    .map(|fqn| {
+                        let name = names[&alias_symbol(&key, fqn)].clone();
+                        (
+                            fqn.clone(),
+                            TypeTarget {
+                                path: join_path(&directory, &format!("{}.ts", lower_camel(&name))),
+                                name,
+                                type_parameters: ir.schemas[fqn].type_parameters.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+        }
     }
     let enum_definitions = enum_values
         .into_iter()
@@ -406,8 +428,11 @@ fn remove_owner_overlap<'a>(owner: &str, accessor: &'a str) -> Option<&'a str> {
 
 fn patch_symbol(patch: &SemanticPatch) -> String {
     format!(
-        "{}:{}:{}",
-        patch.target.operation_key, patch.target.schema_fqn, patch.target.field_path
+        "{:?}:{}:{}:{}",
+        patch.target.source,
+        patch.target.operation_key,
+        patch.target.schema_fqn,
+        patch.target.field_path
     )
 }
 
@@ -500,6 +525,7 @@ struct InterfaceRender<'a> {
     base_targets: &'a HashMap<String, TypeTarget>,
     aliases: &'a HashMap<String, TypeTarget>,
     operation: Option<&'a Operation>,
+    source: FieldSource,
     enum_targets: &'a HashMap<String, TypeTarget>,
     field_enum_targets: &'a HashMap<String, TypeTarget>,
     config: &'a ProjectConfig,
@@ -515,6 +541,7 @@ fn render_interface(
         base_targets,
         aliases,
         operation,
+        source,
         enum_targets,
         field_enum_targets,
         config,
@@ -527,6 +554,7 @@ fn render_interface(
                 .iter()
                 .filter(|patch| {
                     patch.target.schema_fqn == schema.fqn
+                        && patch.target.source == source
                         && patch.status == ProvenanceStatus::Closed
                 })
                 .map(|patch| (patch.target.field_name.as_str(), patch))
@@ -600,7 +628,7 @@ fn render_api_file(
     path: &str,
     operations: &[&Operation],
     base_targets: &HashMap<String, TypeTarget>,
-    response_aliases: &HashMap<String, HashMap<String, TypeTarget>>,
+    operation_aliases: &HashMap<String, HashMap<String, TypeTarget>>,
     config: &ProjectConfig,
 ) -> Result<String> {
     let mut imports = BTreeMap::<String, BTreeSet<String>>::new();
@@ -622,7 +650,7 @@ fn render_api_file(
             &operation.response,
             &current,
             base_targets,
-            response_aliases
+            operation_aliases
                 .get(&operation.key)
                 .unwrap_or(&empty_aliases),
             &mut imports,
@@ -633,13 +661,16 @@ fn render_api_file(
             safe_property(&export_name),
             ts_string(&operation.route.path)
         ));
+        let request_aliases = operation_aliases
+            .get(&FieldSource::Request.operation_key(operation))
+            .unwrap_or(&empty_aliases);
         let request = operation.request.as_ref().map(|request| {
             let mut request_imports = BTreeMap::<String, BTreeSet<String>>::new();
             let type_name = type_expression(
                 request,
                 &current,
                 base_targets,
-                &HashMap::new(),
+                request_aliases,
                 &mut request_imports,
                 config,
             );
@@ -965,10 +996,10 @@ fn is_collection(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn config() -> ProjectConfig {
+    pub(crate) fn config() -> ProjectConfig {
         serde_json::from_value(serde_json::json!({
             "version": 1,
             "backend": {
