@@ -1,5 +1,7 @@
 # Changelog
 
+## [1.11.9](https://github.com/JacobZyy/jt-cli/compare/v1.11.8...v1.11.9) (2026-09-11)
+
 ## [1.11.8](https://github.com/JacobZyy/jt-cli/compare/v1.11.7...v1.11.8) (2026-09-10)
 
 ## [1.11.7](https://github.com/JacobZyy/jt-cli/compare/v1.11.6...v1.11.7) (2026-09-10)
