@@ -1,5 +1,5 @@
 {
-  "name": "jt-unused-golden-fixture",
+  "name": "jt-unused-type-consumer-fixture",
   "private": true,
   "scripts": {
     "start": "node src/main.ts"

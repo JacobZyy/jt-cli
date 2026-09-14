@@ -1,4 +1,7 @@
 {
   "name": "jt-unused-semantic-golden-fixture",
-  "private": true
+  "private": true,
+  "scripts": {
+    "start": "node src/main.ts"
+  }
 }

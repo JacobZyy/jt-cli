@@ -80,12 +80,12 @@ function prepare(input) {
 
     let parsed;
     try {
-      parsed = compiler.parse(source, { filename: filePath });
+      parsed = parseVueSfc(compiler, source, filePath);
     } catch (error) {
       diagnostics.push(diagnostic('vue-parse', `cannot parse Vue file: ${errorMessage(error)}`, filePath));
       continue;
     }
-    for (const error of parsed.errors || []) {
+    for (const error of parsed.errors) {
       diagnostics.push(diagnostic('vue-parse', formatSfcError(error), filePath));
     }
 
@@ -96,14 +96,53 @@ function prepare(input) {
       }
       blocks.push({
         content: block.content,
-        offset: Buffer.byteLength(source.slice(0, block.loc.start.offset), 'utf8'),
-        lang: block.attrs.lang || 'js',
+        offset: Buffer.byteLength(source.slice(0, vueBlockStart(block, source)), 'utf8'),
+        lang: block.attrs?.lang || block.lang || 'js',
       });
     }
     vueScripts.push({ path: relativePath(root, filePath), blocks });
   }
 
   return { vueScripts, diagnostics };
+}
+
+function parseVueSfc(compiler, source, filePath) {
+  if (typeof compiler.parse === 'function') {
+    let direct;
+    try {
+      direct = compiler.parse(source, { filename: filePath });
+      if (direct?.descriptor) {
+        return { descriptor: direct.descriptor, errors: direct.errors || [] };
+      }
+    } catch {
+      // Vue 2.7 compiler-sfc uses an object argument; retry below.
+    }
+    try {
+      const descriptor = compiler.parse({ source, filename: filePath });
+      if (descriptor) {
+        return { descriptor, errors: descriptor.errors || [] };
+      }
+    } catch {
+      // Fall through to a direct descriptor or parseComponent.
+    }
+    if (direct) {
+      return { descriptor: direct, errors: direct.errors || [] };
+    }
+  }
+  if (typeof compiler.parseComponent === 'function') {
+    const descriptor = compiler.parseComponent(source, { pad: false });
+    return { descriptor, errors: descriptor.errors || [] };
+  }
+  throw new Error('Vue SFC compiler does not expose parse or parseComponent');
+}
+
+function vueBlockStart(block, source) {
+  const start = block.loc?.start?.offset ?? block.start;
+  if (Number.isInteger(start) && start >= 0) {
+    return start;
+  }
+  const fallback = source.indexOf(block.content);
+  return fallback < 0 ? 0 : fallback;
 }
 
 function references(input) {
@@ -113,14 +152,16 @@ function references(input) {
   const diagnostics = [];
   const usedIds = new Set();
   const unknownIds = new Set();
+  const unknownReasons = new Map();
+  const boundarySources = [];
   const edges = [];
   if (!candidates.length) {
-    return { usedIds: [], coveredIds: [], unknownIds: [], edges, diagnostics };
+    return { usedIds: [], coveredIds: [], unknownIds: [], unknownReasons: [], boundarySources, edges, diagnostics };
   }
 
   const project = createProject(root, input.vueFiles, input.sourceFiles, candidates, diagnostics);
   if (!project) {
-    return { usedIds: [], coveredIds: [], unknownIds: [], edges, diagnostics };
+    return { usedIds: [], coveredIds: [], unknownIds: [], unknownReasons: [], boundarySources, edges, diagnostics };
   }
 
   const symbolCandidates = candidates.filter(candidate => candidate.kind !== 'file');
@@ -136,12 +177,17 @@ function references(input) {
   const methodCandidatesByName = collectMethodCandidates(candidates);
   const sourcePaths = new Set(sourceFiles.map(sourceFile => sourcePathForCandidate(sourceFile.fileName)));
   const coveredIds = [...new Set(candidates
-    .filter(candidate => sourcePaths.has(candidate.path))
+    .filter(candidate => sourcePaths.has(candidate.path)
+      && (!candidate.path.toLowerCase().endsWith('.vue') || project.vueSemantic))
     .map(candidate => candidate.id))].sort();
+  if (!project.vueSemantic) {
+    for (const candidate of candidates.filter(candidate => candidate.path.toLowerCase().endsWith('.vue'))) {
+      markUnknown(unknownIds, unknownReasons, candidate.id, 'vue-semantic-unavailable');
+    }
+  }
 
   for (const sourceFile of sourceFiles) {
-    if (sourceFile.isDeclarationFile
-      || !SOURCE_EXTENSIONS.has(path.extname(sourceFile.fileName).toLowerCase())
+    if (!SOURCE_EXTENSIONS.has(path.extname(sourceFile.fileName).toLowerCase())
       || isTestSource(relativePath(root, sourceFile.fileName))) {
       continue;
     }
@@ -155,6 +201,8 @@ function references(input) {
       symbolCache,
       usedIds,
       unknownIds,
+      unknownReasons,
+      boundarySources,
       edges,
       diagnostics,
     );
@@ -170,6 +218,8 @@ function references(input) {
       methodCandidatesByName,
       usedIds,
       unknownIds,
+      unknownReasons,
+      edges,
     );
   }
 
@@ -177,6 +227,12 @@ function references(input) {
     usedIds: [...usedIds].sort(),
     coveredIds,
     unknownIds: [...unknownIds].filter(id => !usedIds.has(id)).sort(),
+    unknownReasons: [...unknownReasons]
+      .filter(([id]) => !usedIds.has(id))
+      .map(([id, reason]) => ({ id, reason }))
+      .sort((left, right) => left.id.localeCompare(right.id) || left.reason.localeCompare(right.reason)),
+    boundarySources: boundarySources
+      .sort((left, right) => left.source.localeCompare(right.source) || left.reason.localeCompare(right.reason)),
     edges: uniqueEdges(edges),
     diagnostics,
   };
@@ -251,6 +307,7 @@ function createProject(root, rawVueFiles, rawSourceFiles, candidates, diagnostic
     ...existingVueFiles,
   ]).filter(file => ts.sys.fileExists(file) && !isTestSource(relativePath(root, file)));
   let program;
+  let vueSemantic = false;
   if (core && volar && volarLanguageCore) {
     try {
       program = createVolarProgram(
@@ -263,6 +320,7 @@ function createProject(root, rawVueFiles, rawSourceFiles, candidates, diagnostic
         volar,
         volarLanguageCore,
       );
+      vueSemantic = Boolean(program);
     } catch (error) {
       diagnostics.push(diagnostic('vue-program', `cannot create Vue TypeScript program: ${errorMessage(error)}`));
     }
@@ -285,6 +343,7 @@ function createProject(root, rawVueFiles, rawSourceFiles, candidates, diagnostic
     checker: program.getTypeChecker(),
     options,
     program,
+    vueSemantic,
   };
 }
 
@@ -322,15 +381,16 @@ function createVolarProgram(root, rootNames, options, vueOptions, ts, vueCore, v
   return ts.createLanguageService(languageServiceHost).getProgram();
 }
 
-function scanIdentifiers(sourceFile, project, root, candidateNames, aliasNames, candidateIndex, fileIdsByPath, symbolCache, methodCandidatesByName, usedIds, unknownIds) {
+function scanIdentifiers(sourceFile, project, root, candidateNames, aliasNames, candidateIndex, fileIdsByPath, symbolCache, methodCandidatesByName, usedIds, unknownIds, unknownReasons, edges) {
   const { ts, checker } = project;
-  const isVue = sourceFile.fileName.toLowerCase().endsWith('.vue');
+  const sourcePath = sourcePathForCandidate(sourceFile.fileName);
+  const isVue = sourcePath.toLowerCase().endsWith('.vue');
   function visit(node) {
     const name = semanticIdentifierName(node, ts);
     if (name
       && (candidateNames.has(name) || aliasNames.has(name))
-      && (isVue || isMethodReference(node, ts))
       && isReferenceIdentifier(node, ts)
+      && !isCallTarget(node, ts)
       && !isWriteOnlyIdentifier(node, ts)) {
       const symbol = resolveSymbol(checker, node, ts);
       if (!symbol || isSelfReference(node, symbol, ts)) {
@@ -347,11 +407,57 @@ function scanIdentifiers(sourceFile, project, root, candidateNames, aliasNames, 
         ts,
         symbolCache,
       );
+      const start = safeStart(node);
+      const location = originalCallLocation(sourceFile, sourcePath, start);
+      const relativeSourcePath = relativePath(root, sourcePath);
+      const source = moduleEdgeSource(
+        node,
+        sourcePath,
+        relativeSourcePath,
+        candidateIndex,
+        ts,
+      ) || (isVue ? `file::${relativeSourcePath}` : undefined);
+      if (!source) {
+        ts.forEachChild(node, visit);
+        return;
+      }
+      const mode = isTypeReference(node, ts) ? 'type' : 'runtime';
+      for (const target of resolution.ids) {
+        edges.push({
+          source,
+          target,
+          kind: 'reference',
+          path: relativeSourcePath,
+          start,
+          line: location.line,
+          column: location.column,
+          confidence: resolution.ids.length === 1 ? 'exact' : 'potential',
+          mode,
+          provenance: isVue ? 'volar' : 'typescript',
+        });
+      }
+      for (const file of resolution.files || []) {
+        if (file.path === sourcePath) {
+          continue;
+        }
+        edges.push({
+          source,
+          target: file.id,
+          kind: 'reference',
+          path: relativeSourcePath,
+          start,
+          line: location.line,
+          column: location.column,
+          confidence: 'exact',
+          mode,
+          provenance: isVue ? 'volar' : 'typescript',
+        });
+      }
       if (isMethodReference(node, ts)
         && (!resolution.matched || !resolution.implementation)) {
         for (const candidate of methodCandidatesByName.get(name) || []) {
           if (!usedIds.has(candidate.id)) {
-            unknownIds.add(candidate.id);
+            markUnknown(unknownIds, unknownReasons, candidate.id, 'runtime-dispatch-ambiguous');
           }
         }
       }
@@ -432,6 +538,18 @@ function isMethodReference(node, ts) {
   return ts.isPropertyAccessExpression(parent) && parent.name === node;
 }
 
+function isCallTarget(node, ts) {
+  const parent = node.parent;
+  if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
+    return parent.expression === node;
+  }
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+    const call = parent.parent;
+    return (ts.isCallExpression(call) || ts.isNewExpression(call)) && call.expression === parent;
+  }
+  return false;
+}
+
 function isSelfReference(node, symbol, ts) {
   const owner = callableOwner(node, ts);
   if (!owner) {
@@ -468,6 +586,12 @@ function callableOwner(node, ts) {
 
 function resolveSymbol(checker, identifier, ts) {
   let symbol = checker.getSymbolAtLocation(identifier);
+  if (symbol
+    && identifier.parent
+    && ts.isShorthandPropertyAssignment(identifier.parent)
+    && checker.getShorthandAssignmentValueSymbol) {
+    symbol = checker.getShorthandAssignmentValueSymbol(identifier.parent) || symbol;
+  }
   if (symbol && symbol.flags & ts.SymbolFlags.Alias) {
     try {
       symbol = checker.getAliasedSymbol(symbol);
@@ -478,11 +602,61 @@ function resolveSymbol(checker, identifier, ts) {
   return symbol;
 }
 
-function scanModuleEdges(sourceFile, project, root, fileCandidates, candidateIndex, fileIdsByPath, symbolCache, usedIds, unknownIds, edges, diagnostics) {
+function scanModuleEdges(sourceFile, project, root, fileCandidates, candidateIndex, fileIdsByPath, symbolCache, usedIds, unknownIds, unknownReasons, boundarySources, edges, diagnostics) {
   const { ts, checker, options } = project;
   function visit(node) {
+    const exportAssignment = commonJsExportAssignment(node, ts);
+    if (exportAssignment) {
+      if (exportAssignment.dynamic) {
+        markRuntimeBoundary(node, sourceFile, root, fileCandidates, candidateIndex, unknownIds, unknownReasons, boundarySources, ts, 'commonjs-export-incomplete');
+        diagnostics.push(diagnostic(
+          'commonjs-export-incomplete',
+          'CommonJS export target is not statically resolvable',
+          relativePath(root, sourceFile.fileName),
+          sourceFile.getLineAndCharacterOfPosition(safeStart(node)).line + 1,
+        ));
+      } else {
+        recordCommonJsExportEdges(
+          node,
+          exportAssignment.values,
+          sourceFile,
+          root,
+          checker,
+          candidateIndex,
+          fileIdsByPath,
+          ts,
+          symbolCache,
+          edges,
+        );
+      }
+    }
     if (node.kind === ts.SyntaxKind.ImportDeclaration) {
-      markModuleSpecifier(node.moduleSpecifier, sourceFile.fileName, root, fileCandidates, usedIds, options);
+      if (isVirtualOrLoaderSpecifier(node.moduleSpecifier.text)) {
+        markRuntimeBoundary(node, sourceFile, root, fileCandidates, candidateIndex, unknownIds, unknownReasons, boundarySources, ts, 'virtual-module-boundary');
+        diagnostics.push(diagnostic(
+          'virtual-module-boundary',
+          `module ${JSON.stringify(node.moduleSpecifier.text)} is resolved by an unsupported virtual module or loader`,
+          relativePath(root, sourceFile.fileName),
+          sourceFile.getLineAndCharacterOfPosition(safeStart(node)).line + 1,
+        ));
+      }
+      else {
+        markModuleSpecifier(
+          node.moduleSpecifier,
+          sourceFile,
+          root,
+          fileCandidates,
+          usedIds,
+          options,
+          candidateIndex,
+          unknownIds,
+          unknownReasons,
+          ts,
+          edges,
+          importDeclarationMode(node, ts),
+          'import',
+        );
+      }
     } else if (node.kind === ts.SyntaxKind.ExportDeclaration) {
       // Re-exports are deliberately not file-consumer evidence.
     } else if (node.kind === ts.SyntaxKind.CallExpression && isImportMetaGlob(node, ts)) {
@@ -495,11 +669,26 @@ function scanModuleEdges(sourceFile, project, root, fileCandidates, candidateInd
           options,
           fileCandidates,
           usedIds,
+          candidateIndex,
+          unknownIds,
+          edges,
+          sourceFile,
+          node,
+          ts,
         );
       } else {
-        for (const candidate of fileCandidates) {
-          unknownIds.add(candidate.id);
-        }
+        markRuntimeBoundary(
+          node,
+          sourceFile,
+          root,
+          fileCandidates,
+          candidateIndex,
+          unknownIds,
+          unknownReasons,
+          boundarySources,
+          ts,
+          'glob-boundary',
+        );
         diagnostics.push(diagnostic(
           'import-meta-glob',
           'import.meta.glob pattern is unresolved',
@@ -509,13 +698,64 @@ function scanModuleEdges(sourceFile, project, root, fileCandidates, candidateInd
       }
     } else if (node.kind === ts.SyntaxKind.ImportEqualsDeclaration) {
       if (node.moduleReference && node.moduleReference.expression) {
-        markModuleSpecifier(node.moduleReference.expression, sourceFile.fileName, root, fileCandidates, usedIds, options);
+        markModuleSpecifier(
+          node.moduleReference.expression,
+          sourceFile,
+          root,
+          fileCandidates,
+          usedIds,
+          options,
+          candidateIndex,
+          unknownIds,
+          unknownReasons,
+          ts,
+          edges,
+          node.isTypeOnly ? 'type' : 'runtime',
+          'import',
+        );
       }
     } else if (node.kind === ts.SyntaxKind.CallExpression && isImportCall(node, ts)) {
       const argument = node.arguments[0];
       if (argument && ts.isStringLiteralLike(argument)) {
-        markModuleSpecifier(argument, sourceFile.fileName, root, fileCandidates, usedIds, options);
+        if (isVirtualOrLoaderSpecifier(argument.text)) {
+          markRuntimeBoundary(node, sourceFile, root, fileCandidates, candidateIndex, unknownIds, unknownReasons, boundarySources, ts, 'virtual-module-boundary');
+          diagnostics.push(diagnostic(
+            'virtual-module-boundary',
+            `module ${JSON.stringify(argument.text)} is resolved by an unsupported virtual module or loader`,
+            relativePath(root, sourceFile.fileName),
+            sourceFile.getLineAndCharacterOfPosition(safeStart(node)).line + 1,
+          ));
+        }
+        else {
+          markModuleSpecifier(
+            argument,
+            sourceFile,
+            root,
+            fileCandidates,
+            usedIds,
+            options,
+            candidateIndex,
+            unknownIds,
+            unknownReasons,
+            ts,
+            edges,
+            'runtime',
+            'dynamic-import',
+          );
+        }
       } else if (argument) {
+        markRuntimeBoundary(
+          node,
+          sourceFile,
+          root,
+          fileCandidates,
+          candidateIndex,
+          unknownIds,
+          unknownReasons,
+          boundarySources,
+          ts,
+          'dynamic-import-boundary',
+        );
         diagnostics.push(diagnostic(
           'dynamic-import',
           'dynamic import path is unresolved',
@@ -537,10 +777,54 @@ function scanModuleEdges(sourceFile, project, root, fileCandidates, candidateInd
     } else if (node.kind === ts.SyntaxKind.CallExpression && isRequireCall(node, ts)) {
       const argument = node.arguments[0];
       if (argument && ts.isStringLiteralLike(argument)) {
-        markModuleSpecifier(argument, sourceFile.fileName, root, fileCandidates, usedIds, options);
+        if (isVirtualOrLoaderSpecifier(argument.text)) {
+          markRuntimeBoundary(node, sourceFile, root, fileCandidates, candidateIndex, unknownIds, unknownReasons, boundarySources, ts, 'virtual-module-boundary');
+          diagnostics.push(diagnostic(
+            'virtual-module-boundary',
+            `module ${JSON.stringify(argument.text)} is resolved by an unsupported virtual module or loader`,
+            relativePath(root, sourceFile.fileName),
+            sourceFile.getLineAndCharacterOfPosition(safeStart(node)).line + 1,
+          ));
+        }
+        else {
+          markModuleSpecifier(
+            argument,
+            sourceFile,
+            root,
+            fileCandidates,
+            usedIds,
+            options,
+            candidateIndex,
+            unknownIds,
+            unknownReasons,
+            ts,
+            edges,
+            'runtime',
+            'require',
+          );
+        }
+      } else {
+        markRuntimeBoundary(
+          node,
+          sourceFile,
+          root,
+          fileCandidates,
+          candidateIndex,
+          unknownIds,
+          unknownReasons,
+          boundarySources,
+          ts,
+          'dynamic-require-boundary',
+        );
+        diagnostics.push(diagnostic(
+          'dynamic-require-boundary',
+          'CommonJS require path is unresolved',
+          relativePath(root, sourceFile.fileName),
+          sourceFile.getLineAndCharacterOfPosition(safeStart(node)).line + 1,
+        ));
       }
     }
-    if (ts.isCallExpression(node) && !isImportCall(node, ts)) {
+    if (ts.isCallExpression(node) && !isImportCall(node, ts) && !isInCommonJsExport(node, ts)) {
       recordCallEdge(
         node,
         sourceFile,
@@ -601,8 +885,10 @@ function recordDirectedEdge(operation, kind, sourceFile, root, checker, candidat
     return;
   }
   const relativeSourcePath = relativePath(root, sourcePath);
-  const source = callerCandidateId(operation, sourcePath, candidateIndex, ts)
-    || `file::${relativeSourcePath}`;
+  const source = moduleEdgeSource(operation, sourcePath, relativeSourcePath, candidateIndex, ts);
+  if (!source) {
+    return;
+  }
   const start = safeStart(operation);
   const location = originalCallLocation(sourceFile, sourcePath, start);
   for (const target of resolution.ids) {
@@ -615,7 +901,51 @@ function recordDirectedEdge(operation, kind, sourceFile, root, checker, candidat
       line: location.line,
       column: location.column,
       confidence: resolution.ids.length === 1 ? 'exact' : 'potential',
+      mode: 'runtime',
+      provenance: 'typescript',
     });
+  }
+}
+
+function recordCommonJsExportEdges(assignment, values, sourceFile, root, checker, candidateIndex, fileIdsByPath, ts, symbolCache, edges) {
+  if (!values.length) {
+    return;
+  }
+  const sourcePath = sourcePathForCandidate(sourceFile.fileName);
+  const relativeSourcePath = relativePath(root, sourcePath);
+  const source = callerCandidateId(assignment, sourcePath, candidateIndex, ts)
+    || `file::${relativeSourcePath}`;
+  const start = safeStart(assignment);
+  const location = originalCallLocation(sourceFile, sourcePath, start);
+  for (const value of values) {
+    const symbol = resolveSymbol(checker, value, ts);
+    if (!symbol) {
+      continue;
+    }
+    const resolution = markSymbol(
+      symbol,
+      root,
+      sourcePath,
+      candidateIndex,
+      fileIdsByPath,
+      new Set(),
+      ts,
+      symbolCache,
+    );
+    for (const target of resolution.ids) {
+      edges.push({
+        source,
+        target,
+        kind: 'commonjs-export',
+        path: relativeSourcePath,
+        start,
+        line: location.line,
+        column: location.column,
+        confidence: resolution.ids.length === 1 ? 'exact' : 'potential',
+        mode: 'runtime',
+        provenance: 'typescript',
+      });
+    }
   }
 }
 
@@ -640,18 +970,169 @@ function callTargetNode(call, ts) {
   return expression;
 }
 
+function commonJsExportAssignment(node, ts) {
+  if (!ts.isBinaryExpression(node)
+    || node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) {
+    return undefined;
+  }
+  const target = commonJsExportTarget(node.left, ts);
+  if (!target) {
+    return undefined;
+  }
+  const values = collectCommonJsExportValues(node.right, ts);
+  return {
+    dynamic: target.dynamic || values.dynamic,
+    values: target.dynamic || values.dynamic ? [] : values.values,
+  };
+}
+
+function commonJsExportTarget(node, ts) {
+  if (ts.isIdentifier(node) && node.text === 'exports') {
+    return { dynamic: false };
+  }
+  if (isCommonJsExportBase(node, ts)) {
+    return { dynamic: false };
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    if (isCommonJsExportBase(node.expression, ts)) {
+      return { dynamic: false };
+    }
+    return undefined;
+  }
+  if (ts.isElementAccessExpression(node) && isCommonJsExportBase(node.expression, ts)) {
+    return {
+      dynamic: !node.argumentExpression || !ts.isStringLiteralLike(node.argumentExpression),
+    };
+  }
+  return undefined;
+}
+
+function isCommonJsExportBase(node, ts) {
+  if (ts.isIdentifier(node) && node.text === 'exports') {
+    return true;
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    return ts.isIdentifier(node.expression)
+      && node.expression.text === 'module'
+      && node.name.text === 'exports';
+  }
+  if (ts.isElementAccessExpression(node)) {
+    return ts.isIdentifier(node.expression)
+      && node.expression.text === 'module'
+      && node.argumentExpression
+      && ts.isStringLiteralLike(node.argumentExpression)
+      && node.argumentExpression.text === 'exports';
+  }
+  return false;
+}
+
+function collectCommonJsExportValues(node, ts) {
+  if (ts.isParenthesizedExpression(node)
+    || ts.isAsExpression(node)
+    || ts.isTypeAssertionExpression(node)
+    || (ts.isSatisfiesExpression && ts.isSatisfiesExpression(node))) {
+    return collectCommonJsExportValues(node.expression, ts);
+  }
+  if (ts.isIdentifier(node)
+    || ts.isPrivateIdentifier(node)
+    || (ts.isPropertyAccessExpression(node) && !node.name.text.startsWith('#'))
+    || (ts.isElementAccessExpression(node)
+      && node.argumentExpression
+      && ts.isStringLiteralLike(node.argumentExpression))) {
+    return { dynamic: false, values: [node] };
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    const values = [];
+    let dynamic = false;
+    for (const property of node.properties) {
+      if (ts.isSpreadAssignment(property)) {
+        const spread = collectCommonJsExportValues(property.expression, ts);
+        dynamic ||= spread.dynamic;
+        values.push(...spread.values);
+        continue;
+      }
+      if (ts.isMethodDeclaration(property)
+        || ts.isGetAccessorDeclaration(property)
+        || ts.isSetAccessorDeclaration(property)) {
+        if (property.name && property.name.kind !== ts.SyntaxKind.ComputedPropertyName) {
+          values.push(property.name);
+        } else {
+          dynamic = true;
+        }
+        continue;
+      }
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) {
+        continue;
+      }
+      if (property.name && property.name.kind === ts.SyntaxKind.ComputedPropertyName) {
+        dynamic = true;
+        continue;
+      }
+      if (ts.isShorthandPropertyAssignment(property)) {
+        values.push(property.name);
+        continue;
+      }
+      const value = collectCommonJsExportValues(property.initializer, ts);
+      dynamic ||= value.dynamic;
+      values.push(...value.values);
+    }
+    return { dynamic, values };
+  }
+  if (ts.isArrowFunction(node)
+    || ts.isFunctionExpression(node)
+    || ts.isClassExpression(node)
+    || node.kind === ts.SyntaxKind.NullKeyword
+    || node.kind === ts.SyntaxKind.TrueKeyword
+    || node.kind === ts.SyntaxKind.FalseKeyword
+    || ts.isStringLiteralLike(node)
+    || ts.isNumericLiteral(node)) {
+    return { dynamic: false, values: [] };
+  }
+  return { dynamic: true, values: [] };
+}
+
+function isInCommonJsExport(node, ts) {
+  let current = node.parent;
+  while (current) {
+    if (ts.isBinaryExpression(current)
+      && current.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && commonJsExportTarget(current.left, ts)) {
+      return true;
+    }
+    if (ts.isSourceFile(current)) {
+      return false;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
 function callerCandidateId(call, sourcePath, candidateIndex, ts) {
   let current = call.parent;
   while (current && !ts.isSourceFile(current)) {
     let declaration;
     if (ts.isFunctionDeclaration(current)
+      || ts.isClassDeclaration(current)
       || ts.isMethodDeclaration(current)
       || ts.isGetAccessorDeclaration(current)
       || ts.isSetAccessorDeclaration(current)
       || ts.isConstructorDeclaration(current)) {
       declaration = current;
     } else if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
-      declaration = ts.isVariableDeclaration(current.parent) ? current.parent : undefined;
+      if (ts.isVariableDeclaration(current.parent)) {
+        declaration = current.parent;
+      } else {
+        let container = current.parent;
+        while (container
+          && !ts.isSourceFile(container)
+          && !ts.isFunctionLike(container)) {
+          if (ts.isVariableDeclaration(container)) {
+            declaration = container;
+            break;
+          }
+          container = container.parent;
+        }
+      }
     }
     if (declaration) {
       const name = ts.isConstructorDeclaration(declaration)
@@ -681,6 +1162,8 @@ function uniqueEdges(edges) {
     || left.target.localeCompare(right.target)
     || left.kind.localeCompare(right.kind)
     || left.path.localeCompare(right.path)
+    || left.mode.localeCompare(right.mode)
+    || left.provenance.localeCompare(right.provenance)
     || left.start - right.start
   ));
   return sorted.filter((edge, index) => index === 0
@@ -688,6 +1171,8 @@ function uniqueEdges(edges) {
     || edge.target !== sorted[index - 1].target
     || edge.kind !== sorted[index - 1].kind
     || edge.path !== sorted[index - 1].path
+    || edge.mode !== sorted[index - 1].mode
+    || edge.provenance !== sorted[index - 1].provenance
     || edge.start !== sorted[index - 1].start);
 }
 
@@ -811,8 +1296,11 @@ function markCandidatesForDeclaration(candidateIndex, declarationPath, declarati
     return [];
   }
   const exact = matches.filter(candidate => startMatches(candidate.start, declaration));
+  const topLevel = matches.filter(candidate => candidate.topLevel);
   const selected = exact.length === 1
     ? exact
+    : isVue && topLevel.length === 1
+      ? topLevel
     : isVue && matches.length === 1
       ? matches
       : !hasStart(matches) && matches.length === 1
@@ -840,20 +1328,89 @@ function candidateKey(candidatePath, name) {
   return `${candidatePath}\0${name}`;
 }
 
-function markModuleSpecifier(specifier, containingFile, root, fileCandidates, usedIds, options) {
+function markModuleSpecifier(specifier, sourceFile, root, fileCandidates, usedIds, options, candidateIndex, unknownIds, unknownReasons, ts, edges, mode, kind) {
   if (!specifier || !specifier.text) {
     return;
   }
-  const resolved = resolveLocalModule(specifier.text, containingFile, root, options);
+  const sourcePath = sourcePathForCandidate(sourceFile.fileName);
+  const resolved = resolveLocalModule(specifier.text, sourcePath, root, options);
   if (!resolved) {
     return;
   }
   const normalized = normalizePath(resolved);
+  if (mode === 'type') {
+    return;
+  }
+  const relativeSourcePath = relativePath(root, sourcePath);
+  const start = safeStart(specifier);
+  const location = originalCallLocation(sourceFile, sourcePath, start);
+  const source = moduleEdgeSource(specifier, sourcePath, relativeSourcePath, candidateIndex, ts);
   for (const candidate of fileCandidates) {
     if (candidate.path === normalized) {
+      if (!source) {
+        markUnknown(unknownIds, unknownReasons, candidate.id, 'runtime-dispatch-ambiguous');
+        for (const target of candidateIndex.byPath.get(normalized) || []) {
+          markUnknown(unknownIds, unknownReasons, target.id, 'runtime-dispatch-ambiguous');
+        }
+        continue;
+      }
       usedIds.add(candidate.id);
+      edges.push({
+        source,
+        target: candidate.id,
+        kind,
+        path: relativeSourcePath,
+        start,
+        line: location.line,
+        column: location.column,
+        confidence: 'exact',
+        mode,
+        provenance: 'typescript',
+      });
     }
   }
+}
+
+function moduleEdgeSource(node, sourcePath, relativeSourcePath, candidateIndex, ts) {
+  let current = node.parent;
+  while (current && !ts.isSourceFile(current)) {
+    if (ts.isPropertyDeclaration(current) && !current.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.StaticKeyword)) {
+      return undefined;
+    }
+    current = current.parent;
+  }
+  const candidate = callerCandidateId(node, sourcePath, candidateIndex, ts);
+  if (candidate) {
+    return candidate;
+  }
+  current = node.parent;
+  while (current && !ts.isSourceFile(current)) {
+    if (ts.isFunctionLike(current)
+      || ts.isClassLike(current)
+      || (ts.isClassStaticBlockDeclaration && ts.isClassStaticBlockDeclaration(current))) {
+      return undefined;
+    }
+    current = current.parent;
+  }
+  return `file::${relativeSourcePath}`;
+}
+
+function importDeclarationMode(node, ts) {
+  const clause = node.importClause;
+  if (!clause) {
+    return 'runtime';
+  }
+  if (clause.isTypeOnly) {
+    return 'type';
+  }
+  const bindings = clause.namedBindings;
+  return !clause.name
+    && bindings
+    && ts.isNamedImports(bindings)
+    && bindings.elements.length > 0
+    && bindings.elements.every(element => element.isTypeOnly)
+    ? 'type'
+    : 'runtime';
 }
 
 function resolveLocalModule(specifier, containingFile, root, options) {
@@ -898,13 +1455,30 @@ function findModuleFile(base) {
 }
 
 function isReferenceIdentifier(node, ts) {
-  if (isDeclarationName(node, ts) || isInImportOrExport(node, ts) || isPropertyName(node, ts)) {
+  if (isDeclarationName(node, ts)
+    || isInImportOrExport(node, ts)
+    || isInCommonJsExport(node, ts)
+    || isPropertyName(node, ts)) {
     return false;
   }
   if (node.text.startsWith('__VLS_')) {
     return false;
   }
   return true;
+}
+
+function isTypeReference(node, ts) {
+  let current = node.parent;
+  while (current) {
+    if (ts.isTypeNode(current)) {
+      return true;
+    }
+    if (ts.isSourceFile(current)) {
+      return false;
+    }
+    current = current.parent;
+  }
+  return false;
 }
 
 function isDeclarationName(node, ts) {
@@ -995,18 +1569,24 @@ function normalizeCandidates(root, rawCandidates) {
   return Array.isArray(rawCandidates)
     ? rawCandidates
       .filter(candidate => candidate && candidate.id !== undefined && candidate.path && candidate.name)
+      .filter(candidate => !isDeclarationFile(candidate.path))
       .map(candidate => ({
         id: String(candidate.id),
         path: normalizePath(resolveFile(root, candidate.path)),
         name: String(candidate.name),
         kind: candidate.kind ?? candidate.nodeKind,
         start: candidate.start,
+        topLevel: Boolean(candidate.topLevel),
       }))
     : [];
 }
 
 function isLikelyFileCandidate(candidate) {
   return candidate.kind === 'file';
+}
+
+function isDeclarationFile(file) {
+  return /\.d\.(?:[cm]?[jt]sx?)$/i.test(String(file));
 }
 
 function sourcePathForCandidate(file) {
@@ -1016,7 +1596,7 @@ function sourcePathForCandidate(file) {
 
 function loadCompilerSfc(root) {
   const rootRequire = createRequire(path.join(root, 'package.json'));
-  for (const packageName of ['@vue/compiler-sfc', 'vue/compiler-sfc']) {
+  for (const packageName of ['@vue/compiler-sfc', 'vue-template-compiler', 'vue/compiler-sfc']) {
     try {
       return rootRequire(packageName);
     } catch {
@@ -1136,6 +1716,13 @@ function isRequireCall(node, ts) {
   return ts.isIdentifier(node.expression) && node.expression.text === 'require';
 }
 
+function isVirtualOrLoaderSpecifier(specifier) {
+  return typeof specifier === 'string'
+    && (specifier.startsWith('virtual:')
+      || specifier.startsWith('\0')
+      || specifier.includes('?'));
+}
+
 function isImportMetaGlob(node, ts) {
   if (!ts.isPropertyAccessExpression(node.expression) || node.expression.name.text !== 'glob') {
     return false;
@@ -1146,13 +1733,50 @@ function isImportMetaGlob(node, ts) {
     && receiver.name.text === 'meta';
 }
 
-function markGlobFiles(pattern, containingFile, root, options, fileCandidates, usedIds) {
+function markGlobFiles(pattern, containingFile, root, options, fileCandidates, usedIds, candidateIndex, unknownIds, edges, sourceFile, globCall, ts) {
   const patterns = resolveGlobPatterns(pattern, containingFile, root, options);
+  const sourcePath = sourcePathForCandidate(sourceFile.fileName);
+  const relativeSourcePath = relativePath(root, sourcePath);
+  const start = safeStart(globCall);
+  const location = originalCallLocation(sourceFile, sourcePath, start);
+  const source = moduleEdgeSource(globCall, sourcePath, relativeSourcePath, candidateIndex, ts);
+  if (!source) {
+    return;
+  }
   for (const candidate of fileCandidates) {
     if (patterns.some(value => globMatch(value, candidate.path))) {
       usedIds.add(candidate.id);
+      edges.push({
+        source,
+        target: candidate.id,
+        kind: 'dynamic-import',
+        path: relativeSourcePath,
+        start,
+        line: location.line,
+        column: location.column,
+        confidence: 'potential',
+        mode: 'runtime',
+        provenance: 'typescript',
+      });
     }
   }
+}
+
+function markUnknown(unknownIds, unknownReasons, id, reason) {
+  unknownIds.add(id);
+  if (!unknownReasons.has(id)) {
+    unknownReasons.set(id, reason);
+  }
+}
+
+function markRuntimeBoundary(node, sourceFile, root, fileCandidates, candidateIndex, unknownIds, unknownReasons, boundarySources, ts, reason) {
+  const sourcePath = sourcePathForCandidate(sourceFile.fileName);
+  const relativeSourcePath = relativePath(root, sourcePath);
+  const source = moduleEdgeSource(node, sourcePath, relativeSourcePath, candidateIndex, ts);
+  if (!source) {
+    return;
+  }
+  boundarySources.push({ source, reason });
 }
 
 function resolveGlobPatterns(specifier, containingFile, root, options) {

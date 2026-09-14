@@ -13,7 +13,7 @@ Covered cases:
 - write-only variables remain unused;
 - test-only consumers do not count;
 - same-name declarations stay distinct by path and position;
-- entrypoints, declaration files, and underscore-prefixed declarations are ignored;
+- entrypoint files are ignored, declaration files are type-consumer-only, and underscore-prefixed declarations remain candidates;
 - dynamic module exports without an exact runtime target remain unknown.
 
 The test removes Node.js from `PATH` so this fixture exercises the deterministic Oxc fallback. `../unused-semantic-golden` covers TypeScript/Volar and Vue template semantics when workspace Node.js dependencies are installed.
