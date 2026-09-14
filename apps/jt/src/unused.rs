@@ -1,10 +1,11 @@
 mod call_graph;
 mod oxc;
+mod policy;
 mod sidecar;
 
 pub use call_graph::CallGraphArgs;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,13 +15,15 @@ use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use self::oxc::SourceBlock;
 use self::sidecar::{ReferenceCandidate, ReferenceStart};
 
 const SOURCE_EXTENSIONS: &[&str] = &["cjs", "js", "jsx", "mjs", "ts", "tsx", "mts", "cts", "vue"];
 const CONFIG_PATH: &str = ".nlab/unused.config.json";
-const CONFIG_VERSION: u8 = 1;
+const CONFIG_VERSION: u8 = 2;
+const LEGACY_CONFIG_VERSION: u8 = 1;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -28,6 +31,8 @@ struct ConfigFile {
     version: u8,
     #[serde(default)]
     roots: Vec<String>,
+    #[serde(default)]
+    entrypoints: Option<Vec<String>>,
     #[serde(default)]
     exclude: Vec<String>,
 }
@@ -40,6 +45,7 @@ struct ScanRoot {
 
 struct ScanConfig {
     roots: Vec<ScanRoot>,
+    entrypoints: BTreeSet<String>,
     exclude: Gitignore,
     exclude_patterns: Vec<String>,
 }
@@ -52,7 +58,7 @@ pub struct UnusedArgs {
     /// Finding kinds; default: function,variable,file
     #[arg(long, value_enum, value_delimiter = ',')]
     kind: Vec<UnusedKind>,
-    /// App: exported code still needs a project consumer. Library: exported API is ignored.
+    /// App: exports need a consumer. Library: package public-entry closure is external API.
     #[arg(long, value_enum, default_value_t = AnalysisMode::App)]
     mode: AnalysisMode,
     /// Print stable machine-readable JSON
@@ -153,6 +159,9 @@ struct Sources {
     contents: HashMap<String, String>,
     vue_files: Vec<String>,
     included_paths: BTreeSet<String>,
+    consumer_paths: BTreeSet<String>,
+    runtime_consumer_roots: BTreeSet<String>,
+    type_consumer_roots: BTreeSet<String>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -162,8 +171,50 @@ struct Evidence {
     scan: oxc::ScanResult,
     covered: BTreeSet<String>,
     semantic_unknown: BTreeSet<String>,
+    semantic_unknown_reasons: BTreeMap<String, String>,
+    semantic_boundaries: BTreeMap<String, String>,
     semantic_edges: Vec<sidecar::SemanticEdge>,
     parse_error_paths: BTreeSet<String>,
+    entrypoints: BTreeSet<String>,
+    public_entrypoints: BTreeSet<String>,
+    entrypoints_complete: bool,
+    framework_incomplete: bool,
+}
+
+struct EntrypointDiscovery {
+    files: BTreeSet<String>,
+    public_files: BTreeSet<String>,
+    complete: bool,
+    framework_incomplete: bool,
+    diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Default)]
+struct CoverageMap {
+    candidates: BTreeMap<String, String>,
+    files: BTreeMap<String, String>,
+}
+
+impl CoverageMap {
+    fn mark_candidate(&mut self, id: &str, reason: &str) {
+        self.candidates
+            .entry(id.to_owned())
+            .or_insert_with(|| reason.to_owned());
+    }
+
+    fn mark_file(&mut self, path: &str, reason: &str) {
+        self.files
+            .entry(path.to_owned())
+            .or_insert_with(|| reason.to_owned());
+    }
+
+    fn candidate_reason(&self, id: &str) -> Option<&str> {
+        self.candidates.get(id).map(String::as_str)
+    }
+
+    fn file_reason(&self, path: &str) -> Option<&str> {
+        self.files.get(path).map(String::as_str)
+    }
 }
 
 pub fn run(args: UnusedArgs) -> u8 {
@@ -193,7 +244,7 @@ pub fn run_call_graph(args: CallGraphArgs) -> u8 {
     call_graph::run(args)
 }
 
-fn build_evidence(path: &Path) -> Result<Evidence, String> {
+fn build_evidence(path: &Path, include_entrypoints: bool) -> Result<Evidence, String> {
     let project = find_project(path)?;
     let mut sources = collect_sources(&project)?;
     let mut scan = oxc::scan(&project.root, &sources.blocks);
@@ -228,6 +279,7 @@ fn build_evidence(path: &Path) -> Result<Evidence, String> {
                 path: candidate.path.clone(),
                 name: candidate.name.clone(),
                 start: ReferenceStart { line, column },
+                top_level: candidate.top_level,
             }
         })
         .collect::<Vec<_>>();
@@ -245,14 +297,17 @@ fn build_evidence(path: &Path) -> Result<Evidence, String> {
                     .unwrap_or(&module.path)
                     .to_owned(),
                 start: ReferenceStart { line: 1, column: 1 },
+                top_level: true,
             }),
     );
 
     let mut covered = BTreeSet::new();
     let mut semantic_unknown = BTreeSet::new();
+    let mut semantic_unknown_reasons = BTreeMap::new();
+    let mut semantic_boundaries = BTreeMap::new();
     let mut semantic_edges = Vec::new();
     if !references.is_empty() {
-        let source_files = sources.included_paths.iter().cloned().collect::<Vec<_>>();
+        let source_files = sources.consumer_paths.iter().cloned().collect::<Vec<_>>();
         match sidecar::references(
             &project.root,
             &sources.vue_files,
@@ -262,6 +317,18 @@ fn build_evidence(path: &Path) -> Result<Evidence, String> {
             Ok(output) => {
                 let used = output.used_ids.into_iter().collect::<BTreeSet<_>>();
                 semantic_unknown.extend(output.unknown_ids);
+                semantic_unknown_reasons.extend(
+                    output
+                        .unknown_reasons
+                        .into_iter()
+                        .map(|item| (item.id, item.reason)),
+                );
+                semantic_boundaries.extend(
+                    output
+                        .boundary_sources
+                        .into_iter()
+                        .map(|item| (item.source, item.reason)),
+                );
                 covered.extend(output.covered_ids);
                 semantic_edges = output.edges;
                 for candidate in &mut scan.candidates {
@@ -300,50 +367,299 @@ fn build_evidence(path: &Path) -> Result<Evidence, String> {
             }),
         }
     }
+    let entrypoints = if include_entrypoints {
+        discover_entrypoints(&project, &sources.included_paths)?
+    } else {
+        EntrypointDiscovery {
+            files: BTreeSet::new(),
+            public_files: BTreeSet::new(),
+            complete: false,
+            framework_incomplete: false,
+            diagnostics: Vec::new(),
+        }
+    };
+    sources.diagnostics.extend(entrypoints.diagnostics);
     Ok(Evidence {
         project,
         sources,
         scan,
         covered,
         semantic_unknown,
+        semantic_unknown_reasons,
+        semantic_boundaries,
         semantic_edges,
         parse_error_paths,
+        entrypoints: entrypoints.files,
+        public_entrypoints: entrypoints.public_files,
+        entrypoints_complete: entrypoints.complete,
+        framework_incomplete: entrypoints.framework_incomplete,
     })
 }
 
+fn build_coverage(evidence: &Evidence) -> CoverageMap {
+    let mut coverage = CoverageMap::default();
+    if evidence.framework_incomplete {
+        for path in &evidence.sources.included_paths {
+            coverage.mark_file(path, "framework-semantic-incomplete");
+        }
+        for candidate in evidence
+            .scan
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.exported)
+        {
+            coverage.mark_candidate(&candidate.id, "framework-semantic-incomplete");
+        }
+    }
+    for path in &evidence.parse_error_paths {
+        coverage.mark_file(path, "parse-errors");
+        for candidate in evidence
+            .scan
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.path == *path)
+        {
+            coverage.mark_candidate(&candidate.id, "parse-errors");
+        }
+    }
+    for path in &evidence.scan.unknown_files {
+        coverage.mark_file(path, "module-resolution-incomplete");
+        for candidate in evidence
+            .scan
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.path == *path)
+        {
+            coverage.mark_candidate(&candidate.id, "module-resolution-incomplete");
+        }
+    }
+    for candidate in &evidence.scan.candidates {
+        if let Some(reason) = candidate.coverage_reason.as_deref() {
+            coverage.mark_candidate(&candidate.id, reason);
+        }
+        if candidate.initializer_effect == "unknown" {
+            coverage.mark_candidate(&candidate.id, "initializer-effect-unknown");
+        }
+        if evidence.semantic_unknown.contains(&candidate.id) {
+            coverage.mark_candidate(
+                &candidate.id,
+                evidence
+                    .semantic_unknown_reasons
+                    .get(&candidate.id)
+                    .map_or("semantic-analysis-incomplete", String::as_str),
+            );
+        } else if candidate.unknown {
+            coverage.mark_candidate(&candidate.id, "semantic-analysis-incomplete");
+        }
+        if candidate.path.ends_with(".vue") && !evidence.covered.contains(&candidate.id) {
+            coverage.mark_candidate(&candidate.id, "vue-semantic-unavailable");
+        }
+        if evidence.scan.dynamic_unknown.contains(&candidate.id) {
+            coverage.mark_candidate(&candidate.id, "dynamic-import-boundary");
+        }
+    }
+    for id in &evidence.semantic_unknown {
+        if let Some(path) = id.strip_prefix("file::") {
+            coverage.mark_file(
+                path,
+                evidence
+                    .semantic_unknown_reasons
+                    .get(id)
+                    .map_or("semantic-analysis-incomplete", String::as_str),
+            );
+        }
+    }
+    for module in &evidence.scan.modules {
+        if module.path.ends_with(".vue")
+            && evidence.sources.included_paths.contains(&module.path)
+            && !evidence.covered.contains(&format!("file::{}", module.path))
+        {
+            coverage.mark_file(&module.path, "vue-semantic-unavailable");
+        }
+    }
+    coverage
+}
+
+fn library_public_surface(
+    scan: &oxc::ScanResult,
+    semantic_edges: &[sidecar::SemanticEdge],
+    entrypoints: &BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
+    let mut files = entrypoints.clone();
+    let mut queue = entrypoints.iter().cloned().collect::<VecDeque<_>>();
+    let mut reexports = HashMap::<String, Vec<String>>::new();
+    for edge in &scan.edges {
+        if !matches!(edge.kind.as_str(), "reexport" | "re-export" | "reexports") {
+            continue;
+        }
+        let (Some(source), Some(target)) = (
+            edge.source.strip_prefix("file::"),
+            edge.target.strip_prefix("file::"),
+        ) else {
+            continue;
+        };
+        reexports
+            .entry(source.to_owned())
+            .or_default()
+            .push(target.to_owned());
+    }
+    while let Some(source) = queue.pop_front() {
+        for target in reexports.get(&source).into_iter().flatten() {
+            if files.insert(target.clone()) {
+                queue.push_back(target.clone());
+            }
+        }
+    }
+
+    let mut candidates = entrypoints
+        .iter()
+        .filter_map(|path| scan.public_exports.get(path))
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let candidate_ids = scan
+        .candidates
+        .iter()
+        .map(|candidate| candidate.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let owner_ids = scan
+        .execution_owners
+        .iter()
+        .map(|owner| owner.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut owners = BTreeSet::new();
+    for edge in &scan.edges {
+        if edge.kind != "commonjs-export"
+            || !edge
+                .source
+                .strip_prefix("file::")
+                .is_some_and(|path| files.contains(path))
+        {
+            continue;
+        }
+        if candidate_ids.contains(edge.target.as_str()) {
+            candidates.insert(edge.target.clone());
+        } else if owner_ids.contains(edge.target.as_str()) {
+            owners.insert(edge.target.clone());
+        }
+    }
+    for edge in semantic_edges {
+        if edge.kind == "commonjs-export"
+            && edge
+                .source
+                .strip_prefix("file::")
+                .is_some_and(|path| files.contains(path))
+        {
+            candidates.insert(edge.target.clone());
+        }
+    }
+    (files, candidates, owners)
+}
+
 fn analyze(args: &UnusedArgs) -> Result<Report, String> {
+    let evidence = build_evidence(&args.path, true)?;
+    let mut coverage = build_coverage(&evidence);
     let Evidence {
         project,
         mut sources,
         scan,
-        covered,
-        semantic_unknown,
-        parse_error_paths,
+        semantic_edges,
+        semantic_boundaries,
+        entrypoints,
+        public_entrypoints,
+        entrypoints_complete,
         ..
-    } = build_evidence(&args.path)?;
+    } = evidence;
+
+    let (public_files, public_candidates, public_owners) = if args.mode == AnalysisMode::Library {
+        library_public_surface(&scan, &semantic_edges, &public_entrypoints)
+    } else {
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new())
+    };
+    let (analysis_roots, analysis_entrypoints_complete) = if args.mode == AnalysisMode::Library {
+        let mut roots = public_entrypoints.clone();
+        roots.extend(public_candidates.iter().cloned());
+        roots.extend(public_owners.iter().cloned());
+        (roots, !public_entrypoints.is_empty())
+    } else {
+        (entrypoints.clone(), entrypoints_complete)
+    };
+    if args.mode == AnalysisMode::Library && public_entrypoints.is_empty() {
+        sources.diagnostics.push(Diagnostic {
+            code: "entrypoint-coverage-incomplete".to_owned(),
+            path: Some("package.json".to_owned()),
+            line: None,
+            message: "cannot prove a package public entrypoint for library analysis".to_owned(),
+        });
+    }
+    if !analysis_entrypoints_complete {
+        for path in &sources.included_paths {
+            coverage.mark_file(path, "entrypoint-coverage-incomplete");
+        }
+        for candidate in scan
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.exported)
+        {
+            coverage.mark_candidate(&candidate.id, "entrypoint-coverage-incomplete");
+        }
+    }
+    let reachability = policy::compute(
+        &scan,
+        &semantic_edges,
+        &analysis_roots,
+        analysis_entrypoints_complete,
+        &sources.runtime_consumer_roots,
+        &sources.type_consumer_roots,
+    );
+    for (source, reason) in scan.coverage_boundaries.iter().chain(&semantic_boundaries) {
+        let reachable = source
+            .strip_prefix("file::")
+            .is_some_and(|path| reachability.runtime_used_files.contains(path))
+            || reachability.active_runtime_owners.contains(source);
+        if reachable {
+            for path in &sources.included_paths {
+                coverage.mark_file(path, reason);
+            }
+            for candidate in &scan.candidates {
+                coverage.mark_candidate(&candidate.id, reason);
+            }
+        }
+    }
+    for (path, locations) in &scan.file_reexports {
+        let runtime_loaded = locations.iter().any(|location| {
+            !location.type_only && reachability.runtime_used_files.contains(&location.source)
+        });
+        if runtime_loaded
+            && !matches!(
+                scan.file_effects.get(path).map(String::as_str),
+                Some("none" | "side-effect-free" | "side-effectful")
+            )
+        {
+            coverage.mark_file(path, "top-level-side-effect-unknown");
+            for candidate in scan
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.path == *path)
+            {
+                coverage.mark_candidate(&candidate.id, "top-level-side-effect-unknown");
+            }
+        }
+    }
 
     let selected = selected_kinds(&args.kind);
     let scanned_files = scan
         .modules
         .iter()
-        .filter(|module| in_scope(&project, &module.path))
+        .filter(|module| {
+            sources.included_paths.contains(&module.path) && in_scope(&project, &module.path)
+        })
         .count();
     let scanned_symbols = scan
         .candidates
         .iter()
         .filter(|candidate| in_scope(&project, &candidate.path))
         .count();
-    let exported_files = scan
-        .modules
-        .iter()
-        .filter(|module| {
-            module.path.ends_with(".vue")
-                || !module.local_exports.is_empty()
-                || !module.reexports.is_empty()
-                || !module.star_exports.is_empty()
-        })
-        .map(|module| module.path.as_str())
-        .collect::<BTreeSet<_>>();
     let mut findings = Vec::new();
     let mut ignored = Vec::new();
     let mut unknown = Vec::new();
@@ -370,20 +686,7 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
             ignored.push(classified_candidate(candidate, kind, line, column, reason));
             continue;
         }
-        if candidate.local_used {
-            continue;
-        }
-        if candidate.name.starts_with('_') {
-            ignored.push(classified_candidate(
-                candidate,
-                kind,
-                line,
-                column,
-                "intentional-unused",
-            ));
-            continue;
-        }
-        if args.mode == AnalysisMode::Library && candidate.exported {
+        if args.mode == AnalysisMode::Library && public_candidates.contains(&candidate.id) {
             ignored.push(classified_candidate(
                 candidate,
                 kind,
@@ -393,22 +696,11 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
             ));
             continue;
         }
-        let vue_uncovered = candidate.path.ends_with(".vue") && !covered.contains(&candidate.id);
-        let dynamic_boundary = scan.dynamic_unknown.contains(&candidate.id);
-        if candidate.unknown || vue_uncovered || dynamic_boundary {
-            unknown.push(classified_candidate(
-                candidate,
-                kind,
-                line,
-                column,
-                if dynamic_boundary {
-                    "dynamic-import-boundary"
-                } else if vue_uncovered {
-                    "vue-semantic-unavailable"
-                } else {
-                    "semantic-analysis-incomplete"
-                },
-            ));
+        if reachability.used_candidates.contains(&candidate.id) {
+            continue;
+        }
+        if let Some(reason) = coverage.candidate_reason(&candidate.id) {
+            unknown.push(classified_candidate(candidate, kind, line, column, reason));
             continue;
         }
         findings.push(Finding {
@@ -420,7 +712,13 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
             path: candidate.path.clone(),
             line,
             column,
-            reason: if candidate.reexport_locations.is_empty() {
+            reason: if candidate.reexport_locations.is_empty()
+                && !reachability.used_files.contains(&candidate.path)
+            {
+                "unreachable-from-entrypoint"
+            } else if candidate.initializer_effect == "side-effectful" {
+                "unused-binding-side-effectful-initializer"
+            } else if candidate.reexport_locations.is_empty() {
                 "no-inbound-usage"
             } else {
                 "reexport-only"
@@ -432,7 +730,7 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
 
     if selected.contains(&UnusedKind::File) {
         for module in &scan.modules {
-            if !in_scope(&project, &module.path) {
+            if !sources.included_paths.contains(&module.path) || !in_scope(&project, &module.path) {
                 continue;
             }
             let name = Path::new(&module.path)
@@ -441,6 +739,18 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
                 .unwrap_or(&module.path)
                 .to_owned();
             let id = format!("file::{}", module.path);
+            if entrypoints.contains(&module.path) {
+                ignored.push(Classified {
+                    id,
+                    kind: UnusedKind::File,
+                    name,
+                    path: module.path.clone(),
+                    line: 1,
+                    column: 1,
+                    reason: "entrypoint".to_owned(),
+                });
+                continue;
+            }
             if let Some(reason) = structural_ignore(&module.path) {
                 if reason == "test" {
                     continue;
@@ -456,10 +766,7 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
                 });
                 continue;
             }
-            if scan.used_files.contains(&module.path) {
-                continue;
-            }
-            if args.mode == AnalysisMode::Library && exported_files.contains(module.path.as_str()) {
+            if args.mode == AnalysisMode::Library && public_files.contains(&module.path) {
                 ignored.push(Classified {
                     id,
                     kind: UnusedKind::File,
@@ -471,13 +778,10 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
                 });
                 continue;
             }
-            let semantic_unavailable = module.path.ends_with(".vue")
-                && !covered.contains(&format!("file::{}", module.path));
-            let semantic_incomplete = semantic_unknown.contains(&id);
-            if parse_error_paths.contains(&module.path)
-                || semantic_unavailable
-                || semantic_incomplete
-            {
+            if reachability.used_files.contains(&module.path) {
+                continue;
+            }
+            if let Some(reason) = coverage.file_reason(&module.path) {
                 unknown.push(Classified {
                     id,
                     kind: UnusedKind::File,
@@ -485,23 +789,20 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
                     path: module.path.clone(),
                     line: 1,
                     column: 1,
-                    reason: if semantic_incomplete {
-                        "semantic-analysis-incomplete"
-                    } else if semantic_unavailable {
-                        "vue-semantic-unavailable"
-                    } else {
-                        "parse-errors"
-                    }
-                    .to_owned(),
+                    reason: reason.to_owned(),
                 });
                 continue;
             }
-            let reexports = scan
+            let reexport_evidence = scan
                 .file_reexports
                 .get(&module.path)
                 .cloned()
                 .unwrap_or_default();
-            let reexport_only = !reexports.is_empty();
+            let reexport_only = !reexport_evidence.is_empty();
+            let reexports = reexport_evidence
+                .iter()
+                .map(oxc::ReexportLocation::display)
+                .collect();
             findings.push(Finding {
                 id,
                 kind: UnusedKind::File,
@@ -514,7 +815,7 @@ fn analyze(args: &UnusedArgs) -> Result<Report, String> {
                 reason: if reexport_only {
                     "reexport-only"
                 } else {
-                    "no-inbound-usage"
+                    "unreachable-from-entrypoint"
                 }
                 .to_owned(),
                 reexports,
@@ -690,13 +991,19 @@ fn load_config(root: &Path) -> Result<ScanConfig, String> {
         None => ConfigFile {
             version: CONFIG_VERSION,
             roots: Vec::new(),
+            entrypoints: None,
             exclude: Vec::new(),
         },
     };
-    if file.version != CONFIG_VERSION {
+    if !matches!(file.version, LEGACY_CONFIG_VERSION | CONFIG_VERSION) {
         return Err(format!(
-            "unsupported {CONFIG_PATH} version {}; expected {CONFIG_VERSION}",
-            file.version
+            "unsupported {CONFIG_PATH} version {}; expected {LEGACY_CONFIG_VERSION} or {CONFIG_VERSION}",
+            file.version,
+        ));
+    }
+    if file.version == LEGACY_CONFIG_VERSION && file.entrypoints.is_some() {
+        return Err(format!(
+            "invalid {CONFIG_PATH}: entrypoints require version {CONFIG_VERSION}"
         ));
     }
 
@@ -753,10 +1060,322 @@ fn load_config(root: &Path) -> Result<ScanConfig, String> {
     let exclude = builder
         .build()
         .map_err(|error| format!("invalid {CONFIG_PATH}: {error}"))?;
+
+    let mut entrypoints = BTreeSet::new();
+    for value in file.entrypoints.unwrap_or_default() {
+        let relative = config_relative_path(&value, "entrypoints")?;
+        let requested = root.join(&relative);
+        let canonical = fs::canonicalize(&requested)
+            .map_err(|error| format!("invalid {CONFIG_PATH} entrypoint {value:?}: {error}"))?;
+        if !canonical.starts_with(root)
+            || canonical != requested
+            || !canonical.is_file()
+            || !is_source(&canonical)
+        {
+            return Err(format!(
+                "invalid {CONFIG_PATH} entrypoint {value:?}: expected a supported regular non-symlinked source file inside the project root"
+            ));
+        }
+        let relative = canonical
+            .strip_prefix(root)
+            .expect("validated config entrypoint")
+            .to_path_buf();
+        let in_roots = roots.values().any(|scan_root| {
+            scan_root.path.as_os_str().is_empty()
+                || if scan_root.is_file {
+                    relative == scan_root.path
+                } else {
+                    relative == scan_root.path || relative.starts_with(&scan_root.path)
+                }
+        });
+        let display = relative.to_string_lossy().replace('\\', "/");
+        if !in_roots
+            || exclude
+                .matched_path_or_any_parents(&canonical, false)
+                .is_ignore()
+            || is_test_path(&display)
+            || is_declaration_file(&display)
+        {
+            return Err(format!(
+                "invalid {CONFIG_PATH} entrypoint {value:?}: entrypoint must be an included runtime source file"
+            ));
+        }
+        entrypoints.insert(display);
+    }
     Ok(ScanConfig {
         roots: roots.into_values().collect(),
+        entrypoints,
         exclude,
         exclude_patterns,
+    })
+}
+
+fn discover_entrypoints(
+    project: &Project,
+    included_paths: &BTreeSet<String>,
+) -> Result<EntrypointDiscovery, String> {
+    let mut files = project.config.entrypoints.clone();
+    if let Some(path) = files.iter().find(|path| !included_paths.contains(*path)) {
+        return Err(format!(
+            "invalid {CONFIG_PATH} entrypoint {path:?}: file is outside the collected source graph"
+        ));
+    }
+    let mut public_files = BTreeSet::new();
+    let explicit = !files.is_empty();
+    let mut diagnostics = Vec::new();
+    let mut framework_incomplete = false;
+
+    if !explicit {
+        let html_path = project.root.join("index.html");
+        if html_path.is_file() {
+            let html = fs::read_to_string(&html_path)
+                .map_err(|error| format!("cannot read index.html: {error}"))?;
+            for source in html_module_sources(&html) {
+                if let Some(path) = resolve_entrypoint(project, included_paths, source) {
+                    files.insert(path);
+                }
+            }
+        }
+
+        let package_path = project.root.join("package.json");
+        if package_path.is_file() {
+            let source = fs::read_to_string(&package_path)
+                .map_err(|error| format!("cannot read package.json: {error}"))?;
+            match serde_json::from_str::<Value>(&source) {
+                Ok(package) => {
+                    for path in package_runtime_entrypoint_values(&package) {
+                        if let Some(path) = resolve_entrypoint(project, included_paths, path) {
+                            files.insert(path);
+                        }
+                    }
+                    for path in package_public_entrypoint_values(&package) {
+                        if let Some(path) = resolve_entrypoint(project, included_paths, path) {
+                            public_files.insert(path);
+                        }
+                    }
+                    if let Some(scripts) = package.get("scripts").and_then(Value::as_object) {
+                        for (name, value) in scripts {
+                            let Some(command) = value.as_str() else {
+                                continue;
+                            };
+                            if let Some(path) = script_entrypoint(command)
+                                .and_then(|path| resolve_entrypoint(project, included_paths, path))
+                            {
+                                files.insert(path);
+                            } else if matches!(name.as_str(), "start" | "serve") {
+                                diagnostics.push(Diagnostic {
+                                    code: "entrypoint-script-unsupported".to_owned(),
+                                    path: Some("package.json".to_owned()),
+                                    line: None,
+                                    message: format!(
+                                        "cannot statically resolve package script {name:?}; configure entrypoints in {CONFIG_PATH} version {CONFIG_VERSION}"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    if package_uses_framework(&package, "nuxt")
+                        || package_uses_framework(&package, "next")
+                    {
+                        framework_incomplete = true;
+                        diagnostics.push(Diagnostic {
+                            code: "framework-semantic-incomplete".to_owned(),
+                            path: Some("package.json".to_owned()),
+                            line: None,
+                            message: "Nuxt/Next convention and auto-import analysis is deferred; affected global results are unknown"
+                                .to_owned(),
+                        });
+                    }
+                }
+                Err(error) => {
+                    diagnostics.push(Diagnostic {
+                        code: "entrypoint-package-json".to_owned(),
+                        path: Some("package.json".to_owned()),
+                        line: None,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    if explicit {
+        let package_path = project.root.join("package.json");
+        if package_path.is_file() {
+            let source = fs::read_to_string(&package_path)
+                .map_err(|error| format!("cannot read package.json: {error}"))?;
+            if let Ok(package) = serde_json::from_str::<Value>(&source) {
+                for path in package_public_entrypoint_values(&package) {
+                    if let Some(path) = resolve_entrypoint(project, included_paths, path) {
+                        public_files.insert(path);
+                    }
+                }
+                if package_uses_framework(&package, "nuxt")
+                    || package_uses_framework(&package, "next")
+                {
+                    framework_incomplete = true;
+                    diagnostics.push(Diagnostic {
+                        code: "framework-semantic-incomplete".to_owned(),
+                        path: Some("package.json".to_owned()),
+                        line: None,
+                        message: "Nuxt/Next convention and auto-import analysis is deferred; affected global results are unknown"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    if !files.is_empty() {
+        diagnostics.retain(|diagnostic| diagnostic.code != "entrypoint-script-unsupported");
+    }
+    let complete = !files.is_empty();
+    if files.is_empty() {
+        diagnostics.push(Diagnostic {
+            code: "entrypoint-coverage-incomplete".to_owned(),
+            path: None,
+            line: None,
+            message: format!(
+                "cannot prove a project entrypoint; configure entrypoints in {CONFIG_PATH} version {CONFIG_VERSION}"
+            ),
+        });
+    }
+
+    Ok(EntrypointDiscovery {
+        files,
+        public_files,
+        complete,
+        framework_incomplete,
+        diagnostics,
+    })
+}
+
+fn html_module_sources(html: &str) -> Vec<&str> {
+    let mut sources = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<script") {
+        rest = &rest[start + "<script".len()..];
+        let Some(end) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[..end];
+        rest = &rest[end + 1..];
+        if html_attribute(tag, "type") != Some("module") {
+            continue;
+        }
+        if let Some(source) = html_attribute(tag, "src") {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
+fn html_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    for quote in ['"', '\''] {
+        let prefix = format!("{name}={quote}");
+        let Some(start) = tag.find(&prefix).map(|start| start + prefix.len()) else {
+            continue;
+        };
+        let value = &tag[start..];
+        if let Some(end) = value.find(quote) {
+            return Some(&value[..end]);
+        }
+    }
+    None
+}
+
+fn package_runtime_entrypoint_values(package: &Value) -> Vec<&str> {
+    package_values(package, &["bin"])
+}
+
+fn package_public_entrypoint_values(package: &Value) -> Vec<&str> {
+    package_values(package, &["bin", "main", "module", "exports"])
+}
+
+fn package_values<'a>(package: &'a Value, keys: &[&str]) -> Vec<&'a str> {
+    fn collect<'a>(value: &'a Value, output: &mut Vec<&'a str>) {
+        match value {
+            Value::String(value) if !value.contains('*') => output.push(value),
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::Object(values) => {
+                for value in values.values() {
+                    collect(value, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = Vec::new();
+    for key in keys {
+        if let Some(value) = package.get(*key) {
+            collect(value, &mut output);
+        }
+    }
+    output
+}
+
+fn script_entrypoint(command: &str) -> Option<&str> {
+    if command
+        .chars()
+        .any(|character| matches!(character, '|' | '&' | ';' | '$' | '`'))
+    {
+        return None;
+    }
+    let mut words = command.split_whitespace();
+    let launcher = Path::new(words.next()?)
+        .file_name()
+        .and_then(|name| name.to_str())?;
+    if !matches!(
+        launcher,
+        "node" | "bun" | "deno" | "tsx" | "ts-node" | "vite-node"
+    ) {
+        return None;
+    }
+    if launcher == "deno" && words.next()? != "run" {
+        return None;
+    }
+    words.find(|word| !word.starts_with('-'))
+}
+
+fn package_uses_framework(package: &Value, dependency: &str) -> bool {
+    ["dependencies", "devDependencies"]
+        .into_iter()
+        .filter_map(|key| package.get(key).and_then(Value::as_object))
+        .any(|dependencies| dependencies.contains_key(dependency))
+}
+
+fn resolve_entrypoint(
+    project: &Project,
+    included_paths: &BTreeSet<String>,
+    value: &str,
+) -> Option<String> {
+    let value = value
+        .split(['?', '#'])
+        .next()?
+        .trim_start_matches("./")
+        .trim_start_matches('/');
+    let relative = config_relative_path(value, "entrypoint").ok()?;
+    let mut candidates = vec![relative.clone()];
+    if relative.extension().is_none() {
+        for extension in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue"] {
+            candidates.push(relative.with_extension(extension));
+        }
+    }
+    candidates.into_iter().find_map(|relative| {
+        let path = project.root.join(&relative);
+        let display = relative.to_string_lossy().replace('\\', "/");
+        (path.is_file()
+            && is_source(&path)
+            && included_paths.contains(&display)
+            && project.config.includes(&project.root, &relative, false)
+            && !is_test_path(&relative.to_string_lossy())
+            && !is_declaration_file(&relative.to_string_lossy()))
+        .then_some(display)
     })
 }
 
@@ -805,7 +1424,9 @@ fn collect_sources(project: &Project) -> Result<Sources, String> {
     let mut contents = HashMap::new();
     let mut vue_files = Vec::new();
     let mut included_paths = BTreeSet::new();
-    let mut placeholder_paths = Vec::new();
+    let mut consumer_paths = BTreeSet::new();
+    let mut runtime_consumer_roots = BTreeSet::new();
+    let mut type_consumer_roots = BTreeSet::new();
     let mut diagnostics = Vec::new();
     let mut paths = Vec::new();
     let walker = WalkBuilder::new(root)
@@ -828,13 +1449,24 @@ fn collect_sources(project: &Project) -> Result<Sources, String> {
     }
     paths.sort_by(|left, right| left.0.cmp(&right.0));
     for (relative, path) in paths {
-        if !project.config.includes(root, Path::new(&relative), false) {
-            placeholder_paths.push(relative);
+        let relative_path = Path::new(&relative);
+        if !project.config.contains(relative_path) || is_test_path(&relative) {
             continue;
         }
+        let excluded = project.config.is_excluded(root, relative_path, false);
+        let declaration = is_declaration_file(&relative);
         match fs::read_to_string(&path) {
             Ok(content) => {
-                included_paths.insert(relative.clone());
+                consumer_paths.insert(relative.clone());
+                if declaration {
+                    type_consumer_roots.insert(relative.clone());
+                } else {
+                    if excluded {
+                        runtime_consumer_roots.insert(relative.clone());
+                    } else {
+                        included_paths.insert(relative.clone());
+                    }
+                }
                 if relative.ends_with(".vue") {
                     vue_files.push(relative.clone());
                 }
@@ -854,16 +1486,12 @@ fn collect_sources(project: &Project) -> Result<Sources, String> {
         .filter(|(path, _)| !path.ends_with(".vue"))
         .map(|(path, content)| {
             SourceBlock::new(path.clone(), content.clone(), 0, language_for_path(path))
+                .with_candidate_collection(included_paths.contains(path.as_str()))
         })
         .collect::<Vec<_>>();
-    blocks.extend(
-        vue_files
-            .iter()
-            .map(|path| SourceBlock::new(path.clone(), "", 0, "ts")),
-    );
-    blocks.extend(placeholder_paths.into_iter().map(|path| {
-        let language = language_for_path(&path);
-        SourceBlock::new(path, "", 0, language)
+    blocks.extend(vue_files.iter().map(|path| {
+        SourceBlock::new(path.clone(), "", 0, "ts")
+            .with_candidate_collection(included_paths.contains(path))
     }));
     if !vue_files.is_empty() {
         match sidecar::prepare(root, &vue_files) {
@@ -875,6 +1503,7 @@ fn collect_sources(project: &Project) -> Result<Sources, String> {
                     message: item.message,
                 }));
                 blocks.extend(output.vue_scripts.into_iter().flat_map(|script| {
+                    let collect_candidates = included_paths.contains(&script.path);
                     script.blocks.into_iter().map(move |block| {
                         SourceBlock::new(
                             script.path.clone(),
@@ -882,6 +1511,7 @@ fn collect_sources(project: &Project) -> Result<Sources, String> {
                             block.offset,
                             block.lang,
                         )
+                        .with_candidate_collection(collect_candidates)
                     })
                 }));
             }
@@ -903,6 +1533,9 @@ fn collect_sources(project: &Project) -> Result<Sources, String> {
         contents,
         vue_files,
         included_paths,
+        consumer_paths,
+        runtime_consumer_roots,
+        type_consumer_roots,
         diagnostics,
     })
 }
@@ -934,12 +1567,6 @@ fn structural_ignore(path: &str) -> Option<&'static str> {
         Some("test")
     } else if is_declaration_file(path) {
         Some("type-declaration")
-    } else if Path::new(path)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("main"))
-    {
-        Some("entrypoint")
     } else {
         None
     }
@@ -1034,22 +1661,40 @@ fn classified_candidate(
 
 fn sort_results(findings: &mut [Finding], ignored: &mut [Classified], unknown: &mut [Classified]) {
     findings.sort_by(|left, right| {
-        (&left.path, left.line, left.column, left.kind, &left.name).cmp(&(
-            &right.path,
-            right.line,
-            right.column,
-            right.kind,
-            &right.name,
-        ))
+        (
+            &left.path,
+            left.line,
+            left.column,
+            left.kind,
+            &left.name,
+            &left.id,
+        )
+            .cmp(&(
+                &right.path,
+                right.line,
+                right.column,
+                right.kind,
+                &right.name,
+                &right.id,
+            ))
     });
     let sort_classified = |left: &Classified, right: &Classified| {
-        (&left.path, left.line, left.column, left.kind, &left.name).cmp(&(
-            &right.path,
-            right.line,
-            right.column,
-            right.kind,
-            &right.name,
-        ))
+        (
+            &left.path,
+            left.line,
+            left.column,
+            left.kind,
+            &left.name,
+            &left.id,
+        )
+            .cmp(&(
+                &right.path,
+                right.line,
+                right.column,
+                right.kind,
+                &right.name,
+                &right.id,
+            ))
     };
     ignored.sort_by(sort_classified);
     unknown.sort_by(sort_classified);
@@ -1181,8 +1826,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ignored_paths_cover_entrypoints_declarations_and_tests() {
-        assert_eq!(structural_ignore("src/main.ts"), Some("entrypoint"));
+    fn structural_filters_cover_declarations_and_tests_without_guessing_entrypoints() {
+        assert_eq!(structural_ignore("src/main.ts"), None);
         assert_eq!(
             structural_ignore("src/components.d.ts"),
             Some("type-declaration")
@@ -1200,5 +1845,60 @@ mod tests {
             (2, 1)
         );
         assert_eq!(line_column(source, source.find('一').unwrap()), (1, 7));
+    }
+
+    #[test]
+    fn entrypoint_parsers_accept_only_static_sources() {
+        assert_eq!(
+            html_module_sources(
+                r#"<script src="./legacy.js"></script><script type='module' src='/src/main.ts'></script>"#
+            ),
+            ["/src/main.ts"]
+        );
+        assert_eq!(
+            script_entrypoint("node src/server.js"),
+            Some("src/server.js")
+        );
+        assert_eq!(
+            script_entrypoint("deno run --allow-net src/server.ts"),
+            Some("src/server.ts")
+        );
+        assert_eq!(script_entrypoint("NODE_ENV=prod node src/server.js"), None);
+        assert_eq!(script_entrypoint("node src/a.js | tee output"), None);
+        let package = serde_json::json!({
+            "bin": "src/cli.ts",
+            "main": "src/sdk.ts",
+            "module": "src/sdk.mts",
+            "exports": "src/index.ts",
+        });
+        assert_eq!(package_runtime_entrypoint_values(&package), ["src/cli.ts"]);
+        assert_eq!(
+            package_public_entrypoint_values(&package),
+            ["src/cli.ts", "src/sdk.ts", "src/sdk.mts", "src/index.ts"]
+        );
+    }
+
+    #[test]
+    fn golden_fixture_reachability_follows_entrypoint_imports() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unused-golden");
+        let evidence = build_evidence(&root, true).expect("golden evidence");
+        let reachability = policy::compute(
+            &evidence.scan,
+            &evidence.semantic_edges,
+            &evidence.entrypoints,
+            evidence.entrypoints_complete,
+            &evidence.sources.runtime_consumer_roots,
+            &evidence.sources.type_consumer_roots,
+        );
+        let used = evidence
+            .scan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name == "usedDirectly")
+            .expect("usedDirectly");
+        assert!(
+            reachability.used_candidates.contains(&used.id),
+            "{reachability:#?}"
+        );
     }
 }

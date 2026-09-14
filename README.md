@@ -49,9 +49,11 @@ template-only change updates future command runs without releasing a new `jt` ve
 Find statically unused functions, variables, and files:
 
 ```bash
+jt code unused
+jt code unused /path/to/project --kind function,variable,file
+jt code unused /path/to/project --mode library --json
+# compatibility alias
 jt unused
-jt unused /path/to/project --kind function,variable,file
-jt unused /path/to/project --mode library --json
 ```
 
 `PATH` can be a project root or a nested source directory/file. `jt` walks upward to find the nearest
@@ -63,8 +65,9 @@ Projects can commit `.nlab/unused.config.json` to control the graph:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "roots": ["src"],
+  "entrypoints": ["src/main.ts"],
   "exclude": [
     "src/types/service-type/**",
     "src/types/service-enums/**",
@@ -74,27 +77,35 @@ Projects can commit `.nlab/unused.config.json` to control the graph:
 ```
 
 `roots` contains project-relative files or directories; an omitted or empty list means the project
-root. `exclude` accepts project-relative gitignore-style patterns without negation. Excluded files do
-not produce findings and do not count as reference consumers. An explicit `PATH` only narrows output
-inside configured roots. Absolute paths, `..`, unknown fields, unsupported versions, and symlinked
-roots fail before scanning. JSON reports the effective `scanRoots` and `exclude` values.
+root. Version 1 remains readable. Version 2 adds `entrypoints`, used when HTML/package scripts cannot
+prove the complete runtime roots. `exclude` accepts project-relative gitignore-style patterns without
+negation. Excluded files do not produce findings, but still provide consumer evidence so generated
+bootstrap code cannot make a live hand-written target look unused. Test files remain a hard boundary.
+An explicit `PATH` only narrows output inside configured roots. Absolute paths, `..`, unknown fields,
+unsupported versions, and symlinked roots fail before scanning. JSON reports effective `scanRoots`
+and `exclude` values.
 
 The scanner uses Oxc for JavaScript/TypeScript syntax and the project's TypeScript/Volar installation
-for cross-file and Vue template references. `--mode app` is the default: an `export` declaration alone
-is not usage, and a barrel re-export alone is not usage. A real consumer is required. `--mode library`
-ignores exported symbols as public API; unexported unused symbols remain candidates. Static dynamic
-imports count as usage. Pattern or otherwise unresolved dynamic imports are handled conservatively and
-reported in diagnostics rather than silently declared unused. Missing TypeScript/Volar dependencies are
-not installed; affected semantic coverage appears in diagnostics/unknown.
+for cross-file and Vue template references. It reports only function/method, variable binding, and file
+candidates; parameters, catch/import bindings, class fields, abstract methods, and overload signatures
+are excluded. Owner-aware reachability prevents dead function/file cycles from protecting themselves.
+`--mode app` is the default: an `export` declaration alone and a barrel re-export alone are not symbol
+usage. `--mode library` protects only package public-entry closure, not every internal export. Static and
+bounded dynamic imports, `import.meta.glob`, CommonJS require/export, type usage, initializer side effects,
+and unresolved runtime boundaries retain exact/potential/unknown distinctions. Missing TypeScript/Volar
+dependencies are not installed; affected semantic coverage appears in diagnostics/unknown.
 
 The semantic phase loads the trusted project's installed `typescript`/`vue-tsc` packages in a bounded
 Node.js helper (120-second timeout). Run it only in workspaces whose dependencies you trust.
 
-`main.*`, declaration files (`*.d.ts`), and test files (`tests/`, `__tests__/`, `*.test.*`, `*.spec.*`)
-are ignored as entrypoints, type declarations, or test code. Results are sorted by path and source
-position. `--json` writes pure JSON to stdout; errors retain the normal `error:` stderr format. Results
-are static evidence only: framework routes, decorators, macros, reflection, string-based registries,
-and other runtime loading can still require review.
+Entrypoints come from version 2 config, literal HTML module scripts, supported package scripts, and
+package entry fields; a filename named `main` is not enough. Entrypoint files are excluded only at file
+level—their internal declarations remain candidates. Declaration files (`*.d.ts`) provide type-consumer
+evidence without becoming findings. Test files (`tests/`, `__tests__/`, `*.test.*`, `*.spec.*`) are fully
+filtered. Results are sorted by path and source position. `--json` writes pure JSON to stdout; errors
+retain the normal `error:` stderr format. Unsupported framework auto-imports, reflection, string-based
+registries, virtual modules, and unbounded runtime loading become diagnostics/unknown rather than false
+unused findings.
 
 Regression coverage includes projects with known answers under `apps/jt/tests/fixtures`.
 `unused-golden` locks the Oxc fallback; `unused-semantic-golden` locks TypeScript/Volar, Vue

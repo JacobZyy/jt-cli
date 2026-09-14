@@ -34,6 +34,7 @@ Examples:
   jt zed-conf
   jt ai-hook
   jt ai-hook --checks vitest,eslint --agents codex
+  jt code unused [PATH]
   jt unused [PATH]
   jt call-graph [PATH]
   jt vitest
@@ -90,6 +91,11 @@ enum Commands {
     ZedConf,
     #[command(name = "ai-hook", about = "Configure project AI hooks")]
     AiHook(ai_hook::AiHookArgs),
+    #[command(name = "code", about = "Analyze project source code")]
+    Code {
+        #[command(subcommand)]
+        command: CodeCommand,
+    },
     #[command(
         name = "unused",
         about = "Find unused JavaScript, TypeScript, and Vue code"
@@ -179,6 +185,16 @@ enum CliCommand {
 
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
+enum CodeCommand {
+    #[command(
+        name = "unused",
+        about = "Find unused JavaScript, TypeScript, and Vue code"
+    )]
+    Unused(unused::UnusedArgs),
+}
+
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 enum GhosttyCommand {
     #[command(name = "install", about = "Install and configure Ghostty on macOS")]
     Install,
@@ -250,6 +266,9 @@ fn main() -> ExitCode {
         } => ghostty_install(),
         Commands::ZedConf => ExitCode::from(zed::run()),
         Commands::AiHook(args) => ExitCode::from(ai_hook::run(args)),
+        Commands::Code {
+            command: CodeCommand::Unused(args),
+        } => ExitCode::from(unused::run(args)),
         Commands::Unused(args) => ExitCode::from(unused::run(args)),
         Commands::CallGraph(args) => ExitCode::from(unused::run_call_graph(args)),
         Commands::Vitest => {

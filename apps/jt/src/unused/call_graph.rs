@@ -129,7 +129,7 @@ pub(super) fn run(args: CallGraphArgs) -> u8 {
 }
 
 fn generate(args: &CallGraphArgs) -> Result<(PathBuf, PathBuf, usize, usize), String> {
-    let evidence = build_evidence(&args.path)?;
+    let evidence = build_evidence(&args.path, false)?;
     let project_root = evidence.project.root.clone();
     let mut data = build_graph(evidence, args)?;
     let node_count = data.nodes.len();

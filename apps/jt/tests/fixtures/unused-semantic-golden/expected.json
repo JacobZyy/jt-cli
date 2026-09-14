@@ -1,6 +1,8 @@
 {
   "findings": [
     { "kind": "function", "name": "unusedInVue", "path": "src/Page.vue", "line": 12, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "variable", "name": "deadOnly", "path": "src/Page.vue", "line": 21, "reason": "no-inbound-usage", "reexports": [] },
+    { "kind": "function", "name": "deadRead", "path": "src/Page.vue", "line": 23, "reason": "no-inbound-usage", "reexports": [] },
     { "kind": "function", "name": "namespaceUnused", "path": "src/namespace-source.ts", "line": 3, "reason": "no-inbound-usage", "reexports": [] }
   ],
   "ignored": [
@@ -10,9 +12,9 @@
   "diagnostics": [],
   "summary": {
     "scannedFiles": 5,
-    "scannedSymbols": 5,
-    "functions": 2,
-    "variables": 0,
+    "scannedSymbols": 9,
+    "functions": 3,
+    "variables": 1,
     "files": 0,
     "ignored": 1,
     "unknown": 0,
