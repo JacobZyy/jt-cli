@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.10](https://github.com/JacobZyy/jt-cli/compare/v1.11.9...v1.11.10) (2026-09-15)
+
+
+### Features
+
+* add owner-aware unused code analysis ([0344ea8](https://github.com/JacobZyy/jt-cli/commit/0344ea80c1b19690d4e39c42d0e677c5d9a87aaa))
+
 ## [1.11.9](https://github.com/JacobZyy/jt-cli/compare/v1.11.8...v1.11.9) (2026-09-11)
 
 ## [1.11.8](https://github.com/JacobZyy/jt-cli/compare/v1.11.7...v1.11.8) (2026-09-10)
