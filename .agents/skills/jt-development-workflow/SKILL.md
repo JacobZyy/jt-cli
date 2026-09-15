@@ -42,7 +42,7 @@ cargo test --locked
 - If hook is inactive, run tests directly and report activation command:
 
 ```bash
-ln -s ../../.githooks/pre-commit .git/hooks/pre-commit
+git config --local core.hooksPath .githooks
 ```
 
 - Local hooks are bypassable. Required GitHub CI remains authoritative.

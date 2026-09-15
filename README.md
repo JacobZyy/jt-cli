@@ -619,7 +619,7 @@ remain explicit release gates while Turbo's Cargo integration is experimental.
 Activate repository pre-commit hook once per clone:
 
 ```bash
-ln -s ../../.githooks/pre-commit .git/hooks/pre-commit
+git config --local core.hooksPath .githooks
 ```
 
 Every commit runs `cargo test --locked --quiet`. Failed tests abort commit. GitHub CI remains final required check because local hooks can be bypassed.
