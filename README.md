@@ -347,14 +347,15 @@ jt nlab-api generate --project /path/to/frontend --repositories-root /path/to/ba
 ```
 
 The collection path is saved locally; subsequent `generate` runs discover dependencies before
-writing generated artifacts. Service results and explicit `allowMissing` decisions live in the shared
-config's `discovery.services` field. Each repository has its own CodeGraph index, initialized or
-synchronized automatically; the collection index is no longer used. For missing services, Discover
-queries SIC through `zzcli`, resolves the GitLab group/project, and clones the default branch into
-the collection. Existing checkouts are not switched or pulled by Discover. Authentication, permission,
-or lookup failures are recorded as `acquisition-failed` with an error and block generation with exit code 2. After an
-explicit user decision, `jt nlab-api discover --project /path/to/frontend --allow-missing service-name`
-records the exception. Every run checks again and clears it when a repository becomes available.
+writing generated artifacts. Each repository has its own CodeGraph index, initialized or synchronized
+automatically. Missing services are resolved through SIC and cloned from the company GitLab.
+Every online run retries unavailable services and updates existing dependencies with fast-forward Git
+pulls. Dependency branches default to `master`; persist an override with
+`jt nlab-api discover --project /path/to/frontend --service-branch service-name=feature-branch`.
+Branches and the latest service results live in `discovery.services`. Legacy `allowMissing` flags
+are ignored and removed when discovery writes the config. Acquisition failures produce warnings and
+leave related domains open; generation continues using available sources. Failed updates do not reuse
+stale repository indexes. Ambiguous associations or independent index failures still block generation.
 
 Resolved repository indexes are combined with separate node/file identities. Enum extraction follows
 cross-repository requests and DTO copies. Proven closed domains narrow fields; confirmed enum members

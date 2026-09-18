@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 #[serde(rename_all = "camelCase")]
 pub(super) struct Acquisition {
     pub repository: Option<String>,
+    pub branch: String,
+    pub path: Option<PathBuf>,
     pub status: String,
     pub error: Option<String>,
 }
@@ -14,19 +16,41 @@ pub(super) fn scan(args: DiscoverArgs, deadline: Instant) -> Result<DiscoveryRun
     scan_with(
         args,
         |path| repo::sync_index(path, deadline),
-        |service, root| {
+        |service, branch, existing, root| {
+            let mut existed = existing.is_some();
             let mut acquisition = Acquisition {
                 repository: None,
+                branch: branch.to_owned(),
+                path: existing.map(Path::to_owned),
                 status: "acquisition-failed".to_owned(),
                 error: None,
             };
             let outcome = (|| {
-                let (url, name) = resolve_repository(service, deadline)?;
-                acquisition.repository = Some(url.clone());
-                repo::clone_missing(&url, &root.join(name), deadline)
+                let (url, path) = if let Some(path) = existing {
+                    (repo::origin_url(path)?, path.to_owned())
+                } else {
+                    let (url, name) = resolve_repository(service, deadline)?;
+                    let path = root.join(name);
+                    if !path.join(".git").exists()
+                        && (path.try_exists()? || fs::symlink_metadata(&path).is_ok())
+                    {
+                        bail!(
+                            "clone destination already exists; inspect its service association: {}",
+                            path.display()
+                        );
+                    }
+                    (url, path)
+                };
+                acquisition.repository = Some(public_origin(&url));
+                acquisition.path = Some(path.clone());
+                existed = path.join(".git").exists();
+                repo::prepare_with_update(&path, Some(&url), Some(branch), deadline, true)?;
+                Ok::<_, anyhow::Error>(())
             })();
             match outcome {
-                Ok(()) => acquisition.status = "cloned".to_owned(),
+                Ok(()) => {
+                    acquisition.status = if existed { "updated" } else { "cloned" }.to_owned()
+                }
                 Err(error) => acquisition.error = Some(format!("{error:#}")),
             }
             acquisition
@@ -37,7 +61,7 @@ pub(super) fn scan(args: DiscoverArgs, deadline: Instant) -> Result<DiscoveryRun
 pub(super) fn scan_with(
     args: DiscoverArgs,
     mut sync: impl FnMut(&Path) -> Result<()>,
-    mut acquire: impl FnMut(&str, &Path) -> Acquisition,
+    mut acquire: impl FnMut(&str, &str, Option<&Path>, &Path) -> Acquisition,
 ) -> Result<DiscoveryRun> {
     let config = ProjectConfig::load(&args.project)?;
     let root = args
@@ -70,42 +94,79 @@ pub(super) fn scan_with(
                 entry.insert(sync(&path).map_err(|error| format!("{error:#}")));
             }
         }
-        let mut result = super::scan(args.clone(), &synchronized)?;
-        let missing = result
-            .report
-            .calls
+        let associations = acquisitions
             .iter()
-            .filter(|call| call.status == "missing-source" && call.depth < args.max_depth)
-            .filter(|call| {
-                call.bindings
-                    .iter()
-                    .map(|binding| &binding.service)
-                    .collect::<BTreeSet<_>>()
-                    .len()
-                    == 1
+            .filter_map(|(service, acquisition): (&String, &Acquisition)| {
+                if acquisition.status == "acquisition-failed" {
+                    return None;
+                }
+                acquisition
+                    .path
+                    .as_ref()
+                    .map(|path| (service.clone(), path.clone()))
             })
-            .flat_map(|call| call.bindings.iter().map(|binding| binding.service.clone()))
-            .filter(|service| {
-                !args.offline
-                    && !acquisitions.contains_key(service)
-                    && !args.allow_missing.contains(service)
-                    && !previous
-                        .services
-                        .get(service)
-                        .is_some_and(|state| state.allow_missing)
-            })
-            .collect::<BTreeSet<_>>();
-        if missing.is_empty() {
+            .collect();
+        let mut result = super::scan(args.clone(), &synchronized, &associations)?;
+        let mut services = BTreeMap::new();
+        for call in &result.report.calls {
+            if args.offline || call.depth >= args.max_depth || call.status == "ambiguous" {
+                continue;
+            }
+            let names = call
+                .bindings
+                .iter()
+                .map(|binding| binding.service.as_str())
+                .collect::<BTreeSet<_>>();
+            if names.len() != 1 {
+                continue;
+            }
+            let service = *names.first().unwrap();
+            if acquisitions.contains_key(service) {
+                continue;
+            }
+            let existing = call
+                .candidates
+                .first()
+                .filter(|_| call.candidates.len() == 1 && call.status != "unbound-candidate");
+            if existing.is_some_and(|path| *path == backend) {
+                continue;
+            }
+            services.insert(service.to_owned(), existing.cloned());
+        }
+        if services.is_empty() {
             result.report.acquisitions = acquisitions;
             return Ok(result);
         }
-        let mut cloned = false;
-        for service in missing {
-            let acquisition = acquire(&service, &root);
-            cloned |= acquisition.status == "cloned";
+        let mut changed = false;
+        for (service, existing) in services {
+            let branch = previous
+                .services
+                .get(&service)
+                .and_then(|state| state.branch.as_deref())
+                .unwrap_or("master");
+            let acquisition = acquire(&service, branch, existing.as_deref(), &root);
+            if let Some(path) = acquisition
+                .path
+                .as_ref()
+                .filter(|path| path.join(".git").exists())
+            {
+                let path = path.canonicalize()?;
+                if acquisition.status == "acquisition-failed" {
+                    synchronized.insert(
+                        path,
+                        Err(acquisition
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "repository update failed".to_owned())),
+                    );
+                } else {
+                    synchronized.remove(&path);
+                }
+                changed = true;
+            }
             acquisitions.insert(service, acquisition);
         }
-        if !cloned {
+        if !changed {
             result.report.acquisitions = acquisitions;
             return Ok(result);
         }

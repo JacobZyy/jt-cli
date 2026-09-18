@@ -28,13 +28,13 @@ pub struct DiscoverArgs {
     /// Directory containing backend Git repositories and their CodeGraph indexes
     #[arg(long)]
     repositories_root: Option<PathBuf>,
-    /// Explicitly permit a currently missing service; repeat for multiple services
-    #[arg(long, value_name = "service")]
-    allow_missing: Vec<String>,
+    /// Remember a dependency branch; unspecified services use master
+    #[arg(long, value_name = "SERVICE=BRANCH")]
+    service_branch: Vec<String>,
     /// Interface file relative to the configured backend; defaults to contractRoots
     #[arg(long)]
     entry: Option<PathBuf>,
-    /// Skip SIC queries and cloning; still synchronize local repository indexes
+    /// Skip SIC and Git network operations; still synchronize local repository indexes
     #[arg(long)]
     offline: bool,
     /// Maximum cross-repository hops (local calls do not consume this budget)
@@ -56,7 +56,7 @@ pub(crate) struct Report {
     unresolved_local_calls: usize,
     warnings: Vec<String>,
     blocking_services: Vec<String>,
-    pub allowed_missing_services: Vec<String>,
+    pub unavailable_services: Vec<String>,
     acquisitions: BTreeMap<String, acquisition::Acquisition>,
 }
 
@@ -72,7 +72,7 @@ impl std::fmt::Display for Blocked {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             output,
-            "discovery blocked: {}; add the missing repositories/indexes, or explicitly record `discover --allow-missing <service>` for missing repositories",
+            "discovery blocked: {}; repair ambiguous associations or unavailable indexes",
             self.0.join(", ")
         )
     }
@@ -129,16 +129,12 @@ pub fn run(args: DiscoverArgs) -> u8 {
         let project = args.project.canonicalize()?;
         ProjectConfig::load(&project)?;
         let _lock = crate::output::OutputLock::acquire(&project)?;
+        save_branches(&project, &args.service_branch)?;
         let mut result = acquisition::scan(
             args.clone(),
             Instant::now() + Duration::from_secs(crate::MAX_TIMEOUT_SECONDS),
         )?;
-        record(
-            &project,
-            &mut result.report,
-            &args.allow_missing,
-            args.entry.is_some(),
-        )?;
+        record(&project, &mut result.report, args.entry.is_some())?;
         save_root(&project, &result.report.repositories_root)?;
         Ok::<_, anyhow::Error>(result.report)
     })();
@@ -163,7 +159,25 @@ pub fn run(args: DiscoverArgs) -> u8 {
 
 #[cfg(test)]
 fn discover(args: DiscoverArgs) -> Result<Report> {
-    Ok(scan(args, &BTreeMap::new())?.report)
+    Ok(scan(args, &BTreeMap::new(), &BTreeMap::new())?.report)
+}
+
+fn save_branches(project: &Path, branches: &[String]) -> Result<()> {
+    if branches.is_empty() {
+        return Ok(());
+    }
+    let mut state = ProjectConfig::load(project)?.discovery.unwrap_or_default();
+    for assignment in branches {
+        let (service, branch) = assignment
+            .split_once('=')
+            .context("use --service-branch SERVICE=BRANCH")?;
+        if service.trim().is_empty() {
+            bail!("service name must not be empty");
+        }
+        repo::validate_branch(project, branch)?;
+        state.services.entry(service.to_owned()).or_default().branch = Some(branch.to_owned());
+    }
+    ProjectConfig::save_discovery(project, &state)
 }
 
 pub(crate) fn save_root(project: &Path, root: &Path) -> Result<()> {
@@ -189,7 +203,7 @@ pub(crate) fn prepare(
             repositories_root: Some(root.to_owned()),
             entry: None,
             max_depth: 3,
-            allow_missing: Vec::new(),
+            service_branch: Vec::new(),
             offline,
         },
         deadline,
@@ -198,7 +212,7 @@ pub(crate) fn prepare(
 }
 
 fn finish_preflight(project: &Path, mut result: DiscoveryRun) -> Result<DiscoveryRun> {
-    record(project, &mut result.report, &[], false)?;
+    record(project, &mut result.report, false)?;
     if !result.report.blocking_services.is_empty() {
         crate::output::write_report(
             project,
@@ -211,7 +225,7 @@ fn finish_preflight(project: &Path, mut result: DiscoveryRun) -> Result<Discover
     Ok(result)
 }
 
-fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool) -> Result<()> {
+fn record(project: &Path, report: &mut Report, partial: bool) -> Result<()> {
     let mut state = ProjectConfig::load(project)?.discovery.unwrap_or_default();
     let previous = state.services.clone();
     if !partial {
@@ -253,9 +267,12 @@ fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool
                     repository: previous
                         .get(&name)
                         .and_then(|service| service.repository.clone()),
-                    allow_missing: previous
-                        .get(&name)
-                        .is_some_and(|service| service.allow_missing),
+                    branch: Some(
+                        previous
+                            .get(&name)
+                            .and_then(|service| service.branch.clone())
+                            .unwrap_or_else(|| "master".to_owned()),
+                    ),
                     status: "resolved".to_owned(),
                     ..DiscoveredService::default()
                 });
@@ -275,9 +292,6 @@ fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool
             if priority(status) > priority(&service.status) {
                 service.status = status.to_owned();
             }
-            if !call.candidates.is_empty() {
-                service.allow_missing = false;
-            }
         }
     }
     for (name, acquisition) in &report.acquisitions {
@@ -285,36 +299,21 @@ fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool
             if acquisition.repository.is_some() {
                 service.repository = acquisition.repository.clone();
             }
-            if matches!(service.status.as_str(), "missing" | "acquisition-failed")
-                && acquisition.status == "acquisition-failed"
-            {
+            if acquisition.status == "acquisition-failed" {
                 service.status = "acquisition-failed".to_owned();
                 service.error = acquisition.error.clone();
             }
         }
     }
-    for name in allowed {
-        let service = observed
-            .get_mut(name)
-            .with_context(|| format!("service not found in current discovery: {name}"))?;
-        if !matches!(service.status.as_str(), "missing" | "acquisition-failed") {
-            bail!("service {name} is not missing; repair its association/index instead");
-        }
-        service.allow_missing = true;
-    }
     for (name, service) in &observed {
-        if matches!(service.status.as_str(), "missing" | "acquisition-failed")
-            && service.allow_missing
-        {
-            report.allowed_missing_services.push(name.clone());
+        if matches!(service.status.as_str(), "missing" | "acquisition-failed") {
+            report.unavailable_services.push(name.clone());
         }
-        if (matches!(service.status.as_str(), "missing" | "acquisition-failed")
-            && !service.allow_missing)
-            || (!name.starts_with("interface:")
-                && matches!(
-                    service.status.as_str(),
-                    "index-unavailable" | "ambiguous" | "unbound-candidate"
-                ))
+        if !name.starts_with("interface:")
+            && matches!(
+                service.status.as_str(),
+                "index-unavailable" | "ambiguous" | "unbound-candidate"
+            )
         {
             report.blocking_services.push(name.clone());
         }
@@ -326,6 +325,7 @@ fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool
 fn scan(
     args: DiscoverArgs,
     synchronized: &BTreeMap<PathBuf, Result<(), String>>,
+    associations: &BTreeMap<String, PathBuf>,
 ) -> Result<DiscoveryRun> {
     let project_path = absolute_path(&args.project)?.canonicalize()?;
     let config = ProjectConfig::load(&project_path)?;
@@ -363,6 +363,26 @@ fn scan(
         .iter()
         .map(|path| load_repository(path, synchronized.get(path)))
         .collect::<Result<Vec<_>>>()?;
+    for repository in &mut repositories {
+        for (service, path) in associations {
+            if path.canonicalize().ok().as_ref() == Some(&repository.info.path) {
+                repository.info.services.insert(service.clone());
+            }
+        }
+        if let Some(discovery) = &config.discovery {
+            for (service, state) in &discovery.services {
+                if state.status == "resolved"
+                    && state
+                        .repository
+                        .as_ref()
+                        .zip(repository.info.repository.as_ref())
+                        .is_some_and(|(expected, actual)| repo::same_repository(expected, actual))
+                {
+                    repository.info.services.insert(service.clone());
+                }
+            }
+        }
+    }
     let initial = repositories
         .iter()
         .position(|repository| repository.info.path == backend)
@@ -417,7 +437,7 @@ fn scan(
         configured_branch: config.backend.branch.clone(), entries, repositories: Vec::new(),
         calls: Vec::new(), visited_methods: 0, unresolved_local_calls: 0,
         blocking_services: Vec::new(),
-        allowed_missing_services: Vec::new(),
+        unavailable_services: Vec::new(),
         acquisitions: BTreeMap::new(),
         warnings: vec!["Discovery reports local source candidates, not deployed RPC bindings. Each repository uses its own CodeGraph index.".to_owned()],
     };
