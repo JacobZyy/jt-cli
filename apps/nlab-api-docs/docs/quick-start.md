@@ -350,9 +350,17 @@ jt nlab-api discover --project /path/to/frontend --allow-missing categoryr
 `--entry` 相对于当前配置的后端仓库，也支持仓库内的绝对路径。工具读取当前 checkout；
 实际分支与生成配置不同时会报告，不切换分支。
 
-公共目录的直接子目录作为仓库清单。优先读取各仓库 `.codegraph/codegraph.db`；
-缺失或不可用时，从公共目录的统一索引中提取对应仓库。generate 会先同步公共目录索引，
-分析时优先使用刚同步的公共索引；写入前检查所读 Java 源码是否发生变化。
+公共目录的直接子目录作为仓库清单。每个仓库独立维护 `.codegraph/codegraph.db`，
+Discover 自动执行 `codegraph init --yes` 或 `codegraph sync`，不再读取或同步公共目录索引。
+跨仓库分析仍会在内存中关联各仓库图；写入前检查所读 Java 源码是否发生变化。
+
+本地缺失的服务先通过 `zzcli sic get-cluster-info-by-app-name` 查集群，再通过
+`get-cluster-info-with-group` 获取 `beetleInfo.groupName/projectName`，组成公司 GitLab SSH 地址。
+CLI 自动 clone 默认分支到公共目录，初始化索引，再继续追踪新仓库的依赖。
+已有仓库不由 Discover 切分支或拉取；同名目录冲突不覆盖。需要开发分支时，先准备对应 checkout。
+SIC 认证、权限、仓库信息缺失或 clone 失败，记录为 `acquisition-failed`，保存错误并沿用退出码 2 的阻断流程。
+已明确允许缺失的服务不再自动查询或 clone；手动补上后恢复分析。
+`discover --offline` 和 `generate --offline` 跳过 SIC 与 clone，但仍同步本地仓库索引。
 
 结果以 JSON 输出到 stdout，可重定向到自己选择的报告文件。报告包含：
 
@@ -360,6 +368,7 @@ jt nlab-api discover --project /path/to/frontend --allow-missing categoryr
 - `repositories`：本地仓库路径、Git origin、分支、commit、脏状态、SCF 服务名、索引情况及是否参与分析。
 - `calls`：实际到达的跨服务调用点、代表性本地调用链、SCF 配置依据、候选仓库及继续搜索所需的完整接口名和服务名。
 - `warnings`、`unresolvedLocalCalls`：分析断点及无法解析的本地调用数量；后者也包括未索引的库方法和生成的 getter。
+- `acquisitions`：本次自动获取的仓库地址、获取状态和失败原因。
 - `blockingServices`、`allowedMissingServices`：尚需处理的服务及本次按明确决定允许缺失的服务。
 
 目前识别 `src/main/resources` 下 XML 中声明的 SCF `applicationName`、

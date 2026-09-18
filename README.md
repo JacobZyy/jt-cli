@@ -348,15 +348,19 @@ jt nlab-api generate --project /path/to/frontend --repositories-root /path/to/ba
 
 The collection path is saved locally; subsequent `generate` runs discover dependencies before
 writing generated artifacts. Service results and explicit `allowMissing` decisions live in the shared
-config's `discovery.services` field. Missing repositories block generation with exit code 2. After an
+config's `discovery.services` field. Each repository has its own CodeGraph index, initialized or
+synchronized automatically; the collection index is no longer used. For missing services, Discover
+queries SIC through `zzcli`, resolves the GitLab group/project, and clones the default branch into
+the collection. Existing checkouts are not switched or pulled by Discover. Authentication, permission,
+or lookup failures are recorded as `acquisition-failed` with an error and block generation with exit code 2. After an
 explicit user decision, `jt nlab-api discover --project /path/to/frontend --allow-missing service-name`
 records the exception. Every run checks again and clears it when a repository becomes available.
 
 Resolved repository indexes are combined with separate node/file identities. Enum extraction follows
 cross-repository requests and DTO copies. Proven closed domains narrow fields; confirmed enum members
 with incomplete field-flow evidence are exported as enum definitions and `knownValues`, while fields
-remain open scalars. `init` and `generate` accept `--offline` to use the current checkout without Git
-network operations; offline generation also skips Gateway queries. See
+remain open scalars. `init`, `discover`, and `generate` accept `--offline` to use the current checkout without Git
+network operations; offline discovery skips SIC queries and cloning; offline generation also skips Gateway queries. See
 [repository discovery](apps/nlab-api-docs/docs/quick-start.md#跨仓库准备情况检查) for scope and limitations.
 
 The top-level `EnumIrisable` boolean in `.nlab/nlab-api.config.json` controls TypeScript enum syntax.

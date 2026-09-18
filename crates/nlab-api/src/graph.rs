@@ -64,17 +64,6 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn load(repo: &Path) -> Result<Self> {
-        Self::load_scoped(repo, Path::new(""))
-    }
-
-    /// Read one repository from either its own index or a collection index.
-    pub(crate) fn load_scoped(repo: &Path, prefix: &Path) -> Result<Self> {
-        let prefix = if prefix.as_os_str().is_empty() {
-            String::new()
-        } else {
-            format!("{}/", prefix.display())
-        };
-        let prefix_end = format!("{prefix}\u{10ffff}");
         let database = repo.join(".codegraph/codegraph.db");
         if !database.is_file() {
             bail!(
@@ -100,20 +89,15 @@ impl Snapshot {
         let mut node_statement = connection.prepare(
             "SELECT id, kind, name, qualified_name, file_path, start_line, start_column, \
                     docstring, COALESCE(signature, ''), COALESCE(decorators, ''), \
-                    COALESCE(return_type, '') FROM nodes WHERE (language = 'java' OR kind = 'file') \
-                    AND file_path >= ?1 AND file_path < ?2",
+                    COALESCE(return_type, '') FROM nodes WHERE (language = 'java' OR kind = 'file')",
         )?;
-        let node_rows = node_statement.query_map([&prefix, &prefix_end], |row| {
+        let node_rows = node_statement.query_map([], |row| {
             Ok(GraphNode {
                 id: row.get(0)?,
                 kind: row.get(1)?,
                 name: row.get(2)?,
                 qualified_name: row.get(3)?,
-                file_path: row
-                    .get::<_, String>(4)?
-                    .strip_prefix(&prefix)
-                    .unwrap_or_default()
-                    .to_owned(),
+                file_path: row.get(4)?,
                 start_line: row.get::<_, i64>(5)? as usize,
                 start_column: row.get::<_, i64>(6)? as usize,
                 docstring: row.get(7)?,
@@ -141,15 +125,14 @@ impl Snapshot {
             });
         }
 
-        // Keep scoped nodes first: a collection index must not scan every repository's edges per load.
         let mut edge_statement = connection.prepare(
             "SELECT e.source, e.target, e.kind, COALESCE(e.line, 0), COALESCE(e.col, 0), \
                     COALESCE(e.metadata, ''), COALESCE(e.provenance, '') \
              FROM nodes n CROSS JOIN edges e ON n.id = e.source \
              WHERE e.kind IN ('calls', 'contains', 'references', 'implements', 'extends') \
-             AND n.file_path >= ?1 AND n.file_path < ?2",
+",
         )?;
-        let edge_rows = edge_statement.query_map([&prefix, &prefix_end], |row| {
+        let edge_rows = edge_statement.query_map([], |row| {
             Ok(GraphEdge {
                 source: row.get(0)?,
                 target: row.get(1)?,
@@ -198,20 +181,16 @@ impl Snapshot {
 
         let mut unresolved_statement = connection.prepare(
             "SELECT from_node_id, reference_name, reference_kind, line, col, file_path, status \
-             FROM unresolved_refs WHERE language = 'java' AND file_path >= ?1 AND file_path < ?2",
+             FROM unresolved_refs WHERE language = 'java'",
         )?;
-        let unresolved_rows = unresolved_statement.query_map([&prefix, &prefix_end], |row| {
+        let unresolved_rows = unresolved_statement.query_map([], |row| {
             Ok(UnresolvedRef {
                 from_node_id: row.get(0)?,
                 name: row.get(1)?,
                 kind: row.get(2)?,
                 line: row.get::<_, i64>(3)? as usize,
                 column: row.get::<_, i64>(4)? as usize,
-                file_path: row
-                    .get::<_, String>(5)?
-                    .strip_prefix(&prefix)
-                    .unwrap_or_default()
-                    .to_owned(),
+                file_path: row.get(5)?,
                 status: row.get(6)?,
             })
         })?;
