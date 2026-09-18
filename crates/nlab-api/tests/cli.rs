@@ -43,6 +43,16 @@ fn exposes_public_commands() {
 }
 
 #[test]
+fn upgrade_alias_exposes_the_standalone_update_options() {
+    let output = nlab_api().args(["upgrade", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--check"));
+    assert!(help.contains("--force"));
+    assert!(help.contains("Skill Manager"));
+}
+
+#[test]
 fn discovery_requires_roots_and_does_not_create_project_state() {
     let project = tempdir().unwrap();
     let help = nlab_api().args(["discover", "--help"]).output().unwrap();
