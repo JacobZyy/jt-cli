@@ -229,7 +229,32 @@ CI 应先以退出码判断成功，再按项目要求检查 diagnostics。`comp
 ```bash
 nlab-api update --check
 nlab-api update
+nlab-api upgrade
 ```
+
+`upgrade` 是 `update` 的别名。显式更新会通过 Skill Manager 同步已安装的
+`nlab-backend-bridge`，即使二进制已经是最新版本也会同步。`--check` 只检查，不更新 Skill。
+普通命令触发二进制自动升级时，也会尝试同步 Skill；没有新二进制时不会每次启动都更新 Skill。
+`jt upgrade` 不执行这一步。
+
+同步优先使用 `~/.skills-manager/bin/skills-manager-cli`，其次使用 PATH 中的同名命令。
+CLI 只委托 Skill Manager 更新这一项，不自行修改 Skill 文件、切换整个技能库分支或更新其他技能。
+没有安装 Skill Manager、没有安装该 Skill，或 Skill 仍登记为本地导入时，会说明原因并跳过同步。
+
+本地导入的 Skill 需要先在 Skill Manager 中关联实际远程来源。例如，Skill 位于仓库的同名子目录时：
+
+```bash
+~/.skills-manager/bin/skills-manager-cli skills set-source nlab-backend-bridge \
+  --git-url https://github.com/your-org/skills.git \
+  --branch main --subpath nlab-backend-bridge
+```
+
+来源、认证、文件更新及部署由 Skill Manager 管理；nlab-api 不公开或内置你的私有技能仓库内容。
+显式更新中 Skill Manager 失败会返回非零，并说明二进制更新已经完成，重跑 `nlab-api update`
+即可重试 Skill 同步，不会为此回滚二进制。自动升级时的 Skill 同步失败则打印警告，继续原命令。
+
+从尚未包含此能力的旧版升级时，首次升级仍由旧 updater 执行；升级完成后再运行一次
+`nlab-api update` 同步 Skill，之后的升级会自动同步。
 
 自动更新只替换安装器写入 ownership marker 的二进制：
 

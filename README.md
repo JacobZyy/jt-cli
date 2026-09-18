@@ -540,6 +540,12 @@ nlab-api update --check
 nlab-api update
 ```
 
+Standalone `nlab-api update` (alias `upgrade`) also updates the installed `nlab-backend-bridge`
+through Skill Manager, including when the binary is already current. `--check` remains read-only.
+Automatic binary upgrades attempt the same Skill sync; ordinary starts without a binary upgrade do
+not. The Skill keeps its registered source and deployments; missing managers, missing skills, or
+local-import sources are reported and skipped. `jt upgrade` does not synchronize Skills.
+
 Pass `--no-update` for offline or reproducible runs. Re-run the script to install a pinned release
 or change the install directory:
 

@@ -1,7 +1,8 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -16,6 +17,7 @@ const NO_UPDATE_ENV: &str = "NLAB_API_NO_UPDATE";
 const MANIFEST_NAME: &str = "nlab-api-manifest.json";
 const INSTALL_MARKER_NAME: &str = ".nlab-api-managed";
 const INSTALL_MARKER: &str = "nlab-api installer v1\n";
+const SKILL_NAME: &str = "nlab-backend-bridge";
 
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
@@ -40,6 +42,20 @@ struct ReleaseManifest {
 struct Release {
     tag: String,
     version: Version,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManagedSkill {
+    id: String,
+    name: String,
+    source_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillUpdateResult {
+    skill_id: String,
+    refreshed: bool,
+    error: Option<String>,
 }
 
 pub fn run(args: UpdateArgs) -> u8 {
@@ -83,6 +99,9 @@ pub fn auto_update(arguments: &[OsString]) -> Result<Option<ExitCode>> {
         return Ok(None);
     };
     install_release(&release, &executable)?;
+    if let Err(error) = sync_skill() {
+        eprintln!("warning: nlab-api binary updated, but Skill synchronization failed: {error:#}");
+    }
     reexecute(arguments)
 }
 
@@ -90,33 +109,114 @@ fn update(args: UpdateArgs) -> Result<()> {
     supported_target()?;
     let current = current_version()?;
     let release = fetch_ready_release()?;
-    match release.version.cmp(&current) {
-        std::cmp::Ordering::Greater => {}
+    let install = match release.version.cmp(&current) {
+        std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Equal if !args.force => {
             println!("nlab-api is already up to date ({current})");
-            return Ok(());
+            false
         }
-        std::cmp::Ordering::Equal => {}
+        std::cmp::Ordering::Equal => true,
         std::cmp::Ordering::Less => {
             println!(
                 "latest published nlab-api {} is older than installed {}",
                 release.version, current
             );
-            return Ok(());
+            false
         }
-    }
+    };
 
     if args.check {
-        println!("Update available: {current} -> {}", release.version);
+        if install {
+            println!("Update available: {current} -> {}", release.version);
+        }
         return Ok(());
     }
 
-    let executable = managed_install_target()?.context(
-        "current nlab-api is not installer-managed; rerun install-nlab-api.sh before self-update",
+    if install {
+        let executable = managed_install_target()?.context(
+            "current nlab-api is not installer-managed; rerun install-nlab-api.sh before self-update",
+        )?;
+        install_release(&release, &executable)?;
+        println!("Updated nlab-api to {}", release.version);
+        println!("Binary: {}", executable.display());
+    }
+    sync_skill().context("binary update finished, but Skill synchronization failed; rerun `nlab-api update` after resolving the Skill Manager error")
+}
+
+fn sync_skill() -> Result<()> {
+    let manager = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".skills-manager/bin/skills-manager-cli"))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("skills-manager-cli"));
+    sync_skill_with_manager(&manager)
+}
+
+fn sync_skill_with_manager(manager: &Path) -> Result<()> {
+    let output = match Command::new(manager)
+        .args(["--json", "skills", "list"])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            eprintln!("warning: Skill Manager CLI not found; {SKILL_NAME} was not synchronized");
+            return Ok(());
+        }
+        Err(error) => return Err(error).context("start Skill Manager"),
+    };
+    if !output.status.success() {
+        bail!(
+            "Skill Manager could not list installed skills: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let skills: Vec<ManagedSkill> =
+        serde_json::from_slice(&output.stdout).context("decode Skill Manager skill list")?;
+    let skills = skills
+        .iter()
+        .filter(|skill| skill.name == SKILL_NAME)
+        .collect::<Vec<_>>();
+    let skill = match skills.as_slice() {
+        [] => {
+            println!(
+                "{SKILL_NAME} is not installed in Skill Manager; skipping Skill synchronization"
+            );
+            return Ok(());
+        }
+        [skill] => skill,
+        _ => bail!(
+            "multiple {SKILL_NAME} entries in Skill Manager; resolve the duplicate before updating"
+        ),
+    };
+    if skill.source_type == "import" {
+        eprintln!(
+            "warning: {SKILL_NAME} has a local import source; configure its remote source in Skill Manager before synchronization"
+        );
+        return Ok(());
+    }
+    println!("Synchronizing {SKILL_NAME} through Skill Manager");
+    let output = command_output(
+        Command::new(manager)
+            .args(["--json", "skills", "update", "--", &skill.id])
+            .stdin(Stdio::null()),
+        "update Skill through Skill Manager",
     )?;
-    install_release(&release, &executable)?;
-    println!("Updated nlab-api to {}", release.version);
-    println!("Binary: {}", executable.display());
+    let results: Vec<SkillUpdateResult> =
+        serde_json::from_slice(&output).context("decode Skill Manager update result")?;
+    let [result] = results.as_slice() else {
+        bail!("Skill Manager did not return one update result for {SKILL_NAME}");
+    };
+    if result.skill_id != skill.id {
+        bail!("Skill Manager returned a different Skill identity");
+    }
+    if let Some(error) = &result.error {
+        bail!("Skill Manager could not update {SKILL_NAME}: {error}");
+    }
+    if result.refreshed {
+        println!("Updated Skill: {SKILL_NAME}");
+    } else {
+        println!("Skill is already up to date: {SKILL_NAME}");
+    }
     Ok(())
 }
 
@@ -435,6 +535,95 @@ mod tests {
 
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_sync_delegates_only_the_installed_bridge_and_preserves_manager_failures() {
+        use super::sync_skill_with_manager;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let manager = root.path().join("skills-manager-cli");
+        let calls = root.path().join("calls");
+        fs::write(&manager, "#!/bin/sh\nset -eu\nroot=$(dirname \"$0\")\nif [ \"$3\" = list ]; then\n  cat \"$root/skills.json\"\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > \"$root/calls\"\ncat \"$root/update.json\"\nexit \"$(cat \"$root/status\")\"\n").unwrap();
+        fs::set_permissions(&manager, fs::Permissions::from_mode(0o755)).unwrap();
+        for (registry, called, failed) in [
+            (r#"[]"#, false, false),
+            (
+                r#"[{"id":"other","name":"another-skill","source_type":"git"},{"id":"bridge","name":"nlab-backend-bridge","source_type":"git"}]"#,
+                true,
+                false,
+            ),
+            (
+                r#"[{"id":"bridge","name":"nlab-backend-bridge","source_type":"import"}]"#,
+                false,
+                false,
+            ),
+            (
+                r#"[{"id":"a","name":"nlab-backend-bridge","source_type":"git"},{"id":"b","name":"nlab-backend-bridge","source_type":"git"}]"#,
+                false,
+                true,
+            ),
+            (r#"{"unexpected":"protocol"}"#, false, true),
+        ] {
+            if calls.exists() {
+                fs::remove_file(&calls).unwrap();
+            }
+            fs::write(root.path().join("skills.json"), registry).unwrap();
+            fs::write(root.path().join("status"), "0").unwrap();
+            fs::write(
+                root.path().join("update.json"),
+                r#"[{"skill_id":"bridge","refreshed":true,"error":null}]"#,
+            )
+            .unwrap();
+            assert_eq!(sync_skill_with_manager(&manager).is_err(), failed);
+            assert_eq!(calls.exists(), called);
+            if called {
+                assert_eq!(
+                    fs::read_to_string(&calls).unwrap(),
+                    "--json\nskills\nupdate\n--\nbridge\n"
+                );
+            }
+        }
+        fs::write(
+            root.path().join("skills.json"),
+            r#"[{"id":"--all","name":"nlab-backend-bridge","source_type":"git"}]"#,
+        )
+        .unwrap();
+        fs::write(root.path().join("status"), "7").unwrap();
+        assert!(sync_skill_with_manager(&manager).is_err());
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap(),
+            "--json\nskills\nupdate\n--\n--all\n"
+        );
+        fs::write(root.path().join("status"), "0").unwrap();
+        fs::write(
+            root.path().join("update.json"),
+            r#"[{"skill_id":"--all","refreshed":false,"error":"local conflict"}]"#,
+        )
+        .unwrap();
+        assert!(
+            sync_skill_with_manager(&manager)
+                .unwrap_err()
+                .to_string()
+                .contains("local conflict")
+        );
+        for (result, failed) in [
+            (r#"[]"#, true),
+            (
+                r#"[{"skill_id":"another","refreshed":true,"error":null}]"#,
+                true,
+            ),
+            (
+                r#"[{"skill_id":"--all","refreshed":false,"error":null}]"#,
+                false,
+            ),
+        ] {
+            fs::write(root.path().join("update.json"), result).unwrap();
+            assert_eq!(sync_skill_with_manager(&manager).is_err(), failed);
+        }
+        assert!(sync_skill_with_manager(&root.path().join("not-installed")).is_ok());
+    }
 
     #[test]
     fn parses_ready_manifest_for_current_target() {

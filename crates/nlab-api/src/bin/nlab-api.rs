@@ -45,7 +45,11 @@ enum Command {
     Mock(nlab_api::MockArgs),
     #[command(name = "config", about = "Configure the project-local nlab-api runner")]
     Config(nlab_api::ConfigArgs),
-    #[command(name = "update", about = "Check and update nlab-api")]
+    #[command(
+        name = "update",
+        visible_alias = "upgrade",
+        about = "Update nlab-api and synchronize its installed Skill through Skill Manager"
+    )]
     Update(update::UpdateArgs),
 }
 
