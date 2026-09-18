@@ -143,7 +143,8 @@ fn fixture(unified: bool) -> (tempfile::TempDir, DiscoverArgs) {
     );
     let args = DiscoverArgs {
         project: root.join("frontend"),
-        repositories_root: root.to_path_buf(),
+        repositories_root: Some(root.to_path_buf()),
+        allow_missing: Vec::new(),
         entry: None,
         max_depth: 3,
     };
@@ -290,4 +291,92 @@ fn overloaded_remote_method_is_not_guessed_and_unbound_candidate_is_not_followed
     let report = discover(args).unwrap();
     assert_eq!(report.calls[0].status, "unbound-candidate");
     assert!(!report.repositories[1].visited);
+}
+
+#[test]
+fn missing_decisions_persist_and_a_new_repository_clears_the_exception() {
+    let (temp, args) = fixture(false);
+    let project = args.project.clone();
+    let config_path = project.join(crate::config::CONFIG_FILE);
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["futureSetting"] = serde_json::json!({"keep": true});
+    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    let mut report = discover(args.clone()).unwrap();
+    record(&project, &mut report, &[], false).unwrap();
+    assert_eq!(report.blocking_services, ["missing"]);
+    assert_eq!(
+        ProjectConfig::load(&project)
+            .unwrap()
+            .discovery
+            .unwrap()
+            .services["missing"]
+            .status,
+        "missing"
+    );
+    assert!(!project.join(".nlab/contract-ir.json").exists());
+    let mut report = discover(args.clone()).unwrap();
+    record(&project, &mut report, &["missing".to_owned()], false).unwrap();
+    assert!(report.blocking_services.is_empty());
+    let mut report = discover(args.clone()).unwrap();
+    record(&project, &mut report, &[], false).unwrap();
+    assert!(report.blocking_services.is_empty());
+    assert!(
+        ProjectConfig::load(&project)
+            .unwrap()
+            .discovery
+            .unwrap()
+            .services["missing"]
+            .allow_missing
+    );
+    let child = temp.path().join("c");
+    fs::create_dir_all(child.join(".git")).unwrap();
+    let db = index(&child);
+    add_source(
+        &child,
+        &db,
+        "",
+        "Missing",
+        true,
+        "package p;\npublic interface Missing {\nvoid run();\n}\n",
+    );
+    write(
+        &child,
+        "service/src/main/resources/scf.xml",
+        "<zzscf:application applicationName='missing'/>",
+    );
+    let mut report = discover(args).unwrap();
+    record(&project, &mut report, &[], false).unwrap();
+    let service = &ProjectConfig::load(&project)
+        .unwrap()
+        .discovery
+        .unwrap()
+        .services["missing"];
+    assert_eq!(service.status, "resolved");
+    assert!(!service.allow_missing);
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(config_path).unwrap()).unwrap();
+    assert_eq!(config["futureSetting"]["keep"], true);
+}
+
+#[test]
+fn preflight_blocks_before_overwriting_existing_generated_files() {
+    let (_temp, args) = fixture(true);
+    write(&args.project, ".nlab/contract-ir.json", "existing contract");
+    let error = prepare(&args.project, args.repositories_root.as_ref().unwrap())
+        .err()
+        .unwrap();
+    assert!(error.downcast_ref::<Blocked>().is_some());
+    assert_eq!(
+        fs::read_to_string(args.project.join(".nlab/contract-ir.json")).unwrap(),
+        "existing contract"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(args.project.join(".nlab/generate-report.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["status"], "blocked");
+    assert_eq!(
+        report["stages"]["discovery"]["blockingServices"][0],
+        "missing"
+    );
 }

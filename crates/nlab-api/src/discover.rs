@@ -7,7 +7,9 @@ use clap::Args;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::config::ProjectConfig;
+use crate::config::{
+    DiscoveredService, LocalProjectConfig, ProjectConfig, ensure_local_config_ignored,
+};
 use crate::graph::Snapshot;
 use crate::java::{JavaProject, parse_method_signature};
 use crate::semantic::{RemoteCall, SemanticAnalyzer};
@@ -23,7 +25,10 @@ pub struct DiscoverArgs {
     project: PathBuf,
     /// Directory containing backend Git repositories and their CodeGraph indexes
     #[arg(long)]
-    repositories_root: PathBuf,
+    repositories_root: Option<PathBuf>,
+    /// Explicitly permit a currently missing service; repeat for multiple services
+    #[arg(long, value_name = "service")]
+    allow_missing: Vec<String>,
     /// Interface file relative to the configured backend; defaults to contractRoots
     #[arg(long)]
     entry: Option<PathBuf>,
@@ -34,7 +39,7 @@ pub struct DiscoverArgs {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Report {
+pub(crate) struct Report {
     version: u8,
     project: PathBuf,
     repositories_root: PathBuf,
@@ -45,7 +50,28 @@ struct Report {
     visited_methods: usize,
     unresolved_local_calls: usize,
     warnings: Vec<String>,
+    blocking_services: Vec<String>,
+    pub allowed_missing_services: Vec<String>,
 }
+
+pub(crate) struct DiscoveryRun {
+    pub report: Report,
+    pub graph: Snapshot,
+}
+
+#[derive(Debug)]
+pub(crate) struct Blocked(pub Vec<String>);
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            output,
+            "discovery blocked: {}; add the missing repositories/indexes, or explicitly record `discover --allow-missing <service>` for missing repositories",
+            self.0.join(", ")
+        )
+    }
+}
+impl std::error::Error for Blocked {}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,13 +119,31 @@ struct CallResolution {
 }
 
 pub fn run(args: DiscoverArgs) -> u8 {
-    match discover(args) {
+    let result = (|| {
+        let project = args.project.canonicalize()?;
+        ProjectConfig::load(&project)?;
+        let _lock = crate::output::OutputLock::acquire(&project)?;
+        let mut result = scan(args.clone(), false)?;
+        record(
+            &project,
+            &mut result.report,
+            &args.allow_missing,
+            args.entry.is_some(),
+        )?;
+        save_root(&project, &result.report.repositories_root)?;
+        Ok::<_, anyhow::Error>(result.report)
+    })();
+    match result {
         Ok(report) => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).expect("serialize discovery")
             );
-            0
+            if report.blocking_services.is_empty() {
+                0
+            } else {
+                2
+            }
         }
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -108,10 +152,152 @@ pub fn run(args: DiscoverArgs) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn discover(args: DiscoverArgs) -> Result<Report> {
+    Ok(scan(args, false)?.report)
+}
+
+pub(crate) fn save_root(project: &Path, root: &Path) -> Result<()> {
+    if !root.is_dir() {
+        bail!("repositories root must be a directory: {}", root.display());
+    }
+    let mut local = LocalProjectConfig::load(project)?;
+    local.backend.repositories_root =
+        Some(root.canonicalize().context("resolve repositories root")?);
+    ensure_local_config_ignored(project)?;
+    local.save(project)
+}
+
+pub(crate) fn prepare(project: &Path, root: &Path) -> Result<DiscoveryRun> {
+    let mut result = scan(
+        DiscoverArgs {
+            project: project.to_owned(),
+            repositories_root: Some(root.to_owned()),
+            entry: None,
+            max_depth: 3,
+            allow_missing: Vec::new(),
+        },
+        true,
+    )?;
+    record(project, &mut result.report, &[], false)?;
+    if !result.report.blocking_services.is_empty() {
+        crate::output::write_report(
+            project,
+            &serde_json::json!({
+                "version": 1, "status": "blocked", "stages": { "discovery": result.report, "generate": "not-started" }
+            }),
+        )?;
+        return Err(Blocked(result.report.blocking_services.clone()).into());
+    }
+    Ok(result)
+}
+
+fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool) -> Result<()> {
+    let mut state = ProjectConfig::load(project)?.discovery.unwrap_or_default();
+    let previous = state.services.clone();
+    if !partial {
+        for service in state.services.values_mut() {
+            service.status = "unused".to_owned();
+        }
+    }
+    let mut observed = BTreeMap::<String, DiscoveredService>::new();
+    for call in &report.calls {
+        // Library interfaces without an RPC binding are evidence, not invented services.
+        let names = if call.bindings.is_empty() {
+            vec![format!("interface:{}", call.call.interface)]
+        } else {
+            call.bindings
+                .iter()
+                .map(|binding| binding.service.clone())
+                .collect()
+        };
+        let repository = call
+            .candidates
+            .first()
+            .filter(|_| call.candidates.len() == 1)
+            .and_then(|path| {
+                report
+                    .repositories
+                    .iter()
+                    .find(|repository| repository.path == *path)
+            })
+            .and_then(|repository| repository.repository.clone());
+        let status = match call.status.as_str() {
+            "source-matched" => "resolved",
+            "missing-source" => "missing",
+            other => other,
+        };
+        for name in names {
+            let service = observed
+                .entry(name.clone())
+                .or_insert_with(|| DiscoveredService {
+                    repository: previous
+                        .get(&name)
+                        .and_then(|service| service.repository.clone()),
+                    allow_missing: previous
+                        .get(&name)
+                        .is_some_and(|service| service.allow_missing),
+                    status: "resolved".to_owned(),
+                    ..DiscoveredService::default()
+                });
+            service.interfaces.insert(call.call.interface.clone());
+            if repository.is_some() {
+                service.repository = repository.clone();
+            }
+            let priority = |status: &str| match status {
+                "missing" => 6,
+                "index-unavailable" => 5,
+                "ambiguous" => 4,
+                "depth-limit" => 3,
+                "method-unresolved" => 2,
+                "unbound-candidate" => 1,
+                _ => 0,
+            };
+            if priority(status) > priority(&service.status) {
+                service.status = status.to_owned();
+            }
+            if !call.candidates.is_empty() {
+                service.allow_missing = false;
+            }
+        }
+    }
+    for name in allowed {
+        let service = observed
+            .get_mut(name)
+            .with_context(|| format!("service not found in current discovery: {name}"))?;
+        if service.status != "missing" {
+            bail!("service {name} is not missing; repair its association/index instead");
+        }
+        service.allow_missing = true;
+    }
+    for (name, service) in &observed {
+        if service.status == "missing" && service.allow_missing {
+            report.allowed_missing_services.push(name.clone());
+        }
+        if (service.status == "missing" && !service.allow_missing)
+            || (!name.starts_with("interface:")
+                && matches!(
+                    service.status.as_str(),
+                    "index-unavailable" | "ambiguous" | "unbound-candidate"
+                ))
+        {
+            report.blocking_services.push(name.clone());
+        }
+    }
+    state.services.extend(observed);
+    ProjectConfig::save_discovery(project, &state)
+}
+
+fn scan(args: DiscoverArgs, prefer_collection: bool) -> Result<DiscoveryRun> {
     let project_path = absolute_path(&args.project)?.canonicalize()?;
     let config = ProjectConfig::load(&project_path)?;
-    let root = absolute_path(&args.repositories_root)?.canonicalize()?;
+    let root = args
+        .repositories_root
+        .or(LocalProjectConfig::load(&project_path)?
+            .backend
+            .repositories_root)
+        .context("repositories root missing; pass --repositories-root <path>")?;
+    let root = absolute_path(&root)?.canonicalize()?;
     let backend = repo::resolve_path(
         &config.backend.repo_path,
         config.backend.repository.as_deref(),
@@ -137,7 +323,7 @@ fn discover(args: DiscoverArgs) -> Result<Report> {
     paths.dedup();
     let mut repositories = paths
         .iter()
-        .map(|path| load_repository(path, &root))
+        .map(|path| load_repository(path, &root, prefer_collection))
         .collect::<Result<Vec<_>>>()?;
     let initial = repositories
         .iter()
@@ -192,7 +378,9 @@ fn discover(args: DiscoverArgs) -> Result<Report> {
         version: 1, project: project_path, repositories_root: root,
         configured_branch: config.backend.branch.clone(), entries, repositories: Vec::new(),
         calls: Vec::new(), visited_methods: 0, unresolved_local_calls: 0,
-        warnings: vec!["Discovery reports local source candidates, not deployed RPC bindings or closed enum domains. Index freshness is not verified; sync indexes before relying on coverage.".to_owned()],
+        blocking_services: Vec::new(),
+        allowed_missing_services: Vec::new(),
+        warnings: vec!["Discovery reports local source candidates, not deployed RPC bindings. Index freshness is not verified by standalone discovery.".to_owned()],
     };
     if repositories[initial].info.branch.as_deref() != Some(&config.backend.branch) {
         report.warnings.push(format!(
@@ -360,11 +548,43 @@ fn discover(args: DiscoverArgs) -> Result<Report> {
     });
     report.warnings.sort();
     report.warnings.dedup();
+    let mut graph = repositories[initial]
+        .graph
+        .take()
+        .context("entry graph missing")?;
+    for (index, repository) in repositories.iter_mut().enumerate() {
+        if index != initial && repository.info.visited {
+            if let Some(dependency) = repository.graph.take() {
+                graph.include_repository(&repository.info.path, dependency)?;
+            }
+        }
+    }
+    for call in report
+        .calls
+        .iter()
+        .filter(|call| call.status == "source-matched")
+    {
+        let file = if call.from_repository == backend {
+            call.call.file.clone()
+        } else {
+            format!(
+                "__dependencies/{}/{}",
+                call.from_repository.file_name().unwrap().to_string_lossy(),
+                call.call.file
+            )
+        };
+        graph.resolved_external_calls.insert((
+            file,
+            call.call.line,
+            call.call.column,
+            call.call.interface.clone(),
+        ));
+    }
     report.repositories = repositories
         .into_iter()
         .map(|repository| repository.info)
         .collect();
-    Ok(report)
+    Ok(DiscoveryRun { report, graph })
 }
 
 fn target_methods(graph: &Snapshot, call: &RemoteCall) -> Vec<String> {
@@ -386,7 +606,7 @@ fn target_methods(graph: &Snapshot, call: &RemoteCall) -> Vec<String> {
         .collect()
 }
 
-fn load_repository(path: &Path, root: &Path) -> Result<Repository> {
+fn load_repository(path: &Path, root: &Path, prefer_collection: bool) -> Result<Repository> {
     let path = path.canonicalize()?;
     let mut diagnostics = Vec::new();
     let mut git = |args: &[&str]| -> Option<String> {
@@ -404,7 +624,12 @@ fn load_repository(path: &Path, root: &Path) -> Result<Repository> {
     let dirty = git(&["status", "--porcelain"]).map(|status| !status.is_empty());
     let mut index_root = None;
     let mut graph = None;
-    for candidate in [path.as_path(), root] {
+    let index_roots = if prefer_collection {
+        [root, path.as_path()]
+    } else {
+        [path.as_path(), root]
+    };
+    for candidate in index_roots {
         if !path.starts_with(candidate) || !candidate.join(".codegraph/codegraph.db").is_file() {
             continue;
         }
@@ -483,7 +708,11 @@ fn load_repository(path: &Path, root: &Path) -> Result<Repository> {
             "missing"
         }
         .to_owned(),
-        index_freshness: "not-verified",
+        index_freshness: if prefer_collection && index_root == Some(root) {
+            "synchronized-before-generation"
+        } else {
+            "not-verified"
+        },
         codegraph_version: graph.as_ref().map(|graph| graph.version.clone()),
         extraction_version: graph.as_ref().map(|graph| graph.extraction_version.clone()),
         visited: false,

@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags};
@@ -58,6 +58,8 @@ pub struct Snapshot {
     nodes_by_simple_name: HashMap<String, Vec<String>>,
     pub version: String,
     pub extraction_version: String,
+    pub source_roots: BTreeMap<String, PathBuf>,
+    pub resolved_external_calls: HashSet<(String, usize, usize, String)>,
 }
 
 impl Snapshot {
@@ -231,7 +233,74 @@ impl Snapshot {
             nodes_by_simple_name,
             version,
             extraction_version,
+            source_roots: BTreeMap::new(),
+            resolved_external_calls: HashSet::new(),
         })
+    }
+
+    pub fn source_path(&self, primary: &Path, file: &str) -> PathBuf {
+        for (prefix, root) in &self.source_roots {
+            if let Some(relative) = file.strip_prefix(&format!("{prefix}/")) {
+                return root.join(relative);
+            }
+        }
+        primary.join(file)
+    }
+
+    pub fn source_repository(&self, file: &str) -> Option<&str> {
+        self.source_roots
+            .keys()
+            .find(|prefix| file.starts_with(&format!("{prefix}/")))
+            .map(String::as_str)
+    }
+
+    pub fn include_repository(&mut self, root: &Path, dependency: Snapshot) -> Result<()> {
+        let name = root
+            .file_name()
+            .context("dependency repository name missing")?
+            .to_string_lossy();
+        let prefix = format!("__dependencies/{name}");
+        if self
+            .source_roots
+            .insert(prefix.clone(), root.to_owned())
+            .is_some()
+        {
+            bail!("duplicate repository identity: {name}");
+        }
+        let key = |id: &str| format!("{prefix}/{id}");
+        for (_, mut node) in dependency.nodes {
+            node.id = key(&node.id);
+            node.file_path = key(&node.file_path);
+            self.nodes_by_simple_name
+                .entry(node.name.clone())
+                .or_default()
+                .push(node.id.clone());
+            self.nodes.insert(node.id.clone(), node);
+        }
+        for mut edge in dependency.edges {
+            edge.source = key(&edge.source);
+            edge.target = key(&edge.target);
+            let index = self.edges.len();
+            self.outgoing
+                .entry(edge.source.clone())
+                .or_default()
+                .push(index);
+            if edge.kind == "calls" {
+                self.incoming_calls
+                    .entry(edge.target.clone())
+                    .or_default()
+                    .push(index);
+            }
+            self.edges.push(edge);
+        }
+        for (id, mut references) in dependency.unresolved_by_method {
+            for reference in &mut references {
+                reference.from_node_id = key(&reference.from_node_id);
+                reference.file_path = key(&reference.file_path);
+            }
+            self.unresolved_by_method.insert(key(&id), references);
+        }
+        Ok(())
     }
 
     pub fn contained(&self, parent_id: &str, kind: &str) -> Vec<&GraphNode> {
@@ -359,6 +428,8 @@ pub(crate) fn test_snapshot(nodes: Vec<GraphNode>, mut edges: Vec<GraphEdge>) ->
         nodes_by_simple_name,
         version: "test".to_owned(),
         extraction_version: "test".to_owned(),
+        source_roots: BTreeMap::new(),
+        resolved_external_calls: HashSet::new(),
     }
 }
 
@@ -487,6 +558,8 @@ mod tests {
             nodes_by_simple_name: HashMap::new(),
             version: "test".to_owned(),
             extraction_version: "test".to_owned(),
+            source_roots: BTreeMap::new(),
+            resolved_external_calls: HashSet::new(),
         };
 
         let reachable = graph

@@ -50,6 +50,12 @@ pub struct InitArgs {
     /// Generated implementation directory family; default: detect existing api/service layout
     #[arg(long, value_enum)]
     layout: Option<LayoutPreset>,
+    /// Backend collection for automatic discovery and cross-repository enums
+    #[arg(long)]
+    repositories_root: Option<PathBuf>,
+    /// Configure the current backend checkout without Git network operations
+    #[arg(long)]
+    offline: bool,
     /// Overall deadline, capped at 1200 seconds
     #[arg(long, default_value_t = super::MAX_TIMEOUT_SECONDS)]
     timeout_seconds: u64,
@@ -94,11 +100,12 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         },
         _ => unreachable!("clap requires exactly one backend repository input"),
     };
-    let prepared = super::repo::prepare(
+    let prepared = super::repo::prepare_with_update(
         &repository_path,
         args.repo_url.as_deref(),
         args.branch.as_deref(),
         deadline,
+        !args.offline,
     )?;
     let backend = prepared.target.clone();
     let contract_roots = detect_contract_roots(&backend.root)?;
@@ -117,6 +124,18 @@ fn run_inner(args: InitArgs) -> Result<Value> {
             .unwrap_or_else(|| "nlab".to_owned()),
     };
     let config = ProjectConfig {
+        discovery: if args.repositories_root.is_some() {
+            Some(
+                previous
+                    .as_ref()
+                    .and_then(|config| config.discovery.clone())
+                    .unwrap_or_default(),
+            )
+        } else {
+            previous
+                .as_ref()
+                .and_then(|config| config.discovery.clone())
+        },
         version: CONFIG_VERSION,
         enum_erasable: previous.as_ref().is_none_or(|config| config.enum_erasable),
         backend: BackendConfig {
@@ -155,6 +174,10 @@ fn run_inner(args: InitArgs) -> Result<Value> {
     let config_source = config.shared_source()?;
     let mut local_config = LocalProjectConfig::load(&project)?;
     local_config.backend.repo_path = Some(backend.root.clone());
+    if let Some(root) = args.repositories_root {
+        local_config.backend.repositories_root =
+            Some(root.canonicalize().context("resolve repositories root")?);
+    }
     let local_config_source = local_config.source()?;
     let config_path = project.join(CONFIG_FILE);
     changes.push(FileChange::load(config_path.clone(), config_source)?);

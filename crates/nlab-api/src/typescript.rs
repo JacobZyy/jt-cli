@@ -212,25 +212,31 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
     let mut field_enums = HashMap::<String, String>::new();
     for operation in &ir.operations {
         let directory = type_output_path(operation, &config.backend.contract_roots)?;
-        for patch in operation
-            .semantic_patches
-            .iter()
-            .filter(|patch| patch.status == ProvenanceStatus::Closed && !patch.values.is_empty())
-        {
+        for patch in operation.semantic_patches.iter().filter(|patch| {
+            (patch.status == ProvenanceStatus::Closed && !patch.values.is_empty())
+                || (patch.status == ProvenanceStatus::Known && !patch.known_values.is_empty())
+        }) {
+            let values = if patch.status == ProvenanceStatus::Closed {
+                &patch.values
+            } else {
+                &patch.known_values
+            };
             let identity = enum_identity(patch);
             if let Some(existing) = enum_values.get(&identity) {
-                if existing != &patch.values {
+                if existing != values {
                     bail!("enum evidence changed for {identity} within one contract snapshot");
                 }
             } else {
-                enum_values.insert(identity.clone(), patch.values.clone());
+                enum_values.insert(identity.clone(), values.clone());
                 seeds.insert(enum_symbol(&identity), enum_seed(patch));
             }
             enum_usages
                 .entry(identity.clone())
                 .or_default()
                 .insert(directory.clone());
-            patch_enums.insert(patch_symbol(patch), identity);
+            if patch.status == ProvenanceStatus::Closed {
+                patch_enums.insert(patch_symbol(patch), identity);
+            }
         }
     }
     for (fqn, schema) in &ir.schemas {

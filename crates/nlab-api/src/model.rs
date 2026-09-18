@@ -226,6 +226,9 @@ pub struct SemanticPatch {
     pub enum_source: Option<String>,
     pub accessor: Option<String>,
     pub values: Vec<CodedValue>,
+    /// Confirmed enum declaration members without proof that the field domain is closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_values: Vec<CodedValue>,
     pub evidence: Vec<String>,
     pub warning: Option<String>,
 }

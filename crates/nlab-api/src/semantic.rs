@@ -1,3 +1,4 @@
+mod cross_repository;
 mod discovery;
 mod lookup;
 mod request;
@@ -69,6 +70,8 @@ pub struct SemanticAnalyzer<'a> {
     parameter_cache: HashMap<(String, String, usize), Domain>,
     enum_lookups: HashMap<String, lookup::EnumLookup>,
     request_domains: HashMap<(String, String), Domain>,
+    field_domain_cache: HashMap<(String, String, String), Domain>,
+    lookup_forwarder_cache: HashMap<String, Option<Domain>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -82,6 +85,8 @@ impl<'a> SemanticAnalyzer<'a> {
             parameter_cache: HashMap::new(),
             enum_lookups: HashMap::new(),
             request_domains: HashMap::new(),
+            field_domain_cache: HashMap::new(),
+            lookup_forwarder_cache: HashMap::new(),
         }
     }
 
@@ -114,10 +119,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 let Some(description) = field.description.as_deref() else {
                     continue;
                 };
-                let Some(enum_node) = linked_enum_nodes(self.project, description)
-                    .into_iter()
-                    .next()
-                else {
+                let candidates = linked_enum_nodes(self.project, description);
+                let [enum_node] = candidates.as_slice() else {
                     continue;
                 };
                 for accessor in enum_accessor_candidates(&field.name) {
@@ -152,7 +155,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 targets.extend(self.implementation_method(method));
                 for invocation in self.method_invocations(method)? {
                     let resolved = self.resolve_invocation(method, &invocation)?;
-                    if !resolved.is_empty() {
+                    if !resolved.is_empty() || !graph.source_roots.is_empty() {
                         // Receiver types and imports override CodeGraph's same-name fallback edges.
                         edges.retain(|edge| {
                             edge.line != invocation.line
@@ -295,6 +298,18 @@ impl<'a> SemanticAnalyzer<'a> {
             return Ok(Vec::new());
         };
         let graph = self.project.graph();
+        if owner.kind == "interface"
+            && graph.source_repository(&owner.file_path)
+                != graph.source_repository(&method.file_path)
+            && !graph.resolved_external_calls.contains(&(
+                method.file_path.clone(),
+                invocation.line,
+                invocation.column + 1,
+                owner.qualified_name.replace("::", "."),
+            ))
+        {
+            return Ok(Vec::new());
+        }
         let mut owners = BTreeSet::from([owner.id.clone()]);
         let mut visited = BTreeSet::new();
         let mut candidates = Vec::new();
@@ -615,6 +630,16 @@ impl<'a> SemanticAnalyzer<'a> {
                 if let Some(enum_node) = self.enum_for_receiver(writer, &receiver, offset)? {
                     return self.enum_domain(&enum_node, &accessor);
                 }
+                if !self.project.graph().source_roots.is_empty() {
+                    if let Some(domain) = self.lookup_field_domain(writer, &receiver, &accessor)? {
+                        return Ok(domain);
+                    }
+                    if let Some(domain) = self.copied_field_domain(
+                        operation, writer, &receiver, &accessor, offset, reachable, visiting,
+                    )? {
+                        return Ok(domain);
+                    }
+                }
                 let mut domain = Domain::default();
                 domain
                     .unknown
@@ -734,10 +759,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 if !invocation.exact_arity || invocation.arguments.len() <= parameter_index {
                     continue;
                 }
-                if !self
-                    .resolve_invocation(&caller, &invocation)?
-                    .contains(&method.id)
-                {
+                if !self.invocation_reaches(&caller, &invocation, &method.id)? {
                     continue;
                 }
                 domains.push(self.analyze_expression(
@@ -1070,7 +1092,7 @@ fn extract_enum_domain(
     };
     let label_index = fields.iter().position(|field| {
         field != &signal
-            && ["name", "desc", "label", "title"]
+            && ["name", "desc", "description", "label", "title"]
                 .iter()
                 .any(|suffix| field.to_ascii_lowercase().ends_with(suffix))
     });
@@ -1154,6 +1176,9 @@ fn linked_enum_nodes<'a>(project: &'a JavaProject<'_>, description: &str) -> Vec
     references.dedup();
     for reference in references {
         let node = project.node_for_fqn(&reference).or_else(|| {
+            if reference.contains('.') {
+                return None;
+            }
             let simple = reference.rsplit('.').next()?;
             let candidates = project
                 .graph()
@@ -1279,6 +1304,11 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
         enum_fqn: merged.enum_fqn,
         enum_source: merged.enum_source,
         accessor: merged.accessor,
+        known_values: if status == ProvenanceStatus::Known && merged.complete {
+            merged.values.clone()
+        } else {
+            Vec::new()
+        },
         values: if status == ProvenanceStatus::Closed {
             merged.values
         } else {
@@ -1297,6 +1327,7 @@ fn unresolved_patch(target: FieldTarget, reason: &str) -> SemanticPatch {
         enum_source: None,
         accessor: None,
         values: Vec::new(),
+        known_values: Vec::new(),
         evidence: Vec::new(),
         warning: Some(reason.to_owned()),
     }
@@ -1324,7 +1355,7 @@ fn reconcile_schema_paths(patches: &mut [SemanticPatch]) {
         .filter(|patch| conflicts.contains(&patch.target))
     {
         patch.status = ProvenanceStatus::Known;
-        patch.values.clear();
+        patch.known_values = std::mem::take(&mut patch.values);
         patch.warning = Some(
             "field has different domains at different paths; shared schema is not narrowed"
                 .to_owned(),
@@ -2307,13 +2338,13 @@ mod tests {
         );
     }
 
-    fn write(root: &std::path::Path, relative: &str, source: &str) {
+    pub(super) fn write(root: &std::path::Path, relative: &str, source: &str) {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, source).unwrap();
     }
 
-    fn node(
+    pub(super) fn node(
         id: &str,
         kind: &str,
         name: &str,
@@ -2337,7 +2368,7 @@ mod tests {
         }
     }
 
-    fn contains(source: &str, target: &str) -> GraphEdge {
+    pub(super) fn contains(source: &str, target: &str) -> GraphEdge {
         GraphEdge {
             source: source.to_owned(),
             target: target.to_owned(),
@@ -2349,7 +2380,7 @@ mod tests {
         }
     }
 
-    fn call(source: &str, target: &str, line: usize) -> GraphEdge {
+    pub(super) fn call(source: &str, target: &str, line: usize) -> GraphEdge {
         GraphEdge {
             source: source.to_owned(),
             target: target.to_owned(),

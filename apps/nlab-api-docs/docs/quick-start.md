@@ -272,16 +272,51 @@ jt nlab-api config --unset --project /path/to/frontend
 
 ## 跨仓库准备情况检查
 
-跨服务枚举分析前，可以先检查接口实际涉及的服务和本地源码：
+启用跨仓库分析时，给 generate 或 init 提供后端公共目录：
 
 ```bash
-jt nlab-api discover \
+jt nlab-api generate \
   --project /path/to/frontend \
   --repositories-root /path/to/backend-projects
 ```
 
-此命令遵守项目的 runner 配置；standalone 使用 `nlab-api discover`，参数相同。
-默认从生成配置的 `backend.contractRoots` 中所有接口方法开始。只分析某个入口文件时，追加：
+公共目录持久化到本地配置 `backend.repositoriesRoot`，不写入共享配置。
+后续每次 generate 自动执行 Discover，不需要重复传目录或手动调用 discover。
+旧项目没有配置 discovery 和公共目录时，保留原单仓库生成行为。
+
+CLI 将发现结果保存到共享配置 `.nlab/nlab-api.config.json` 的 `discovery.services`：
+
+```json
+{
+  "discovery": {
+    "services": {
+      "categoryr": {
+        "status": "missing",
+        "allowMissing": true,
+        "interfaces": ["example.ICategoryService"]
+      }
+    }
+  }
+}
+```
+
+已解析的服务还记录 Git `repository` 地址。每次刷新保留用户决定；补上仓库后清除该服务的
+`allowMissing`。不再被当前入口引用的服务标记为 `unused`，不会继续阻断。
+仅找到类型、没有 RPC 绑定的线索以 `interface:<完整类名>` 记录，避免伪造服务名。
+
+缺少仓库且未获允许时，generate 退出码为 `2`，报告 `status: blocked`，并且不覆盖已有生成物。
+查看 `.nlab/generate-report.json` 的 `stages.discovery.blockingServices`，补全仓库后重新生成。
+只有明确决定不用补某个服务时，执行：
+
+```bash
+jt nlab-api discover --project /path/to/frontend --allow-missing categoryr
+```
+
+可重复传 `--allow-missing`；不接受不存在于本次发现结果或并非缺失的服务。索引不可用必须修复，不能用允许缺失掩盖。
+后续 generate 不再询问已允许的服务，但仍会检查它是否已经补上。允许缺失会出现在生成报告的警告中。
+
+单独执行 discover 会更新发现配置并输出 JSON，不生成接口代码。两个入口遵守相同 runner 配置。
+默认从 `backend.contractRoots` 中所有接口方法开始。单独 discover 只分析某个文件时，可追加：
 
 ```bash
 --entry contract/src/main/java/example/IExampleFacade.java
@@ -291,7 +326,8 @@ jt nlab-api discover \
 实际分支与生成配置不同时会报告，不切换分支。
 
 公共目录的直接子目录作为仓库清单。优先读取各仓库 `.codegraph/codegraph.db`；
-缺失或不可用时，从公共目录的统一索引中提取对应仓库。不会重新建立大索引。
+缺失或不可用时，从公共目录的统一索引中提取对应仓库。generate 会先同步公共目录索引，
+分析时优先使用刚同步的公共索引；写入前检查所读 Java 源码是否发生变化。
 
 结果以 JSON 输出到 stdout，可重定向到自己选择的报告文件。报告包含：
 
@@ -299,6 +335,7 @@ jt nlab-api discover \
 - `repositories`：本地仓库路径、Git origin、分支、commit、脏状态、SCF 服务名、索引情况及是否参与分析。
 - `calls`：实际到达的跨服务调用点、代表性本地调用链、SCF 配置依据、候选仓库及继续搜索所需的完整接口名和服务名。
 - `warnings`、`unresolvedLocalCalls`：分析断点及无法解析的本地调用数量；后者也包括未索引的库方法和生成的 getter。
+- `blockingServices`、`allowedMissingServices`：尚需处理的服务及本次按明确决定允许缺失的服务。
 
 目前识别 `src/main/resources` 下 XML 中声明的 SCF `applicationName`、
 `references serviceName` 和 `reference interface`。只有服务绑定与仓库声明匹配，且目标
@@ -318,10 +355,18 @@ Java 注解、动态路由、运行时注册中心和 Maven 版本解析尚未�
 `--max-depth` 默认为 3，允许 1–16；本地调用不消耗跨仓库深度。调用循环会去重。
 每个仓库最多遍历 25000 个方法，达到上限会报告。调用链保留一条代表路径，不是完整的逐入口调用矩阵。
 
-这是源码准备情况报告，不会直接生成跨仓库枚举，也不证明线上部署关系或枚举取值闭合。
-索引新鲜度标记为 `not-verified`；使用覆盖结果前应自行同步索引。命令不会 clone、fetch、
-切换分支、更新索引、修改项目配置或生成物，也不会触发 standalone 自动升级。
-已 clone 仓库的地址取自 Git origin；缺失仓库当前只输出搜索关键词，尚未接入远程 Git 平台检索。
+generate 在通过 Discover 后，将已匹配仓库加入同一次源码分析，复用原枚举提取与 TypeScript/OpenAPI 生成器。
+节点、源码路径和缓存按仓库隔离；重复完整类型名不会任意选取。请求字段继续追踪必经校验，
+响应字段支持 DTO getter/setter 复制及枚举反查来源。`closed` 才收窄字段类型；`knownValues`
+保存已核实枚举成员并生成独立枚举文件，字段保留 `number` / `string`。后者不是完整取值约束。
+
+单独 discover 不同步索引，因此其新鲜度标记为 `not-verified`；它会写发现配置，但不会 clone、fetch、
+切换分支或改生成物，也不会触发 standalone 自动升级。generate 的发现报告说明本地源码情况，
+不证明线上部署、Maven 版本一致性或动态服务绑定。缺失仓库地址仍需补全，尚未接入远程 Git 平台检索。
+
+在隔离 Worktree 中测试或只使用当前源码时，可给 init / generate 传 `--offline`。
+此模式不执行 Git clone、切分支或 pull；generate 仍同步本地索引并执行配置的生成后命令，跳过 Gateway 查询。
+分支参数必须匹配当前 checkout，生成物中的 placeholder 路由不能当作已验证的线上路由。
 
 ## 常见问题
 

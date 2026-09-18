@@ -1,0 +1,504 @@
+use super::*;
+use crate::graph::test_snapshot;
+use crate::model::{ContractIr, TargetIdentity};
+use crate::semantic::tests::{call, contains, node, write};
+
+#[test]
+fn database_value_lookup_exports_known_members_without_closing_the_field() {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path(),
+        "Code.java",
+        "package p;\nenum Code {\nA(1), B(2);\nfinal int code;\nCode(int code) { this.code=code; }\nint getCode() { return code; }\nstatic Code fromCode(int code) {\nfor (Code item : values()) { if (item.getCode() == code) { return item; } }\nreturn null;\n}\nstatic String description(int code) { Code value=fromCode(code); return value == null ? \"\" : value.name(); }\n}\n",
+    );
+    write(
+        root.path(),
+        "Service.java",
+        "package p;\nclass Service {\nvoid copy(Source source) { Code.description(source.getCode()); }\n}\n",
+    );
+    let graph = test_snapshot(
+        vec![
+            node("enum", "enum", "Code", "p::Code", "Code.java", 2, ""),
+            node(
+                "description",
+                "method",
+                "description",
+                "p::Code::description",
+                "Code.java",
+                11,
+                "String (int code)",
+            ),
+            node(
+                "lookup",
+                "method",
+                "fromCode",
+                "p::Code::fromCode",
+                "Code.java",
+                7,
+                "Code (int code)",
+            ),
+            node(
+                "service",
+                "class",
+                "Service",
+                "p::Service",
+                "Service.java",
+                2,
+                "",
+            ),
+            node(
+                "copy",
+                "method",
+                "copy",
+                "p::Service::copy",
+                "Service.java",
+                3,
+                "void (Source source)",
+            ),
+        ],
+        vec![
+            contains("enum", "lookup"),
+            contains("enum", "description"),
+            contains("service", "copy"),
+        ],
+    );
+    let project = JavaProject::load(root.path(), &graph).unwrap();
+    let mut analyzer = SemanticAnalyzer::new(&project);
+    analyzer.index_enum_lookups().unwrap();
+    let domain = analyzer
+        .lookup_field_domain(&graph.nodes["copy"], "source", "getCode")
+        .unwrap()
+        .unwrap();
+    let patch = classify_patch(
+        FieldTarget {
+            source: FieldSource::Response,
+            operation_key: "query".to_owned(),
+            schema_fqn: "p.DTO".to_owned(),
+            field_path: "code".to_owned(),
+            field_name: "code".to_owned(),
+        },
+        vec![domain],
+    );
+    assert_eq!(patch.status, ProvenanceStatus::Known);
+    assert!(patch.values.is_empty());
+    assert_eq!(patch.known_values.len(), 2);
+    assert!(
+        analyzer
+            .lookup_field_domain(&graph.nodes["copy"], "source", "getState")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn explicit_imports_and_duplicate_full_names_never_select_a_different_repository() {
+    let primary = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write(
+        primary.path(),
+        "Caller.java",
+        "package p;\nimport wrong.Code;\nclass Caller {}\n",
+    );
+    let mut graph = test_snapshot(
+        vec![node(
+            "caller",
+            "class",
+            "Caller",
+            "p::Caller",
+            "Caller.java",
+            3,
+            "",
+        )],
+        vec![],
+    );
+    for root in [first.path(), second.path()] {
+        write(root, "Code.java", "package dep;\nenum Code { A; }\n");
+        graph
+            .include_repository(
+                root,
+                test_snapshot(
+                    vec![node(
+                        "enum",
+                        "enum",
+                        "Code",
+                        "dep::Code",
+                        "Code.java",
+                        2,
+                        "",
+                    )],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        let project = JavaProject::load(primary.path(), &graph).unwrap();
+        assert!(
+            project
+                .resolve_type("Caller.java", "p.Caller", &parse_java_type("Code").unwrap())
+                .is_none()
+        );
+        assert!(linked_enum_nodes(&project, "{@link wrong.Code}").is_empty());
+    }
+    let project = JavaProject::load(primary.path(), &graph).unwrap();
+    assert!(project.node_for_fqn("dep.Code").is_none());
+    assert!(linked_enum_nodes(&project, "{@link dep.Code}").is_empty());
+}
+
+#[test]
+fn remote_request_validation_and_copied_response_generate_without_false_narrowing() {
+    for (caught, bound) in [(false, true), (true, true), (false, false)] {
+        let primary = tempfile::tempdir().unwrap();
+        let dependency = tempfile::tempdir().unwrap();
+        let facade = "contract/src/main/java/p/contract/IFacade.java";
+        write(
+            primary.path(),
+            facade,
+            "package p.contract;\nimport p.DTO;\nimport p.Request;\n@ServiceContract public interface IFacade { DTO query(Request req); }\n",
+        );
+        write(
+            primary.path(),
+            "DTO.java",
+            "package p;\nclass DTO {\nString code;\nvoid setCode(String code) { this.code = code; }\n}\n",
+        );
+        write(
+            primary.path(),
+            "Request.java",
+            "package p;\nclass Request {\nString mode;\nString getMode() { return mode; }\n}\n",
+        );
+        let invocation = if caught {
+            "Result result; try { result = remote.query(req); } catch(Exception e) { return new DTO(); }"
+        } else {
+            "Result result = remote.query(req);"
+        };
+        write(
+            primary.path(),
+            "Facade.java",
+            &format!(
+                "package p;\nimport dep.IRemote;\nimport dep.Result;\nclass Facade {{\nIRemote remote;\nDTO query(Request req) {{\n{invocation}\nDTO dto = new DTO();\ndto.setCode(result.getCode());\nreturn dto;\n}}\n}}\n"
+            ),
+        );
+        let mut graph = test_snapshot(
+            vec![
+                node(
+                    "facade",
+                    "interface",
+                    "IFacade",
+                    "p.contract::IFacade",
+                    facade,
+                    4,
+                    "",
+                ),
+                node(
+                    "root",
+                    "method",
+                    "query",
+                    "p.contract::IFacade::query",
+                    facade,
+                    4,
+                    "DTO (Request req)",
+                ),
+                node("impl", "class", "Facade", "p::Facade", "Facade.java", 4, ""),
+                node(
+                    "remote",
+                    "field",
+                    "remote",
+                    "p::Facade::remote",
+                    "Facade.java",
+                    5,
+                    "IRemote remote",
+                ),
+                node(
+                    "query",
+                    "method",
+                    "query",
+                    "p::Facade::query",
+                    "Facade.java",
+                    6,
+                    "DTO (Request req)",
+                ),
+                node("dto", "class", "DTO", "p::DTO", "DTO.java", 2, ""),
+                node(
+                    "field",
+                    "field",
+                    "code",
+                    "p::DTO::code",
+                    "DTO.java",
+                    3,
+                    "String code",
+                ),
+                node(
+                    "setter",
+                    "method",
+                    "setCode",
+                    "p::DTO::setCode",
+                    "DTO.java",
+                    4,
+                    "void (String code)",
+                ),
+                node(
+                    "request",
+                    "class",
+                    "Request",
+                    "p::Request",
+                    "Request.java",
+                    2,
+                    "",
+                ),
+                node(
+                    "mode",
+                    "field",
+                    "mode",
+                    "p::Request::mode",
+                    "Request.java",
+                    3,
+                    "String mode",
+                ),
+                node(
+                    "get-mode",
+                    "method",
+                    "getMode",
+                    "p::Request::getMode",
+                    "Request.java",
+                    4,
+                    "String ()",
+                ),
+            ],
+            vec![
+                contains("facade", "root"),
+                contains("impl", "query"),
+                contains("impl", "remote"),
+                contains("dto", "field"),
+                contains("dto", "setter"),
+                contains("request", "mode"),
+                contains("request", "get-mode"),
+                GraphEdge {
+                    kind: "implements".to_owned(),
+                    ..contains("impl", "facade")
+                },
+                call("query", "setter", 9),
+            ],
+        );
+        write(
+            dependency.path(),
+            "IRemote.java",
+            "package dep;\nimport p.Request;\ninterface IRemote {\nResult query(Request req);\n}\n",
+        );
+        write(
+            dependency.path(),
+            "Remote.java",
+            "package dep;\nimport p.Request;\nclass Remote {\nResult query(Request req) {\nObjects.requireNonNull(Code.fromCode(req.getMode()));\nResult result = new Result();\nresult.setCode(Code.A.getCode());\nreturn result;\n}\n}\n",
+        );
+        write(
+            dependency.path(),
+            "Result.java",
+            "package dep;\nclass Result {\nString code;\nvoid setCode(String code) { this.code = code; }\nString getCode() { return code; }\n}\n",
+        );
+        write(
+            dependency.path(),
+            "Code.java",
+            "package dep;\nenum Code {\nA(\"a\", \"甲\"), B(\"b\", \"乙\");\nfinal String code;\nfinal String name;\nCode(String code, String name) { this.code=code; this.name=name; }\nString getCode() { return code; }\nstatic Code fromCode(String value) {\nfor (Code item : values()) { if (item.getCode().equals(value)) { return item; } }\nthrow new IllegalArgumentException();\n}\n}\n",
+        );
+        let remote = test_snapshot(
+            vec![
+                node(
+                    "facade",
+                    "interface",
+                    "IRemote",
+                    "dep::IRemote",
+                    "IRemote.java",
+                    3,
+                    "",
+                ),
+                node(
+                    "root",
+                    "method",
+                    "query",
+                    "dep::IRemote::query",
+                    "IRemote.java",
+                    4,
+                    "Result (Request req)",
+                ),
+                node(
+                    "impl",
+                    "class",
+                    "Remote",
+                    "dep::Remote",
+                    "Remote.java",
+                    3,
+                    "",
+                ),
+                node(
+                    "query",
+                    "method",
+                    "query",
+                    "dep::Remote::query",
+                    "Remote.java",
+                    4,
+                    "Result (Request req)",
+                ),
+                node(
+                    "dto",
+                    "class",
+                    "Result",
+                    "dep::Result",
+                    "Result.java",
+                    2,
+                    "",
+                ),
+                node(
+                    "field",
+                    "field",
+                    "code",
+                    "dep::Result::code",
+                    "Result.java",
+                    3,
+                    "String code",
+                ),
+                node(
+                    "setter",
+                    "method",
+                    "setCode",
+                    "dep::Result::setCode",
+                    "Result.java",
+                    4,
+                    "void (String code)",
+                ),
+                node(
+                    "getter",
+                    "method",
+                    "getCode",
+                    "dep::Result::getCode",
+                    "Result.java",
+                    5,
+                    "String ()",
+                ),
+                node("enum", "enum", "Code", "dep::Code", "Code.java", 2, ""),
+                node(
+                    "get-code",
+                    "method",
+                    "getCode",
+                    "dep::Code::getCode",
+                    "Code.java",
+                    7,
+                    "String ()",
+                ),
+                node(
+                    "lookup",
+                    "method",
+                    "fromCode",
+                    "dep::Code::fromCode",
+                    "Code.java",
+                    8,
+                    "Code (String value)",
+                ),
+            ],
+            vec![
+                contains("facade", "root"),
+                contains("impl", "query"),
+                contains("dto", "field"),
+                contains("dto", "setter"),
+                contains("dto", "getter"),
+                contains("enum", "get-code"),
+                contains("enum", "lookup"),
+                GraphEdge {
+                    kind: "implements".to_owned(),
+                    ..contains("impl", "facade")
+                },
+                call("query", "setter", 7),
+            ],
+        );
+        graph.include_repository(dependency.path(), remote).unwrap();
+        if bound {
+            graph.resolved_external_calls.insert((
+                "Facade.java".to_owned(),
+                7,
+                invocation.find("remote.query").unwrap() + 1,
+                "dep.IRemote".to_owned(),
+            ));
+        }
+        assert_eq!(graph.nodes["dto"].qualified_name, "p::DTO");
+        let project = JavaProject::load(primary.path(), &graph).unwrap();
+        let target = TargetIdentity {
+            app_name: "demo".to_owned(),
+            branch: "test".to_owned(),
+            commit: "test".to_owned(),
+            codegraph_version: "test".to_owned(),
+            codegraph_extraction_version: "test".to_owned(),
+        };
+        let roots = vec!["contract/src/main/java/p/contract".to_owned()];
+        let (mut operations, schemas) = project.build_contracts(&target, &roots).unwrap();
+        SemanticAnalyzer::new(&project)
+            .enrich(&mut operations, &schemas)
+            .unwrap();
+        let patches = &operations[0].semantic_patches;
+        let request = patches
+            .iter()
+            .find(|patch| {
+                patch.target.source == FieldSource::Request && patch.target.field_name == "mode"
+            })
+            .unwrap();
+        assert_eq!(
+            request.status,
+            if !bound {
+                ProvenanceStatus::Unresolved
+            } else if caught {
+                ProvenanceStatus::Known
+            } else {
+                ProvenanceStatus::Closed
+            },
+            "{request:#?}"
+        );
+        let response = patches
+            .iter()
+            .find(|patch| {
+                patch.target.source == FieldSource::Response && patch.target.field_name == "code"
+            })
+            .unwrap();
+        assert_eq!(
+            response.status,
+            if bound {
+                ProvenanceStatus::Known
+            } else {
+                ProvenanceStatus::Unresolved
+            },
+            "{response:#?}"
+        );
+        assert!(response.values.is_empty());
+        assert_eq!(response.known_values.len(), if bound { 2 } else { 0 });
+        if bound {
+            assert!(
+                response
+                    .enum_source
+                    .as_ref()
+                    .unwrap()
+                    .starts_with("__dependencies/")
+            );
+        }
+        let ir = ContractIr {
+            target,
+            operations,
+            schemas,
+        };
+        let mut config = crate::typescript::tests::config();
+        config.backend.contract_roots = roots;
+        let generated = crate::typescript::generate(&ir, &config).unwrap();
+        assert_eq!(generated.enum_files.len(), if bound { 1 } else { 0 });
+        if bound {
+            assert!(generated.files[&generated.enum_files[0]].contains("\"a\""));
+        }
+        let openapi = crate::openapi::generate(&ir, &config).unwrap();
+        let openapi: serde_json::Value = serde_json::from_str(&openapi.source).unwrap();
+        for schema in openapi["components"]["schemas"]
+            .as_object()
+            .unwrap()
+            .values()
+        {
+            if let Some(code) = schema["properties"].get("code") {
+                assert!(code.get("enum").is_none());
+            }
+        }
+        project.verify_sources(primary.path()).unwrap();
+        write(dependency.path(), "Code.java", "changed during generation");
+        assert!(project.verify_sources(primary.path()).is_err());
+    }
+}
