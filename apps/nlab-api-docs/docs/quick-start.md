@@ -317,7 +317,7 @@ CLI 将发现结果保存到共享配置 `.nlab/nlab-api.config.json` 的 `disco
     "services": {
       "categoryr": {
         "status": "missing",
-        "allowMissing": true,
+        "branch": "master",
         "interfaces": ["example.ICategoryService"]
       }
     }
@@ -325,20 +325,22 @@ CLI 将发现结果保存到共享配置 `.nlab/nlab-api.config.json` 的 `disco
 }
 ```
 
-已解析的服务还记录 Git `repository` 地址。每次刷新保留用户决定；补上仓库后清除该服务的
-`allowMissing`。不再被当前入口引用的服务标记为 `unused`，不会继续阻断。
+已解析的服务还记录 Git `repository` 地址及本次状态。依赖仓库的目标分支保存在
+`discovery.services.<service>.branch`，未指定时使用 `master`，不会改用远端默认分支。
+不再缓存允许缺失决定；旧 `allowMissing` 字段不参与判断，配置刷新时移除。
 仅找到类型、没有 RPC 绑定的线索以 `interface:<完整类名>` 记录，避免伪造服务名。
 
-缺少仓库且未获允许时，generate 退出码为 `2`，报告 `status: blocked`，并且不覆盖已有生成物。
-查看 `.nlab/generate-report.json` 的 `stages.discovery.blockingServices`，补全仓库后重新生成。
-只有明确决定不用补某个服务时，执行：
+指定依赖分支：
 
 ```bash
-jt nlab-api discover --project /path/to/frontend --allow-missing categoryr
+jt nlab-api discover --project /path/to/frontend --service-branch categoryr=feature/example
 ```
 
-可重复传 `--allow-missing`；不接受不存在于本次发现结果或并非缺失的服务。索引不可用必须修复，不能用允许缺失掩盖。
-后续 generate 不再询问已允许的服务，但仍会检查它是否已经补上。允许缺失会出现在生成报告的警告中。
+可重复传 `--service-branch`。每次在线 Discover 都重新尝试获取缺失仓库，并对已有依赖仓库
+切换到目标分支、执行 fast-forward 更新。认证、权限、分支不存在或 clone/pull 失败只记录本次
+`acquisition-failed`，继续生成可分析部分；失败仓库的旧索引不参与本次分析。
+下次在线运行会再次尝试，不要求用户记录跳过决定。工作区有修改时不丢弃修改。
+索引本身不可用或仓库关联歧义仍退出 `2`，且不覆盖旧生成物。
 
 单独执行 discover 会更新发现配置并输出 JSON，不生成接口代码。两个入口遵守相同 runner 配置。
 默认从 `backend.contractRoots` 中所有接口方法开始。单独 discover 只分析某个文件时，可追加：
@@ -356,11 +358,8 @@ Discover 自动执行 `codegraph init --yes` 或 `codegraph sync`，不再读取
 
 本地缺失的服务先通过 `zzcli sic get-cluster-info-by-app-name` 查集群，再通过
 `get-cluster-info-with-group` 获取 `beetleInfo.groupName/projectName`，组成公司 GitLab SSH 地址。
-CLI 自动 clone 默认分支到公共目录，初始化索引，再继续追踪新仓库的依赖。
-已有仓库不由 Discover 切分支或拉取；同名目录冲突不覆盖。需要开发分支时，先准备对应 checkout。
-SIC 认证、权限、仓库信息缺失或 clone 失败，记录为 `acquisition-failed`，保存错误并沿用退出码 2 的阻断流程。
-已明确允许缺失的服务不再自动查询或 clone；手动补上后恢复分析。
-`discover --offline` 和 `generate --offline` 跳过 SIC 与 clone，但仍同步本地仓库索引。
+CLI 自动 clone 目标分支到公共目录，初始化索引，再继续追踪新仓库的依赖；同名目录冲突不覆盖。
+`discover --offline` 和 `generate --offline` 跳过 SIC、clone 和 pull，但仍同步本地仓库索引。
 
 结果以 JSON 输出到 stdout，可重定向到自己选择的报告文件。报告包含：
 
@@ -369,10 +368,10 @@ SIC 认证、权限、仓库信息缺失或 clone 失败，记录为 `acquisitio
 - `calls`：实际到达的跨服务调用点、代表性本地调用链、SCF 配置依据、候选仓库及继续搜索所需的完整接口名和服务名。
 - `warnings`、`unresolvedLocalCalls`：分析断点及无法解析的本地调用数量；后者也包括未索引的库方法和生成的 getter。
 - `acquisitions`：本次自动获取的仓库地址、获取状态和失败原因。
-- `blockingServices`、`allowedMissingServices`：尚需处理的服务及本次按明确决定允许缺失的服务。
+- `blockingServices`、`unavailableServices`：存在关联或索引阻断的服务，以及本次源码不可用但不阻断生成的服务。
 
 目前识别 `src/main/resources` 下 XML 中声明的 SCF `applicationName`、
-`references serviceName` 和 `reference interface`。只有服务绑定与仓库声明匹配，且目标
+`references serviceName` 和 `reference interface`。服务归属由仓库声明或已核实的 SIC 仓库关联确定；只有归属唯一，且目标
 接口的方法名及参数数量唯一时，才继续遍历。没有绑定、多个候选、方法重载、索引缺失都保留断点。
 Java 注解、动态路由、运行时注册中心和 Maven 版本解析尚未接入；不会通过名称相似推定仓库。
 

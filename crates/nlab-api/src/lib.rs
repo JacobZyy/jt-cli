@@ -204,9 +204,9 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     };
     let mut diagnostics = semantic_diagnostics(&ir);
     if let Some(discovery) = &discovery_report {
-        diagnostics.extend(discovery.allowed_missing_services.iter().map(|service| json!({
-            "level": "warning", "stage": "discovery", "code": "ALLOWED_MISSING_SERVICE",
-            "service": service, "message": "User permits missing source; related field domains remain open."
+        diagnostics.extend(discovery.unavailable_services.iter().map(|service| json!({
+            "level": "warning", "stage": "discovery", "code": "UNAVAILABLE_SERVICE",
+            "service": service, "message": "Source unavailable in this run; related field domains remain open. Discovery retries on the next online run."
         })));
     }
 

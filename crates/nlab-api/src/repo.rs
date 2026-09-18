@@ -231,17 +231,6 @@ pub fn verify_unchanged(target: &RepositoryTarget) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn clone_missing(repository: &str, destination: &Path, deadline: Instant) -> Result<()> {
-    let _lock = RepositoryLock::acquire(destination)?;
-    if destination.try_exists()? || fs::symlink_metadata(destination).is_ok() {
-        bail!(
-            "clone destination already exists; inspect its service association: {}",
-            destination.display()
-        );
-    }
-    clone_repository(repository, destination, None, deadline)
-}
-
 fn clone_repository(
     repository: &str,
     destination: &Path,
@@ -290,7 +279,7 @@ fn ensure_clean(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_branch(root: &Path, branch: &str) -> Result<()> {
+pub(crate) fn validate_branch(root: &Path, branch: &str) -> Result<()> {
     if branch.trim().is_empty() || branch.starts_with('-') {
         bail!("backend branch must be non-empty and must not start with '-'");
     }
@@ -437,7 +426,7 @@ fn managed_clone_name(repository: &str) -> Result<String> {
     Ok(format!("{name}-{suffix}"))
 }
 
-fn same_repository(expected: &str, actual: &str) -> bool {
+pub(crate) fn same_repository(expected: &str, actual: &str) -> bool {
     normalize_repository(expected) == normalize_repository(actual)
 }
 
@@ -510,23 +499,6 @@ mod tests {
         git(&upstream, &["push", "-u", "origin", "feature"]);
         git(&upstream, &["switch", "main"]);
         (root, remote, upstream, backend)
-    }
-
-    #[test]
-    fn dependency_clone_uses_default_branch_and_preserves_existing_destination() {
-        let (_temp, remote, _upstream, backend) = repositories();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        clone_missing(remote.to_str().unwrap(), &backend, deadline).unwrap();
-        assert_eq!(current_branch(&backend).unwrap(), "main");
-        fs::write(backend.join("contract.java"), "keep local edits").unwrap();
-        assert!(clone_missing(remote.to_str().unwrap(), &backend, deadline).is_err());
-        assert_eq!(
-            fs::read_to_string(backend.join("contract.java")).unwrap(),
-            "keep local edits"
-        );
-        let failed = backend.with_file_name("failed");
-        assert!(clone_missing("/nonexistent/nlab-api-test-remote.git", &failed, deadline).is_err());
-        assert!(!failed.exists());
     }
 
     #[test]

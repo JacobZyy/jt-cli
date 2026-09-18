@@ -144,7 +144,7 @@ fn fixture(unified: bool) -> (tempfile::TempDir, DiscoverArgs) {
     let args = DiscoverArgs {
         project: root.join("frontend"),
         repositories_root: Some(root.to_path_buf()),
-        allow_missing: Vec::new(),
+        service_branch: Vec::new(),
         entry: None,
         max_depth: 3,
         offline: true,
@@ -279,76 +279,11 @@ fn overloaded_remote_method_is_not_guessed_and_unbound_candidate_is_not_followed
 }
 
 #[test]
-fn missing_decisions_persist_and_a_new_repository_clears_the_exception() {
-    let (temp, args) = fixture(false);
-    let project = args.project.clone();
-    let config_path = project.join(crate::config::CONFIG_FILE);
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["futureSetting"] = serde_json::json!({"keep": true});
-    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-    let mut report = discover(args.clone()).unwrap();
-    record(&project, &mut report, &[], false).unwrap();
-    assert_eq!(report.blocking_services, ["missing"]);
-    assert_eq!(
-        ProjectConfig::load(&project)
-            .unwrap()
-            .discovery
-            .unwrap()
-            .services["missing"]
-            .status,
-        "missing"
-    );
-    assert!(!project.join(".nlab/contract-ir.json").exists());
-    let mut report = discover(args.clone()).unwrap();
-    record(&project, &mut report, &["missing".to_owned()], false).unwrap();
-    assert!(report.blocking_services.is_empty());
-    let mut report = discover(args.clone()).unwrap();
-    record(&project, &mut report, &[], false).unwrap();
-    assert!(report.blocking_services.is_empty());
-    assert!(
-        ProjectConfig::load(&project)
-            .unwrap()
-            .discovery
-            .unwrap()
-            .services["missing"]
-            .allow_missing
-    );
-    let child = temp.path().join("c");
-    fs::create_dir_all(child.join(".git")).unwrap();
-    let db = index(&child);
-    add_source(
-        &child,
-        &db,
-        "",
-        "Missing",
-        true,
-        "package p;\npublic interface Missing {\nvoid run();\n}\n",
-    );
-    write(
-        &child,
-        "service/src/main/resources/scf.xml",
-        "<zzscf:application applicationName='missing'/>",
-    );
-    let mut report = discover(args).unwrap();
-    record(&project, &mut report, &[], false).unwrap();
-    let service = &ProjectConfig::load(&project)
-        .unwrap()
-        .discovery
-        .unwrap()
-        .services["missing"];
-    assert_eq!(service.status, "resolved");
-    assert!(!service.allow_missing);
-    let config: serde_json::Value =
-        serde_json::from_slice(&fs::read(config_path).unwrap()).unwrap();
-    assert_eq!(config["futureSetting"]["keep"], true);
-}
-
-#[test]
 fn preflight_blocks_before_overwriting_existing_generated_files() {
-    let (_temp, args) = fixture(false);
+    let (temp, args) = fixture(false);
+    fs::remove_dir_all(temp.path().join("b/.codegraph")).unwrap();
     write(&args.project, ".nlab/contract-ir.json", "existing contract");
-    let result = scan(args.clone(), &BTreeMap::new()).unwrap();
+    let result = scan(args.clone(), &BTreeMap::new(), &BTreeMap::new()).unwrap();
     let error = finish_preflight(&args.project, result).err().unwrap();
     assert!(error.downcast_ref::<Blocked>().is_some());
     assert_eq!(
@@ -359,97 +294,168 @@ fn preflight_blocks_before_overwriting_existing_generated_files() {
         serde_json::from_slice(&fs::read(args.project.join(".nlab/generate-report.json")).unwrap())
             .unwrap();
     assert_eq!(report["status"], "blocked");
-    assert_eq!(
-        report["stages"]["discovery"]["blockingServices"][0],
-        "missing"
-    );
+    assert_eq!(report["stages"]["discovery"]["blockingServices"][0], "b");
 }
 
 #[test]
-fn acquisition_retraces_cloned_sources_records_failure_and_respects_waivers() {
+fn acquisition_retries_legacy_waivers_and_keeps_requested_branch() {
+    let (temp, mut args) = fixture(false);
+    args.offline = false;
+    let project = args.project.clone();
+    let config_path = project.join(crate::config::CONFIG_FILE);
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["discovery"] = serde_json::json!({"services":{"b":{"branch":"master"},"missing":{"allowMissing":true,"status":"missing"}}});
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    save_branches(&project, &["missing=feature/test".to_owned()]).unwrap();
+    for _ in 0..2 {
+        let mut attempts = Vec::new();
+        let result = acquisition::scan_with(
+            args.clone(),
+            |_| Ok(()),
+            |service, branch, existing, _| {
+                attempts.push((service.to_owned(), branch.to_owned()));
+                acquisition::Acquisition {
+                    repository: Some(format!("git@example:{service}.git")),
+                    branch: branch.to_owned(),
+                    path: existing.map(Path::to_owned),
+                    status: if service == "b" {
+                        "updated"
+                    } else {
+                        "acquisition-failed"
+                    }
+                    .to_owned(),
+                    error: (service == "missing")
+                        .then(|| "Permission denied (publickey).".to_owned()),
+                }
+            },
+        )
+        .unwrap();
+        let result = finish_preflight(&project, result).unwrap();
+        assert_eq!(
+            attempts,
+            [
+                ("b".to_owned(), "master".to_owned()),
+                ("missing".to_owned(), "feature/test".to_owned())
+            ]
+        );
+        assert_eq!(result.report.unavailable_services, ["missing"]);
+        assert!(result.report.blocking_services.is_empty());
+        let state = ProjectConfig::load(&project).unwrap().discovery.unwrap();
+        assert_eq!(state.services["missing"].status, "acquisition-failed");
+        assert_eq!(
+            state.services["missing"].branch.as_deref(),
+            Some("feature/test")
+        );
+        assert!(
+            !fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("allowMissing")
+        );
+    }
+    args.offline = true;
+    acquisition::scan_with(
+        args,
+        |_| Ok(()),
+        |_, _, _, _| panic!("offline must not acquire"),
+    )
+    .unwrap();
+    assert!(!temp.path().join("missing").exists());
+}
+
+#[test]
+fn acquisition_syncs_new_repository_and_failed_updates_never_use_stale_index() {
     let (temp, mut args) = fixture(false);
     args.offline = false;
     let saved = tempfile::tempdir().unwrap();
     fs::rename(temp.path().join("b"), saved.path().join("b")).unwrap();
-    let mut synced = BTreeSet::new();
-    let mut attempted = Vec::new();
-    let mut result = acquisition::scan_with(
+    let mut synced = Vec::new();
+    let result = acquisition::scan_with(
         args.clone(),
         |path| {
-            assert!(synced.insert(path.to_owned()), "sync each repository once");
+            synced.push(path.to_owned());
             Ok(())
         },
-        |service, root| {
-            attempted.push(service.to_owned());
+        |service, branch, _, root| {
+            let path = root.join(service);
             if service == "b" {
-                fs::rename(saved.path().join("b"), root.join("b")).unwrap();
-                acquisition::Acquisition {
-                    repository: Some("git@example:b.git".to_owned()),
-                    status: "cloned".to_owned(),
-                    error: None,
+                fs::rename(saved.path().join("b"), &path).unwrap();
+            }
+            acquisition::Acquisition {
+                repository: None,
+                branch: branch.to_owned(),
+                path: Some(path),
+                status: if service == "b" {
+                    "cloned"
+                } else {
+                    "acquisition-failed"
                 }
-            } else {
-                acquisition::Acquisition {
-                    repository: Some("git@example:missing.git".to_owned()),
-                    status: "acquisition-failed".to_owned(),
-                    error: Some("Permission denied (publickey).".to_owned()),
-                }
+                .to_owned(),
+                error: None,
             }
         },
     )
     .unwrap();
-    assert_eq!(attempted, ["b", "missing"]);
-    assert_eq!(synced.len(), 2);
+    assert!(synced.iter().any(|path| path.ends_with("b")));
     assert_eq!(result.report.calls[0].status, "source-matched");
-    record(&args.project, &mut result.report, &[], false).unwrap();
-    assert_eq!(result.report.blocking_services, ["missing"]);
-    let state = ProjectConfig::load(&args.project)
-        .unwrap()
-        .discovery
-        .unwrap();
-    assert_eq!(state.services["missing"].status, "acquisition-failed");
-    assert_eq!(
-        state.services["missing"].error.as_deref(),
-        Some("Permission denied (publickey).")
+    let result = acquisition::scan_with(
+        args.clone(),
+        |_| Ok(()),
+        |_, branch, path, _| acquisition::Acquisition {
+            repository: None,
+            branch: branch.to_owned(),
+            path: path.map(Path::to_owned),
+            status: "acquisition-failed".to_owned(),
+            error: Some("fetch denied".to_owned()),
+        },
+    )
+    .unwrap();
+    assert_eq!(result.report.calls.len(), 1);
+    assert_eq!(result.report.calls[0].status, "index-unavailable");
+    assert!(
+        !result
+            .report
+            .repositories
+            .iter()
+            .find(|repository| repository.path.ends_with("b"))
+            .unwrap()
+            .visited
     );
-    args.allow_missing.push("missing".to_owned());
-    let mut result = acquisition::scan_with(
-        args.clone(),
-        |_| Ok(()),
-        |_, _| panic!("explicit waiver must skip acquisition"),
-    )
-    .unwrap();
-    record(
-        &args.project,
-        &mut result.report,
-        &args.allow_missing,
-        false,
-    )
-    .unwrap();
-    args.allow_missing.clear();
-    acquisition::scan_with(
-        args.clone(),
-        |_| Ok(()),
-        |_, _| panic!("persisted waiver must skip acquisition"),
-    )
-    .unwrap();
-    args.offline = true;
-    acquisition::scan_with(args, |_| Ok(()), |_, _| panic!("offline must not acquire")).unwrap();
+    let result = finish_preflight(&args.project, result).unwrap();
+    assert_eq!(result.report.unavailable_services, ["b"]);
+    assert!(result.report.blocking_services.is_empty());
 }
 
 #[test]
-fn failed_sync_does_not_use_stale_dependency_index() {
-    let (_temp, args) = fixture(false);
+fn sic_association_resolves_repositories_without_scf_application_xml() {
+    let (temp, mut args) = fixture(false);
+    args.offline = false;
+    write(
+        temp.path(),
+        "b/service/src/main/resources/scf.xml",
+        "<beans/>",
+    );
     let result = acquisition::scan_with(
         args,
-        |path| {
-            if path.ends_with("b") {
-                bail!("sync failed");
+        |_| Ok(()),
+        |service, branch, _, root| {
+            assert_eq!(service, "b");
+            acquisition::Acquisition {
+                repository: Some("git@example:b.git".to_owned()),
+                branch: branch.to_owned(),
+                path: Some(root.join("b")),
+                status: "updated".to_owned(),
+                error: None,
             }
-            Ok(())
         },
-        |_, _| panic!("offline"),
     )
     .unwrap();
-    assert_eq!(result.report.calls[0].status, "index-unavailable");
+    assert_eq!(result.report.calls[0].status, "source-matched");
+    assert!(
+        result
+            .report
+            .repositories
+            .iter()
+            .any(|repository| repository.path.ends_with("b") && repository.visited)
+    );
 }

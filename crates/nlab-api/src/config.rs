@@ -51,15 +51,12 @@ pub struct DiscoveredService {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    #[serde(default)]
     pub status: String,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub allow_missing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub interfaces: BTreeSet<String>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !value
 }
 
 fn default_enum_erasable() -> bool {
