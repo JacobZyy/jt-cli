@@ -546,6 +546,9 @@ fn semantic_patch(patch: &SemanticPatch) -> Value {
     if !patch.values.is_empty() {
         value.insert("values".to_owned(), json!(patch.values));
     }
+    if !patch.known_values.is_empty() {
+        value.insert("knownValues".to_owned(), json!(patch.known_values));
+    }
     if !patch.evidence.is_empty() {
         value.insert("evidence".to_owned(), json!(patch.evidence));
     }

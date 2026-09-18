@@ -340,21 +340,24 @@ from that object. No per-operation URL getter functions are generated.
 Each generated enum has a source comment identifying a Java enum class or field comment/annotation,
 with the qualified class and accessor or field reference.
 
-Before extending enum tracing across services, use read-only repository discovery:
+Enable automatic discovery and cross-repository enum analysis with a backend collection:
 
 ```bash
-jt nlab-api discover --project /path/to/frontend --repositories-root /path/to/backend-projects
+jt nlab-api generate --project /path/to/frontend --repositories-root /path/to/backend-projects
 ```
 
-The command reads the existing generation config and starts at `backend.contractRoots`. Add
-`--entry contract/src/main/java/example/IExampleFacade.java` to inspect one interface file.
-It follows reachable typed calls, matches literal SCF service bindings to local repositories,
-and prints a JSON report with Git origins, index readiness, call paths, and missing sources.
-It reuses per-repository CodeGraph indexes, falling back to the collection index when necessary.
-It does not clone, fetch, switch branches, update indexes, or change generated files. Unresolved
-repositories include exact interface and service search terms; remote Git hosting search is not
-implemented. See [repository discovery](apps/nlab-api-docs/docs/quick-start.md#跨仓库准备情况检查)
-for report limitations. Standalone `nlab-api discover` exposes the same command; JT respects the runner.
+The collection path is saved locally; subsequent `generate` runs discover dependencies before
+writing generated artifacts. Service results and explicit `allowMissing` decisions live in the shared
+config's `discovery.services` field. Missing repositories block generation with exit code 2. After an
+explicit user decision, `jt nlab-api discover --project /path/to/frontend --allow-missing service-name`
+records the exception. Every run checks again and clears it when a repository becomes available.
+
+Resolved repository indexes are combined with separate node/file identities. Enum extraction follows
+cross-repository requests and DTO copies. Proven closed domains narrow fields; confirmed enum members
+with incomplete field-flow evidence are exported as enum definitions and `knownValues`, while fields
+remain open scalars. `init` and `generate` accept `--offline` to use the current checkout without Git
+network operations; offline generation also skips Gateway queries. See
+[repository discovery](apps/nlab-api-docs/docs/quick-start.md#跨仓库准备情况检查) for scope and limitations.
 
 The top-level `EnumIrisable` boolean in `.nlab/nlab-api.config.json` controls TypeScript enum syntax.
 It defaults to `true`, including when omitted from existing configs: generation uses an `as const`

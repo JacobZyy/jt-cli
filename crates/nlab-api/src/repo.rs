@@ -80,11 +80,12 @@ pub fn managed_clone_path(repository: &str) -> Result<PathBuf> {
         .join(managed_clone_name(repository)?))
 }
 
-pub fn prepare(
+pub fn prepare_with_update(
     repository_path: &Path,
     expected_origin: Option<&str>,
     requested_branch: Option<&str>,
     deadline: Instant,
+    update: bool,
 ) -> Result<PreparedRepository> {
     let repository_path = absolute_path(repository_path)?;
     let lock_target = if repository_path.exists() {
@@ -96,6 +97,12 @@ pub fn prepare(
     };
     let lock = RepositoryLock::acquire(&lock_target)?;
     if !repository_path.exists() {
+        if !update {
+            bail!(
+                "offline backend repository does not exist: {}",
+                repository_path.display()
+            );
+        }
         let origin = expected_origin.context("cannot clone backend without repository URL")?;
         clone_repository(origin, &repository_path, requested_branch, deadline)?;
     }
@@ -116,8 +123,10 @@ pub fn prepare(
         .map(str::to_owned)
         .unwrap_or(current_branch(&root)?);
     validate_branch(&root, &branch)?;
-    switch_branch(&root, &branch, deadline)?;
-    pull_ff_only(&root, &branch, deadline)?;
+    if update {
+        switch_branch(&root, &branch, deadline)?;
+        pull_ff_only(&root, &branch, deadline)?;
+    }
     let target = inspect(&root, &branch)?;
     Ok(PreparedRepository {
         target,
@@ -179,7 +188,12 @@ pub fn inspect(repo: &Path, requested_branch: &str) -> Result<RepositoryTarget> 
 }
 
 pub fn sync_codegraph(target: &RepositoryTarget, deadline: Instant) -> Result<()> {
-    let action = if target.root.join(".codegraph/codegraph.db").is_file() {
+    sync_index(&target.root, deadline)?;
+    verify_unchanged(target)
+}
+
+pub fn sync_index(root: &Path, deadline: Instant) -> Result<()> {
+    let action = if root.join(".codegraph/codegraph.db").is_file() {
         "sync"
     } else {
         "init"
@@ -187,23 +201,14 @@ pub fn sync_codegraph(target: &RepositoryTarget, deadline: Instant) -> Result<()
     let mut command = Command::new("codegraph");
     command
         .arg(action)
-        .arg(&target.root)
-        .current_dir(&target.root)
+        .arg(root)
+        .current_dir(root)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let status = run_until(&mut command, deadline)
-        .with_context(|| format!("codegraph {action} {}", target.root.display()))?;
+        .with_context(|| format!("codegraph {action} {}", root.display()))?;
     if !status.success() {
         bail!("codegraph {action} failed with status {status}");
-    }
-    ensure_clean(&target.root)?;
-    let current = inspect(&target.root, &target.branch)?;
-    if current.commit != target.commit {
-        bail!(
-            "backend branch moved during CodeGraph indexing: {} -> {}",
-            target.commit,
-            current.commit
-        );
     }
     Ok(())
 }
@@ -436,6 +441,15 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepare(
+        repository: &Path,
+        origin: Option<&str>,
+        branch: Option<&str>,
+        deadline: Instant,
+    ) -> Result<PreparedRepository> {
+        prepare_with_update(repository, origin, branch, deadline, true)
+    }
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new("git")

@@ -44,6 +44,12 @@ pub struct GenerateArgs {
     /// Backend branch for this run; defaults to the shared project config
     #[arg(long)]
     branch: Option<String>,
+    /// Enable discovery using this backend collection, saved to local config
+    #[arg(long)]
+    repositories_root: Option<PathBuf>,
+    /// Use the current backend branch without Git network operations or Gateway queries
+    #[arg(long)]
+    offline: bool,
     /// Overall deadline, capped at 1200 seconds
     #[arg(long, default_value_t = MAX_TIMEOUT_SECONDS)]
     timeout_seconds: u64,
@@ -91,6 +97,9 @@ pub fn generate(args: GenerateArgs) -> u8 {
         }
         Err(error) => {
             eprintln!("error: {error:#}");
+            if error.downcast_ref::<discover::Blocked>().is_some() {
+                return 2;
+            }
             if error
                 .chain()
                 .any(|cause| cause.to_string().contains("deadline reached"))
@@ -117,35 +126,60 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         .with_context(|| format!("resolve frontend project {}", args.project.display()))?;
     let config = config::ProjectConfig::load(&output_dir)?;
     config.validate_project(&output_dir)?;
+    let _lock = OutputLock::acquire(&output_dir)?;
+    if let Some(root) = &args.repositories_root {
+        discover::save_root(&output_dir, root)?;
+    }
+    let repositories_root = LocalProjectConfig::load(&output_dir)?
+        .backend
+        .repositories_root;
+    if config.discovery.is_some() && repositories_root.is_none() {
+        bail!(
+            "discovery is configured but repositories root is missing; pass --repositories-root <path>"
+        );
+    }
     let branch = args.branch.as_deref().unwrap_or(&config.backend.branch);
     let repo_path = repo::resolve_path(
         &config.backend.repo_path,
         config.backend.repository.as_deref(),
     )?;
     reporter.phase(5, "准备后端仓库");
-    let prepared = repo::prepare(
+    let prepared = repo::prepare_with_update(
         &repo_path,
         config.backend.repository.as_deref(),
         Some(branch),
         deadline,
+        !args.offline,
     )?;
     let target = &prepared.target;
     if path_inside(&target.root, &output_dir) {
         bail!("frontend project must stay outside backend repository");
     }
-    let _lock = OutputLock::acquire(&output_dir)?;
+    reporter.phase(10, "同步 CodeGraph");
+    if let Some(root) = &repositories_root {
+        repo::sync_index(root, deadline)?;
+        if !target.root.starts_with(root) {
+            repo::sync_codegraph(target, deadline)?;
+        }
+    } else {
+        repo::sync_codegraph(target, deadline)?;
+    }
+
+    reporter.phase(25, "读取后端索引");
+    ensure_before_deadline(deadline)?;
+    let (graph, discovery_report) = if let Some(root) = &repositories_root {
+        reporter.phase(30, "Discover 关联仓库");
+        let discovery = discover::prepare(&output_dir, root)?;
+        (discovery.graph, Some(discovery.report))
+    } else {
+        (Snapshot::load(&target.root)?, None)
+    };
+    ensure_before_deadline(deadline)?;
     let legacy = if config.migration.enabled {
         migrate::snapshot_legacy(&output_dir)?
     } else {
         None
     };
-
-    reporter.phase(10, "同步 CodeGraph");
-    repo::sync_codegraph(target, deadline)?;
-
-    reporter.phase(25, "读取后端索引");
-    ensure_before_deadline(deadline)?;
-    let graph = Snapshot::load(&target.root)?;
 
     reporter.phase(35, "解析后端契约");
     ensure_before_deadline(deadline)?;
@@ -174,9 +208,15 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         schemas,
     };
     let mut diagnostics = semantic_diagnostics(&ir);
+    if let Some(discovery) = &discovery_report {
+        diagnostics.extend(discovery.allowed_missing_services.iter().map(|service| json!({
+            "level": "warning", "stage": "discovery", "code": "ALLOWED_MISSING_SERVICE",
+            "service": service, "message": "User permits missing source; related field domains remain open."
+        })));
+    }
 
     reporter.phase(60, "补全 Gateway 路由");
-    let route_summary = if config.gateway.enabled {
+    let route_summary = if config.gateway.enabled && !args.offline {
         routes::apply_best_effort(&mut ir, Path::new("zzcli"))
     } else {
         routes::RouteSummary {
@@ -213,6 +253,8 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
 
     reporter.phase(78, "写入生成产物");
     ensure_before_deadline(deadline)?;
+    project.verify_sources(&target.root)?;
+    repo::verify_unchanged(target)?;
     let written = output::write(&output_dir, &ir, &openapi, &frontend)?;
 
     reporter.phase(82, "执行生成后命令");
@@ -347,6 +389,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         },
         "stages": {
             "generate": "complete",
+            "discovery": discovery_report,
             "afterGenerate": {
                 "status": if config.after_generate.is_empty() { "skipped" } else { "complete" },
                 "hooks": after_generate,

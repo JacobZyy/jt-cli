@@ -268,11 +268,12 @@ impl SemanticAnalyzer<'_> {
                 // Interface dispatch has no Java invocation expression at the contract declaration.
                 if method.name == root.name
                     && parameters.len() == method_parameters(&root.signature).len()
-                    && self
-                        .project
-                        .graph()
-                        .incoming_calls(&method.id)
-                        .any(|edge| edge.source == root.id)
+                    && (self.implementation_method(root).as_deref() == Some(method.id.as_str())
+                        || self
+                            .project
+                            .graph()
+                            .incoming_calls(&method.id)
+                            .any(|edge| edge.source == root.id))
                 {
                     let root = root.clone();
                     let root_name = method_parameters(&root.signature)[index].1.clone();
@@ -296,9 +297,7 @@ impl SemanticAnalyzer<'_> {
                 for caller in callers {
                     for invocation in self.method_invocations(&caller)? {
                         if invocation.arguments.len() <= index
-                            || !self
-                                .resolve_invocation(&caller, &invocation)?
-                                .contains(&method.id)
+                            || !self.invocation_reaches(&caller, &invocation, &method.id)?
                         {
                             continue;
                         }

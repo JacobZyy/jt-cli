@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,8 @@ pub struct ProjectConfig {
     #[serde(rename = "EnumIrisable", default = "default_enum_erasable")]
     pub enum_erasable: bool,
     pub backend: BackendConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryConfig>,
     pub frontend: FrontendConfig,
     #[serde(default)]
     pub gateway: GatewaySettings,
@@ -32,6 +35,29 @@ pub struct ProjectConfig {
     pub mock: MockSettings,
     #[serde(default)]
     pub after_generate: Vec<AfterGenerateHook>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryConfig {
+    #[serde(default)]
+    pub services: BTreeMap<String, DiscoveredService>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredService {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_missing: bool,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub interfaces: BTreeSet<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn default_enum_erasable() -> bool {
@@ -171,11 +197,13 @@ pub struct ConfigArgs {
 pub struct LocalBackendConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories_root: Option<PathBuf>,
 }
 
 impl LocalBackendConfig {
     fn is_empty(&self) -> bool {
-        self.repo_path.is_none()
+        self.repo_path.is_none() && self.repositories_root.is_none()
     }
 }
 
@@ -394,6 +422,14 @@ impl LocalProjectConfig {
         {
             bail!("local backend.repoPath must be absolute");
         }
+        if self
+            .backend
+            .repositories_root
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            bail!("local backend.repositoriesRoot must be absolute");
+        }
         Ok(())
     }
 }
@@ -527,6 +563,21 @@ fn resolve_project(project: &Path) -> Result<PathBuf> {
 }
 
 impl ProjectConfig {
+    /// Update only discovery state, preserving unrelated and future config fields.
+    pub(crate) fn save_discovery(project: &Path, discovery: &DiscoveryConfig) -> Result<()> {
+        let path = if project.join(CONFIG_FILE).is_file() {
+            project.join(CONFIG_FILE)
+        } else {
+            project.join(LEGACY_CONFIG_FILE)
+        };
+        reject_symlink_path(project, &path)?;
+        let mut value: serde_json::Value = read_json(&path, "nlab-api config")?;
+        value["discovery"] = serde_json::to_value(discovery)?;
+        atomic_write(
+            &path,
+            format!("{}\n", serde_json::to_string_pretty(&value)?).as_bytes(),
+        )
+    }
     pub fn load(project: &Path) -> Result<Self> {
         let configured = project.join(CONFIG_FILE);
         let legacy = project.join(LEGACY_CONFIG_FILE);
@@ -858,6 +909,7 @@ mod tests {
         assert!(validate_relative_path("../service", "path").is_err());
 
         let mut config = ProjectConfig {
+            discovery: None,
             enum_erasable: true,
             version: CONFIG_VERSION,
             backend: BackendConfig {
@@ -921,6 +973,7 @@ mod tests {
         let local = LocalProjectConfig {
             backend: LocalBackendConfig {
                 repo_path: Some(PathBuf::from("/local/backend")),
+                repositories_root: None,
             },
             ..LocalProjectConfig::default()
         };

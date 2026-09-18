@@ -35,7 +35,7 @@ enum Command {
     Generate(nlab_api::GenerateArgs),
     #[command(
         name = "discover",
-        about = "Discover backend service repositories from interface entries (read-only)"
+        about = "Discover backend services and persist missing-source decisions"
     )]
     Discover(nlab_api::DiscoverArgs),
     #[command(

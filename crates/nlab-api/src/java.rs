@@ -46,18 +46,27 @@ impl<'a> JavaProject<'a> {
         let mut packages = HashMap::new();
         let mut imports = HashMap::new();
         for path in &paths {
-            let source = fs::read_to_string(repo.join(path))
+            let source = fs::read_to_string(graph.source_path(repo, path))
                 .with_context(|| format!("read Java source {path}"))?;
             packages.insert(path.clone(), java_package(&source).unwrap_or_default());
             imports.insert(path.clone(), java_imports(&source));
             sources.insert(path.clone(), source);
         }
         paths.clear();
-        let type_by_fqn = graph
+        let mut type_candidates = HashMap::<String, Vec<String>>::new();
+        for node in graph
             .nodes
             .values()
             .filter(|node| matches!(node.kind.as_str(), "class" | "interface" | "enum"))
-            .map(|node| (normalize_fqn(&node.qualified_name), node.id.clone()))
+        {
+            type_candidates
+                .entry(normalize_fqn(&node.qualified_name))
+                .or_default()
+                .push(node.id.clone());
+        }
+        let type_by_fqn = type_candidates
+            .into_iter()
+            .filter_map(|(name, ids)| (ids.len() == 1).then(|| (name, ids[0].clone())))
             .collect();
         Ok(Self {
             graph,
@@ -106,6 +115,15 @@ impl<'a> JavaProject<'a> {
             .with_context(|| format!("Java source not indexed: {path}"))
     }
 
+    pub fn verify_sources(&self, primary: &Path) -> Result<()> {
+        for (path, source) in &self.sources {
+            if fs::read_to_string(self.graph.source_path(primary, path))? != *source {
+                bail!("Java source changed during generation: {path}");
+            }
+        }
+        Ok(())
+    }
+
     pub fn graph(&self) -> &Snapshot {
         self.graph
     }
@@ -146,9 +164,10 @@ impl<'a> JavaProject<'a> {
                 .iter()
                 .find(|value| value.rsplit('.').next() == Some(simple))
         }) {
-            if let Some(id) = self.type_by_fqn.get(import) {
-                return self.graph.nodes.get(id);
-            }
+            return self.node_for_fqn(import);
+        }
+        if name.contains('.') && name.chars().next().is_some_and(char::is_lowercase) {
+            return None;
         }
         let mut lexical = owner_fqn.replace("::", ".");
         loop {
