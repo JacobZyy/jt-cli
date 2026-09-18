@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.0](https://github.com/JacobZyy/jt-cli/compare/v1.11.10...v2.0.0) (2026-09-18)
+
+
+### Features
+
+* discover backend service repositories ([af401d1](https://github.com/JacobZyy/jt-cli/commit/af401d1a5af15f014e7d2ef787104386ae379aea))
+* generate enums across discovered repositories ([82e15d3](https://github.com/JacobZyy/jt-cli/commit/82e15d317315145e8b00003e28e3143073bf9ae3))
+
 ## [1.11.10](https://github.com/JacobZyy/jt-cli/compare/v1.11.9...v1.11.10) (2026-09-15)
 
 
