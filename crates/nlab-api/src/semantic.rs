@@ -1,5 +1,8 @@
+mod discovery;
 mod lookup;
 mod request;
+
+pub(crate) use discovery::RemoteCall;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 

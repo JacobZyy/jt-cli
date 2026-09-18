@@ -364,7 +364,11 @@ fn run_until(command: &mut Command, deadline: Instant) -> Result<ExitStatus> {
     }
 }
 
-fn git_text<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<String> {
+pub(crate) fn git_text<I, S>(root: &Path, arguments: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     String::from_utf8(git_bytes(root, arguments)?)
         .context("decode Git output")
         .map(|value| value.trim().to_owned())

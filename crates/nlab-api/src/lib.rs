@@ -2,6 +2,7 @@ mod accept;
 mod after_generate;
 mod coded_values;
 mod config;
+mod discover;
 mod graph;
 mod init;
 mod java;
@@ -53,6 +54,7 @@ pub use config::{
     ConfigArgs, LocalProjectConfig, LocalRunner, configure, ensure_local_config_ignored,
     remove_legacy_local_config,
 };
+pub use discover::{DiscoverArgs, run as discover};
 pub use init::InitArgs;
 pub use migrate::MigrateArgs;
 pub use mock::MockArgs;
