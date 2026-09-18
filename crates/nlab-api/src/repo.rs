@@ -199,10 +199,15 @@ pub fn sync_index(root: &Path, deadline: Instant) -> Result<()> {
         "init"
     };
     let mut command = Command::new("codegraph");
+    if action == "init" {
+        command.arg(action).arg("--yes");
+    } else {
+        command.arg(action);
+    }
     command
-        .arg(action)
         .arg(root)
         .current_dir(root)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let status = run_until(&mut command, deadline)
@@ -224,6 +229,17 @@ pub fn verify_unchanged(target: &RepositoryTarget) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn clone_missing(repository: &str, destination: &Path, deadline: Instant) -> Result<()> {
+    let _lock = RepositoryLock::acquire(destination)?;
+    if destination.try_exists()? || fs::symlink_metadata(destination).is_ok() {
+        bail!(
+            "clone destination already exists; inspect its service association: {}",
+            destination.display()
+        );
+    }
+    clone_repository(repository, destination, None, deadline)
 }
 
 fn clone_repository(
@@ -351,7 +367,7 @@ fn ref_exists(root: &Path, reference: &str) -> Result<bool> {
     Ok(status.success())
 }
 
-fn run_until(command: &mut Command, deadline: Instant) -> Result<ExitStatus> {
+pub(crate) fn run_until(command: &mut Command, deadline: Instant) -> Result<ExitStatus> {
     if Instant::now() >= deadline {
         bail!("generation deadline reached before starting command");
     }
@@ -494,6 +510,23 @@ mod tests {
         git(&upstream, &["push", "-u", "origin", "feature"]);
         git(&upstream, &["switch", "main"]);
         (root, remote, upstream, backend)
+    }
+
+    #[test]
+    fn dependency_clone_uses_default_branch_and_preserves_existing_destination() {
+        let (_temp, remote, _upstream, backend) = repositories();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        clone_missing(remote.to_str().unwrap(), &backend, deadline).unwrap();
+        assert_eq!(current_branch(&backend).unwrap(), "main");
+        fs::write(backend.join("contract.java"), "keep local edits").unwrap();
+        assert!(clone_missing(remote.to_str().unwrap(), &backend, deadline).is_err());
+        assert_eq!(
+            fs::read_to_string(backend.join("contract.java")).unwrap(),
+            "keep local edits"
+        );
+        let failed = backend.with_file_name("failed");
+        assert!(clone_missing("/nonexistent/nlab-api-test-remote.git", &failed, deadline).is_err());
+        assert!(!failed.exists());
     }
 
     #[test]

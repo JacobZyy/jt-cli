@@ -156,12 +156,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         bail!("frontend project must stay outside backend repository");
     }
     reporter.phase(10, "同步 CodeGraph");
-    if let Some(root) = &repositories_root {
-        repo::sync_index(root, deadline)?;
-        if !target.root.starts_with(root) {
-            repo::sync_codegraph(target, deadline)?;
-        }
-    } else {
+    if repositories_root.is_none() {
         repo::sync_codegraph(target, deadline)?;
     }
 
@@ -169,7 +164,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     ensure_before_deadline(deadline)?;
     let (graph, discovery_report) = if let Some(root) = &repositories_root {
         reporter.phase(30, "Discover 关联仓库");
-        let discovery = discover::prepare(&output_dir, root)?;
+        let discovery = discover::prepare(&output_dir, root, args.offline, deadline)?;
         (discovery.graph, Some(discovery.report))
     } else {
         (Snapshot::load(&target.root)?, None)

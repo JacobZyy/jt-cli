@@ -48,6 +48,8 @@ pub struct DiscoveryConfig {
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     pub status: String,
     #[serde(default, skip_serializing_if = "is_false")]

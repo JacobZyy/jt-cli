@@ -147,14 +147,15 @@ fn fixture(unified: bool) -> (tempfile::TempDir, DiscoverArgs) {
         allow_missing: Vec::new(),
         entry: None,
         max_depth: 3,
+        offline: true,
     };
     (temp, args)
 }
 
 #[test]
-fn discovers_only_reachable_services_with_separate_or_unified_indexes() {
-    for unified in [false, true] {
-        let (temp, args) = fixture(unified);
+fn discovers_only_reachable_services_with_repository_indexes() {
+    {
+        let (temp, args) = fixture(false);
         let config = fs::read(args.project.join(".nlab/nlab-api.config.json")).unwrap();
         let report = discover(args.clone()).unwrap();
         assert_eq!(report.entries, ["p.Entry"]);
@@ -228,31 +229,15 @@ fn scf_comments_do_not_create_bindings_and_credentials_are_not_reported() {
 }
 
 #[test]
-fn unusable_child_index_falls_back_to_collection_and_entry_stays_in_backend() {
-    let (temp, mut args) = fixture(true);
-    let child = index(&temp.path().join("a"));
-    child
-        .execute("DELETE FROM project_metadata WHERE key = 'index_state'", [])
-        .unwrap();
-    args.entry = Some(PathBuf::from("contract/Entry.java"));
-    let report = discover(args.clone()).unwrap();
-    assert_eq!(report.calls[0].status, "source-matched");
-    assert_eq!(
-        report.repositories[0].index.as_deref(),
-        Some(
-            temp.path()
-                .canonicalize()
-                .unwrap()
-                .join(".codegraph/codegraph.db")
-                .as_path()
-        )
-    );
+fn collection_index_is_never_used_and_entry_stays_in_backend() {
+    let (_temp, args) = fixture(true);
     assert!(
-        report.repositories[0]
-            .diagnostics
-            .iter()
-            .any(|message| message.contains("index_state"))
+        discover(args)
+            .unwrap_err()
+            .to_string()
+            .contains("no usable CodeGraph")
     );
+    let (_temp, mut args) = fixture(false);
     args.entry = Some(PathBuf::from("../b/contract/Remote.java"));
     assert!(
         discover(args)
@@ -361,11 +346,10 @@ fn missing_decisions_persist_and_a_new_repository_clears_the_exception() {
 
 #[test]
 fn preflight_blocks_before_overwriting_existing_generated_files() {
-    let (_temp, args) = fixture(true);
+    let (_temp, args) = fixture(false);
     write(&args.project, ".nlab/contract-ir.json", "existing contract");
-    let error = prepare(&args.project, args.repositories_root.as_ref().unwrap())
-        .err()
-        .unwrap();
+    let result = scan(args.clone(), &BTreeMap::new()).unwrap();
+    let error = finish_preflight(&args.project, result).err().unwrap();
     assert!(error.downcast_ref::<Blocked>().is_some());
     assert_eq!(
         fs::read_to_string(args.project.join(".nlab/contract-ir.json")).unwrap(),
@@ -379,4 +363,93 @@ fn preflight_blocks_before_overwriting_existing_generated_files() {
         report["stages"]["discovery"]["blockingServices"][0],
         "missing"
     );
+}
+
+#[test]
+fn acquisition_retraces_cloned_sources_records_failure_and_respects_waivers() {
+    let (temp, mut args) = fixture(false);
+    args.offline = false;
+    let saved = tempfile::tempdir().unwrap();
+    fs::rename(temp.path().join("b"), saved.path().join("b")).unwrap();
+    let mut synced = BTreeSet::new();
+    let mut attempted = Vec::new();
+    let mut result = acquisition::scan_with(
+        args.clone(),
+        |path| {
+            assert!(synced.insert(path.to_owned()), "sync each repository once");
+            Ok(())
+        },
+        |service, root| {
+            attempted.push(service.to_owned());
+            if service == "b" {
+                fs::rename(saved.path().join("b"), root.join("b")).unwrap();
+                acquisition::Acquisition {
+                    repository: Some("git@example:b.git".to_owned()),
+                    status: "cloned".to_owned(),
+                    error: None,
+                }
+            } else {
+                acquisition::Acquisition {
+                    repository: Some("git@example:missing.git".to_owned()),
+                    status: "acquisition-failed".to_owned(),
+                    error: Some("Permission denied (publickey).".to_owned()),
+                }
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(attempted, ["b", "missing"]);
+    assert_eq!(synced.len(), 2);
+    assert_eq!(result.report.calls[0].status, "source-matched");
+    record(&args.project, &mut result.report, &[], false).unwrap();
+    assert_eq!(result.report.blocking_services, ["missing"]);
+    let state = ProjectConfig::load(&args.project)
+        .unwrap()
+        .discovery
+        .unwrap();
+    assert_eq!(state.services["missing"].status, "acquisition-failed");
+    assert_eq!(
+        state.services["missing"].error.as_deref(),
+        Some("Permission denied (publickey).")
+    );
+    args.allow_missing.push("missing".to_owned());
+    let mut result = acquisition::scan_with(
+        args.clone(),
+        |_| Ok(()),
+        |_, _| panic!("explicit waiver must skip acquisition"),
+    )
+    .unwrap();
+    record(
+        &args.project,
+        &mut result.report,
+        &args.allow_missing,
+        false,
+    )
+    .unwrap();
+    args.allow_missing.clear();
+    acquisition::scan_with(
+        args.clone(),
+        |_| Ok(()),
+        |_, _| panic!("persisted waiver must skip acquisition"),
+    )
+    .unwrap();
+    args.offline = true;
+    acquisition::scan_with(args, |_| Ok(()), |_, _| panic!("offline must not acquire")).unwrap();
+}
+
+#[test]
+fn failed_sync_does_not_use_stale_dependency_index() {
+    let (_temp, args) = fixture(false);
+    let result = acquisition::scan_with(
+        args,
+        |path| {
+            if path.ends_with("b") {
+                bail!("sync failed");
+            }
+            Ok(())
+        },
+        |_, _| panic!("offline"),
+    )
+    .unwrap();
+    assert_eq!(result.report.calls[0].status, "index-unavailable");
 }

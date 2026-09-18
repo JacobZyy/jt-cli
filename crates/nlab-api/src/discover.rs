@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -15,6 +16,7 @@ use crate::java::{JavaProject, parse_method_signature};
 use crate::semantic::{RemoteCall, SemanticAnalyzer};
 use crate::{absolute_path, repo};
 
+mod acquisition;
 #[cfg(test)]
 mod tests;
 
@@ -32,6 +34,9 @@ pub struct DiscoverArgs {
     /// Interface file relative to the configured backend; defaults to contractRoots
     #[arg(long)]
     entry: Option<PathBuf>,
+    /// Skip SIC queries and cloning; still synchronize local repository indexes
+    #[arg(long)]
+    offline: bool,
     /// Maximum cross-repository hops (local calls do not consume this budget)
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=16))]
     max_depth: u8,
@@ -52,6 +57,7 @@ pub(crate) struct Report {
     warnings: Vec<String>,
     blocking_services: Vec<String>,
     pub allowed_missing_services: Vec<String>,
+    acquisitions: BTreeMap<String, acquisition::Acquisition>,
 }
 
 pub(crate) struct DiscoveryRun {
@@ -123,7 +129,10 @@ pub fn run(args: DiscoverArgs) -> u8 {
         let project = args.project.canonicalize()?;
         ProjectConfig::load(&project)?;
         let _lock = crate::output::OutputLock::acquire(&project)?;
-        let mut result = scan(args.clone(), false)?;
+        let mut result = acquisition::scan(
+            args.clone(),
+            Instant::now() + Duration::from_secs(crate::MAX_TIMEOUT_SECONDS),
+        )?;
         record(
             &project,
             &mut result.report,
@@ -154,7 +163,7 @@ pub fn run(args: DiscoverArgs) -> u8 {
 
 #[cfg(test)]
 fn discover(args: DiscoverArgs) -> Result<Report> {
-    Ok(scan(args, false)?.report)
+    Ok(scan(args, &BTreeMap::new())?.report)
 }
 
 pub(crate) fn save_root(project: &Path, root: &Path) -> Result<()> {
@@ -168,17 +177,27 @@ pub(crate) fn save_root(project: &Path, root: &Path) -> Result<()> {
     local.save(project)
 }
 
-pub(crate) fn prepare(project: &Path, root: &Path) -> Result<DiscoveryRun> {
-    let mut result = scan(
+pub(crate) fn prepare(
+    project: &Path,
+    root: &Path,
+    offline: bool,
+    deadline: Instant,
+) -> Result<DiscoveryRun> {
+    let result = acquisition::scan(
         DiscoverArgs {
             project: project.to_owned(),
             repositories_root: Some(root.to_owned()),
             entry: None,
             max_depth: 3,
             allow_missing: Vec::new(),
+            offline,
         },
-        true,
+        deadline,
     )?;
+    finish_preflight(project, result)
+}
+
+fn finish_preflight(project: &Path, mut result: DiscoveryRun) -> Result<DiscoveryRun> {
     record(project, &mut result.report, &[], false)?;
     if !result.report.blocking_services.is_empty() {
         crate::output::write_report(
@@ -261,20 +280,36 @@ fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool
             }
         }
     }
+    for (name, acquisition) in &report.acquisitions {
+        if let Some(service) = observed.get_mut(name) {
+            if acquisition.repository.is_some() {
+                service.repository = acquisition.repository.clone();
+            }
+            if matches!(service.status.as_str(), "missing" | "acquisition-failed")
+                && acquisition.status == "acquisition-failed"
+            {
+                service.status = "acquisition-failed".to_owned();
+                service.error = acquisition.error.clone();
+            }
+        }
+    }
     for name in allowed {
         let service = observed
             .get_mut(name)
             .with_context(|| format!("service not found in current discovery: {name}"))?;
-        if service.status != "missing" {
+        if !matches!(service.status.as_str(), "missing" | "acquisition-failed") {
             bail!("service {name} is not missing; repair its association/index instead");
         }
         service.allow_missing = true;
     }
     for (name, service) in &observed {
-        if service.status == "missing" && service.allow_missing {
+        if matches!(service.status.as_str(), "missing" | "acquisition-failed")
+            && service.allow_missing
+        {
             report.allowed_missing_services.push(name.clone());
         }
-        if (service.status == "missing" && !service.allow_missing)
+        if (matches!(service.status.as_str(), "missing" | "acquisition-failed")
+            && !service.allow_missing)
             || (!name.starts_with("interface:")
                 && matches!(
                     service.status.as_str(),
@@ -288,7 +323,10 @@ fn record(project: &Path, report: &mut Report, allowed: &[String], partial: bool
     ProjectConfig::save_discovery(project, &state)
 }
 
-fn scan(args: DiscoverArgs, prefer_collection: bool) -> Result<DiscoveryRun> {
+fn scan(
+    args: DiscoverArgs,
+    synchronized: &BTreeMap<PathBuf, Result<(), String>>,
+) -> Result<DiscoveryRun> {
     let project_path = absolute_path(&args.project)?.canonicalize()?;
     let config = ProjectConfig::load(&project_path)?;
     let root = args
@@ -323,7 +361,7 @@ fn scan(args: DiscoverArgs, prefer_collection: bool) -> Result<DiscoveryRun> {
     paths.dedup();
     let mut repositories = paths
         .iter()
-        .map(|path| load_repository(path, &root, prefer_collection))
+        .map(|path| load_repository(path, synchronized.get(path)))
         .collect::<Result<Vec<_>>>()?;
     let initial = repositories
         .iter()
@@ -380,7 +418,8 @@ fn scan(args: DiscoverArgs, prefer_collection: bool) -> Result<DiscoveryRun> {
         calls: Vec::new(), visited_methods: 0, unresolved_local_calls: 0,
         blocking_services: Vec::new(),
         allowed_missing_services: Vec::new(),
-        warnings: vec!["Discovery reports local source candidates, not deployed RPC bindings. Index freshness is not verified by standalone discovery.".to_owned()],
+        acquisitions: BTreeMap::new(),
+        warnings: vec!["Discovery reports local source candidates, not deployed RPC bindings. Each repository uses its own CodeGraph index.".to_owned()],
     };
     if repositories[initial].info.branch.as_deref() != Some(&config.backend.branch) {
         report.warnings.push(format!(
@@ -606,7 +645,7 @@ fn target_methods(graph: &Snapshot, call: &RemoteCall) -> Vec<String> {
         .collect()
 }
 
-fn load_repository(path: &Path, root: &Path, prefer_collection: bool) -> Result<Repository> {
+fn load_repository(path: &Path, synchronized: Option<&Result<(), String>>) -> Result<Repository> {
     let path = path.canonicalize()?;
     let mut diagnostics = Vec::new();
     let mut git = |args: &[&str]| -> Option<String> {
@@ -622,34 +661,25 @@ fn load_repository(path: &Path, root: &Path, prefer_collection: bool) -> Result<
     let branch = git(&["branch", "--show-current"]);
     let commit = git(&["rev-parse", "HEAD"]);
     let dirty = git(&["status", "--porcelain"]).map(|status| !status.is_empty());
-    let mut index_root = None;
-    let mut graph = None;
-    let index_roots = if prefer_collection {
-        [root, path.as_path()]
-    } else {
-        [path.as_path(), root]
-    };
-    for candidate in index_roots {
-        if !path.starts_with(candidate) || !candidate.join(".codegraph/codegraph.db").is_file() {
-            continue;
+    let index = path.join(".codegraph/codegraph.db");
+    let graph = match synchronized {
+        Some(Err(error)) => {
+            diagnostics.push(error.clone());
+            None
         }
-        index_root = Some(candidate);
-        match Snapshot::load_scoped(candidate, path.strip_prefix(candidate)?) {
-            Ok(snapshot) if !snapshot.nodes.is_empty() => {
-                graph = Some(snapshot);
-                break;
-            }
+        _ if index.is_file() => match Snapshot::load(&path) {
+            Ok(snapshot) if !snapshot.nodes.is_empty() => Some(snapshot),
             Ok(_) => {
-                diagnostics.push(format!(
-                    "{}: repository has no nodes in index",
-                    candidate.display()
-                ));
+                diagnostics.push("repository has no nodes in index".to_owned());
+                None
             }
             Err(error) => {
-                diagnostics.push(format!("{}: {error:#}", candidate.display()));
+                diagnostics.push(format!("{error:#}"));
+                None
             }
-        }
-    }
+        },
+        _ => None,
+    };
     let mut services = BTreeSet::new();
     let mut references = BTreeMap::<String, Vec<Binding>>::new();
     for item in ignore::WalkBuilder::new(&path)
@@ -699,17 +729,17 @@ fn load_repository(path: &Path, root: &Path, prefer_collection: bool) -> Result<
         commit,
         dirty,
         services,
-        index: index_root.map(|root| root.join(".codegraph/codegraph.db")),
+        index: index.is_file().then_some(index.clone()),
         index_status: if graph.is_some() {
             "available"
-        } else if index_root.is_some() {
+        } else if index.is_file() {
             "unusable"
         } else {
             "missing"
         }
         .to_owned(),
-        index_freshness: if prefer_collection && index_root == Some(root) {
-            "synchronized-before-generation"
+        index_freshness: if synchronized.is_some_and(Result::is_ok) {
+            "synchronized-before-discovery"
         } else {
             "not-verified"
         },
