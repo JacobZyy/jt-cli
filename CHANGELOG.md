@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/JacobZyy/jt-cli/compare/v2.0.1...v2.1.0) (2026-09-18)
+
+
+### Bug Fixes
+
+* align discovery help with repository refresh ([ddc07bf](https://github.com/JacobZyy/jt-cli/commit/ddc07bf91235082316fe2ac890da6163f73701b7))
+
 ## [2.0.1](https://github.com/JacobZyy/jt-cli/compare/v2.0.0...v2.0.1) (2026-09-18)
 
 ## [2.0.0](https://github.com/JacobZyy/jt-cli/compare/v1.11.10...v2.0.0) (2026-09-18)
