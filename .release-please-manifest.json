@@ -1,4 +1,4 @@
 {
-  "apps/jt": "1.11.10",
-  "crates/nlab-api": "1.11.10"
+  "apps/jt": "2.0.0",
+  "crates/nlab-api": "2.0.0"
 }
