@@ -270,6 +270,59 @@ runner 保存在 `.nlab/nlab-api.local.json`，并自动加入目标项目 `.git
 jt nlab-api config --unset --project /path/to/frontend
 ```
 
+## 跨仓库准备情况检查
+
+跨服务枚举分析前，可以先检查接口实际涉及的服务和本地源码：
+
+```bash
+jt nlab-api discover \
+  --project /path/to/frontend \
+  --repositories-root /path/to/backend-projects
+```
+
+此命令遵守项目的 runner 配置；standalone 使用 `nlab-api discover`，参数相同。
+默认从生成配置的 `backend.contractRoots` 中所有接口方法开始。只分析某个入口文件时，追加：
+
+```bash
+--entry contract/src/main/java/example/IExampleFacade.java
+```
+
+`--entry` 相对于当前配置的后端仓库，也支持仓库内的绝对路径。工具读取当前 checkout；
+实际分支与生成配置不同时会报告，不切换分支。
+
+公共目录的直接子目录作为仓库清单。优先读取各仓库 `.codegraph/codegraph.db`；
+缺失或不可用时，从公共目录的统一索引中提取对应仓库。不会重新建立大索引。
+
+结果以 JSON 输出到 stdout，可重定向到自己选择的报告文件。报告包含：
+
+- `entries`：接口入口。
+- `repositories`：本地仓库路径、Git origin、分支、commit、脏状态、SCF 服务名、索引情况及是否参与分析。
+- `calls`：实际到达的跨服务调用点、代表性本地调用链、SCF 配置依据、候选仓库及继续搜索所需的完整接口名和服务名。
+- `warnings`、`unresolvedLocalCalls`：分析断点及无法解析的本地调用数量；后者也包括未索引的库方法和生成的 getter。
+
+目前识别 `src/main/resources` 下 XML 中声明的 SCF `applicationName`、
+`references serviceName` 和 `reference interface`。只有服务绑定与仓库声明匹配，且目标
+接口的方法名及参数数量唯一时，才继续遍历。没有绑定、多个候选、方法重载、索引缺失都保留断点。
+Java 注解、动态路由、运行时注册中心和 Maven 版本解析尚未接入；不会通过名称相似推定仓库。
+
+| `calls[].status` | 含义 |
+| --- | --- |
+| `source-matched` | 找到唯一的本地源码候选，继续追踪 |
+| `missing-source` | 当前仓库清单中没有匹配来源，不代表 Git 平台上不存在 |
+| `index-unavailable` | 找到服务对应仓库，但没有可用索引 |
+| `ambiguous` | 多个服务绑定或仓库候选，不能唯一确定 |
+| `unbound-candidate` | 存在接口源码，但缺少确认服务归属的绑定 |
+| `method-unresolved` | 目标方法缺失或存在歧义 |
+| `depth-limit` | 已达到跨仓库遍历深度上限 |
+
+`--max-depth` 默认为 3，允许 1–16；本地调用不消耗跨仓库深度。调用循环会去重。
+每个仓库最多遍历 25000 个方法，达到上限会报告。调用链保留一条代表路径，不是完整的逐入口调用矩阵。
+
+这是源码准备情况报告，不会直接生成跨仓库枚举，也不证明线上部署关系或枚举取值闭合。
+索引新鲜度标记为 `not-verified`；使用覆盖结果前应自行同步索引。命令不会 clone、fetch、
+切换分支、更新索引、修改项目配置或生成物，也不会触发 standalone 自动升级。
+已 clone 仓库的地址取自 Git origin；缺失仓库当前只输出搜索关键词，尚未接入远程 Git 平台检索。
+
 ## 常见问题
 
 ### `unsupported platform`

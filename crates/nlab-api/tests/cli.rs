@@ -33,12 +33,37 @@ fn exposes_public_commands() {
     assert!(output.status.success());
     assert!(stdout.contains("init"));
     assert!(stdout.contains("generate"));
+    assert!(stdout.contains("discover"));
     assert!(stdout.contains("config"));
     assert!(stdout.contains("update"));
     assert!(stdout.contains("mock"));
     for hidden in ["routes", "migrate", "accept"] {
         assert!(!stdout.contains(hidden));
     }
+}
+
+#[test]
+fn discovery_requires_roots_and_does_not_create_project_state() {
+    let project = tempdir().unwrap();
+    let help = nlab_api().args(["discover", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for flag in ["--repositories-root", "--entry", "--max-depth"] {
+        assert!(help.contains(flag));
+    }
+    let output = nlab_api()
+        .args([
+            "discover",
+            "--project",
+            project.path().to_str().unwrap(),
+            "--repositories-root",
+            project.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("read nlab-api config"));
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
 }
 
 #[test]

@@ -340,6 +340,22 @@ from that object. No per-operation URL getter functions are generated.
 Each generated enum has a source comment identifying a Java enum class or field comment/annotation,
 with the qualified class and accessor or field reference.
 
+Before extending enum tracing across services, use read-only repository discovery:
+
+```bash
+jt nlab-api discover --project /path/to/frontend --repositories-root /path/to/backend-projects
+```
+
+The command reads the existing generation config and starts at `backend.contractRoots`. Add
+`--entry contract/src/main/java/example/IExampleFacade.java` to inspect one interface file.
+It follows reachable typed calls, matches literal SCF service bindings to local repositories,
+and prints a JSON report with Git origins, index readiness, call paths, and missing sources.
+It reuses per-repository CodeGraph indexes, falling back to the collection index when necessary.
+It does not clone, fetch, switch branches, update indexes, or change generated files. Unresolved
+repositories include exact interface and service search terms; remote Git hosting search is not
+implemented. See [repository discovery](apps/nlab-api-docs/docs/quick-start.md#跨仓库准备情况检查)
+for report limitations. Standalone `nlab-api discover` exposes the same command; JT respects the runner.
+
 The top-level `EnumIrisable` boolean in `.nlab/nlab-api.config.json` controls TypeScript enum syntax.
 It defaults to `true`, including when omitted from existing configs: generation uses an `as const`
 object and a same-name type alias. Set `"EnumIrisable": false` to generate native `export enum`

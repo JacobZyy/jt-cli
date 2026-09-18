@@ -1597,7 +1597,7 @@ fn nlab_api_help_and_invalid_repo_are_non_mutating() {
     let group_help = jt().args(["nlab-api", "--help"]).output().unwrap();
     assert!(group_help.status.success());
     let group_help = String::from_utf8(group_help.stdout).unwrap();
-    for command in ["init", "generate", "config", "mock"] {
+    for command in ["init", "generate", "config", "mock", "discover"] {
         assert!(group_help.contains(command), "missing nlab-api {command}");
     }
     for command in ["routes", "migrate", "accept"] {
@@ -1722,6 +1722,29 @@ fn nlab_api_runner_config_selects_explicit_cli_and_reads_legacy_jt() {
         fs::read_to_string(&log).unwrap(),
         format!(
             "mock\n--project\n{project_path}\n--rules\nmock-rules.json\n--manifest\n.nlab/mock-custom.json\n"
+        )
+    );
+
+    let discover_forwarded = jt()
+        .args([
+            "nlab-api",
+            "discover",
+            "--project",
+            project_path,
+            "--repositories-root",
+            "/backend",
+            "--entry",
+            "contract/Entry.java",
+        ])
+        .env("PATH", &path)
+        .env("NLAB_API_TEST_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(discover_forwarded.status.success());
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!(
+            "discover\n--project\n{project_path}\n--repositories-root\n/backend\n--entry\ncontract/Entry.java\n"
         )
     );
 

@@ -110,6 +110,20 @@ impl<'a> JavaProject<'a> {
         self.graph
     }
 
+    /// Resolve an explicit import even when its dependency source is not indexed locally.
+    pub(crate) fn imported_type(&self, file: &str, name: &str) -> Option<String> {
+        if name.contains('.') {
+            return Some(name.to_owned());
+        }
+        let candidates = self
+            .imports
+            .get(file)?
+            .iter()
+            .filter(|import| import.rsplit('.').next() == Some(name))
+            .collect::<Vec<_>>();
+        (candidates.len() == 1).then(|| candidates[0].clone())
+    }
+
     pub fn node_for_fqn(&self, fqn: &str) -> Option<&GraphNode> {
         self.type_by_fqn
             .get(&fqn.replace("::", "."))
@@ -613,7 +627,7 @@ impl<'a> JavaTypeParser<'a> {
     }
 }
 
-fn parse_method_signature(signature: &str) -> Option<(TypeRef, Vec<TypeRef>)> {
+pub(crate) fn parse_method_signature(signature: &str) -> Option<(TypeRef, Vec<TypeRef>)> {
     let open = signature.find('(')?;
     let close = signature.rfind(')')?;
     let return_type = signature[..open].trim();

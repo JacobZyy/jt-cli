@@ -34,6 +34,11 @@ enum Command {
     #[command(name = "generate", about = "Run complete frontend API generation")]
     Generate(nlab_api::GenerateArgs),
     #[command(
+        name = "discover",
+        about = "Discover backend service repositories from interface entries (read-only)"
+    )]
+    Discover(nlab_api::DiscoverArgs),
+    #[command(
         name = "mock",
         about = "Generate semantic mock JSON and native Whistle rules"
     )]
@@ -47,7 +52,12 @@ enum Command {
 fn main() -> ExitCode {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     let cli = Cli::parse();
-    if !cli.no_update && !matches!(&cli.command, Command::Config(_) | Command::Update(_)) {
+    if !cli.no_update
+        && !matches!(
+            &cli.command,
+            Command::Config(_) | Command::Update(_) | Command::Discover(_)
+        )
+    {
         match update::auto_update(&arguments) {
             Ok(Some(status)) => return status,
             Ok(None) => {}
@@ -61,6 +71,7 @@ fn main() -> ExitCode {
     let status = match cli.command {
         Command::Init(args) => nlab_api::init(args),
         Command::Generate(args) => nlab_api::generate(args),
+        Command::Discover(args) => nlab_api::discover(args),
         Command::Mock(args) => nlab_api::mock(args),
         Command::Config(args) => nlab_api::configure(args),
         Command::Update(args) => update::run(args),
