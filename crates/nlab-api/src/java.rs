@@ -158,6 +158,11 @@ impl<'a> JavaProject<'a> {
         if let Some(id) = self.type_by_fqn.get(&name) {
             return self.graph.nodes.get(id);
         }
+        if let Some((outer, nested)) = name.split_once('.')
+            && let Some(import) = self.imported_type(file_path, outer)
+        {
+            return self.node_for_fqn(&format!("{import}.{nested}"));
+        }
         let simple = type_ref.simple_name();
         if let Some(import) = self.imports.get(file_path).and_then(|imports| {
             imports

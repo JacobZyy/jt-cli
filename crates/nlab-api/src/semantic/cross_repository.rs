@@ -414,12 +414,15 @@ impl SemanticAnalyzer<'_> {
             }
         }
         visiting.remove(&visit_key);
-        if domain.enum_fqn.is_none() {
+        let documented = self.copied_field_enum_reference(&class, &field_name, &mut domain);
+        if domain.enum_fqn.is_none() && !documented {
             return Ok(None);
         }
-        domain.closure_gaps.insert(
-            "DTO copy links an enum source but does not prove a closed field domain".to_owned(),
-        );
+        if domain.enum_fqn.is_some() {
+            domain.closure_gaps.insert(
+                "DTO copy links an enum source but does not prove a closed field domain".to_owned(),
+            );
+        }
         push_unique(
             &mut domain.evidence,
             format!(
@@ -429,5 +432,62 @@ impl SemanticAnalyzer<'_> {
         );
         self.field_domain_cache.insert(cache_key, domain.clone());
         Ok(Some(domain))
+    }
+
+    fn copied_field_enum_reference(
+        &self,
+        class: &GraphNode,
+        field_name: &str,
+        domain: &mut Domain,
+    ) -> bool {
+        let Some(field) = self
+            .project
+            .graph()
+            .contained(&class.id, "field")
+            .into_iter()
+            .find(|field| field.name == field_name)
+        else {
+            return false;
+        };
+        let Some(description) = field.docstring.as_deref() else {
+            return false;
+        };
+        let references = see_enum_references(description);
+        if references.is_empty() {
+            return false;
+        }
+        let candidates = linked_enum_nodes(
+            self.project,
+            &field.file_path,
+            &class.qualified_name,
+            description,
+        );
+        for candidate in &candidates {
+            let name = candidate.qualified_name.replace("::", ".");
+            let status = match domain.enum_fqn.as_deref() {
+                Some(actual) if actual == name => "corroborated",
+                Some(_) => "conflicts-with-code",
+                None => "unverified",
+            };
+            push_unique(
+                &mut domain.evidence,
+                format!(
+                    "enum-reference:{}:{}:{name}:{status}",
+                    field.file_path, field.start_line
+                ),
+            );
+        }
+        if domain.enum_fqn.is_none() {
+            let reason = if candidates.len() == 1 {
+                "unverified"
+            } else {
+                "unresolved or ambiguous"
+            };
+            domain.unknown.insert(format!(
+                "{reason} @see enum reference: {}",
+                references.join(", ")
+            ));
+        }
+        true
     }
 }

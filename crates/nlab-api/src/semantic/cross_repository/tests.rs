@@ -4,6 +4,146 @@ use crate::model::{ContractIr, TargetIdentity};
 use crate::semantic::tests::{call, contains, node, write};
 
 #[test]
+fn see_references_respect_imports_and_never_replace_code_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path(),
+        "DTO.java",
+        "package response;\nimport correct.EState;\nclass DTO { Integer code; }",
+    );
+    write(
+        root.path(),
+        "Missing.java",
+        "package response;\nimport missing.EState;\nclass Missing {}",
+    );
+    write(
+        root.path(),
+        "Correct.java",
+        "package correct; enum EState { A(1), B(2); final int code; EState(int code) { this.code=code; } }",
+    );
+    write(
+        root.path(),
+        "Wrong.java",
+        "package wrong; enum EState { X(8), Y(9); final int code; EState(int code) { this.code=code; } }",
+    );
+    let mut graph = test_snapshot(
+        vec![
+            node("dto", "class", "DTO", "response::DTO", "DTO.java", 3, ""),
+            node(
+                "field",
+                "field",
+                "code",
+                "response::DTO::code",
+                "DTO.java",
+                3,
+                "Integer code",
+            ),
+            node(
+                "missing",
+                "class",
+                "Missing",
+                "response::Missing",
+                "Missing.java",
+                3,
+                "",
+            ),
+            node(
+                "correct",
+                "enum",
+                "EState",
+                "correct::EState",
+                "Correct.java",
+                1,
+                "",
+            ),
+            node(
+                "wrong",
+                "enum",
+                "EState",
+                "wrong::EState",
+                "Wrong.java",
+                1,
+                "",
+            ),
+        ],
+        vec![contains("dto", "field")],
+    );
+    for description in [
+        "@see EState",
+        "@see\tEState",
+        "@see\nEState",
+        "@see EState#A",
+        "@see correct.EState",
+    ] {
+        graph.nodes.get_mut("field").unwrap().docstring = Some(description.to_owned());
+        let project = JavaProject::load(root.path(), &graph).unwrap();
+        assert_eq!(
+            linked_enum_nodes(&project, "DTO.java", "response.DTO", description)[0].id,
+            "correct"
+        );
+        let analyzer = SemanticAnalyzer::new(&project);
+        let mut hint = Domain::default();
+        assert!(analyzer.copied_field_enum_reference(&graph.nodes["dto"], "code", &mut hint));
+        assert!(hint.enum_fqn.is_none() && hint.values.is_empty());
+        assert!(
+            hint.unknown
+                .iter()
+                .any(|reason| reason.contains("unverified @see"))
+        );
+        let mut actual = Domain {
+            enum_fqn: Some("wrong.EState".to_owned()),
+            ..Domain::default()
+        };
+        analyzer.copied_field_enum_reference(&graph.nodes["dto"], "code", &mut actual);
+        assert_eq!(actual.enum_fqn.as_deref(), Some("wrong.EState"));
+        assert!(actual.unknown.is_empty());
+        assert!(
+            actual
+                .evidence
+                .iter()
+                .any(|item| item.ends_with("conflicts-with-code"))
+        );
+        let mut schemas = BTreeMap::from([(
+            "response.DTO".to_owned(),
+            Schema {
+                fqn: "response.DTO".to_owned(),
+                name: "DTO".to_owned(),
+                source_path: "DTO.java".to_owned(),
+                description: None,
+                type_parameters: vec![],
+                fields: vec![crate::model::Field {
+                    name: "code".to_owned(),
+                    java_type: parse_java_type("Integer").unwrap(),
+                    optional: false,
+                    description: Some(description.to_owned()),
+                    declared_values: None,
+                    linked_enum: None,
+                }],
+            },
+        )]);
+        analyzer.enrich_linked_enums(&mut schemas).unwrap();
+        assert!(schemas["response.DTO"].fields[0].linked_enum.is_none());
+        assert!(
+            linked_enum_nodes(&project, "Missing.java", "response.Missing", "@see EState")
+                .is_empty()
+        );
+        assert!(
+            linked_enum_nodes(&project, "DTO.java", "response.DTO", "@see response.DTO").is_empty()
+        );
+        assert_eq!(
+            linked_enum_nodes(
+                &project,
+                "DTO.java",
+                "response.DTO",
+                "@see correct.EState\n@see wrong.EState"
+            )
+            .len(),
+            2
+        );
+    }
+}
+
+#[test]
 fn database_value_lookup_exports_known_members_without_closing_the_field() {
     let root = tempfile::tempdir().unwrap();
     write(
@@ -138,11 +278,13 @@ fn explicit_imports_and_duplicate_full_names_never_select_a_different_repository
                 .resolve_type("Caller.java", "p.Caller", &parse_java_type("Code").unwrap())
                 .is_none()
         );
-        assert!(linked_enum_nodes(&project, "{@link wrong.Code}").is_empty());
+        assert!(
+            linked_enum_nodes(&project, "Caller.java", "p.Caller", "{@link wrong.Code}").is_empty()
+        );
     }
     let project = JavaProject::load(primary.path(), &graph).unwrap();
     assert!(project.node_for_fqn("dep.Code").is_none());
-    assert!(linked_enum_nodes(&project, "{@link dep.Code}").is_empty());
+    assert!(linked_enum_nodes(&project, "Caller.java", "p.Caller", "{@link dep.Code}").is_empty());
 }
 
 #[test]
@@ -918,5 +1060,85 @@ fn anonymous_callbacks_resolve_captured_outer_fields() {
             .resolve_invocation(&graph.nodes["process"], &invocation)
             .unwrap(),
         ["run"]
+    );
+}
+
+#[test]
+fn nested_types_use_outer_import_without_same_name_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    for (file, source) in [
+        (
+            "Caller.java",
+            "package p;\nimport correct.Task;\nclass Caller {}",
+        ),
+        (
+            "Missing.java",
+            "package p;\nimport missing.Task;\nclass Missing {}",
+        ),
+        (
+            "Correct.java",
+            "package correct; class Task { class Result {} }",
+        ),
+        (
+            "Wrong.java",
+            "package wrong; class Task { class Result {} }",
+        ),
+    ] {
+        write(root.path(), file, source);
+    }
+    let graph = test_snapshot(
+        vec![
+            node(
+                "caller",
+                "class",
+                "Caller",
+                "p::Caller",
+                "Caller.java",
+                3,
+                "",
+            ),
+            node(
+                "missing",
+                "class",
+                "Missing",
+                "p::Missing",
+                "Missing.java",
+                3,
+                "",
+            ),
+            node(
+                "correct",
+                "class",
+                "Result",
+                "correct::Task::Result",
+                "Correct.java",
+                1,
+                "",
+            ),
+            node(
+                "wrong",
+                "class",
+                "Result",
+                "wrong::Task::Result",
+                "Wrong.java",
+                1,
+                "",
+            ),
+        ],
+        vec![],
+    );
+    let project = JavaProject::load(root.path(), &graph).unwrap();
+    let kind = parse_java_type("Task.Result").unwrap();
+    assert_eq!(
+        project
+            .resolve_type("Caller.java", "p.Caller", &kind)
+            .unwrap()
+            .id,
+        "correct"
+    );
+    assert!(
+        project
+            .resolve_type("Missing.java", "p.Missing", &kind)
+            .is_none()
     );
 }
