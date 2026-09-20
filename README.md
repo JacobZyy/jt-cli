@@ -2,6 +2,31 @@
 
 Personal Rust CLI. Name joins **J**acob and **T**aotao.
 
+Create a Codex local environment from the current project directory:
+
+```bash
+jt codex init
+```
+
+Writes `.codex/environments/environment.toml` without running setup or installing dependencies.
+Commit this file so Codex can use it when creating worktrees. Existing files, including custom
+configuration, are preserved unchanged; symlinked configuration paths are rejected. To regenerate,
+move the existing file aside first and compare the result before replacing your custom settings.
+
+Node projects support npm and pnpm. `packageManager` selects the manager when declared; otherwise
+the lockfile selects it (npm when neither exists). Unsupported or ambiguous lockfiles fail before
+writing. Setup uses `npm ci` or `pnpm install --frozen-lockfile --prefer-offline` when the matching
+lockfile exists, otherwise a normal install. Actions use only nonempty scripts present in
+`package.json`: Dev (`dev`, then `start`), Unit tests (`test:unit:run`, `test:unit`, then `test`),
+and Type check (`type-check`, `typecheck`, then `type:check`). Projects without `package.json`
+receive no dependency install or inferred actions.
+
+CodeGraph setup is included only when the current project already has `.codegraph/codegraph.db`.
+Later worktree setup uses SQLite backup from the primary worktree when available, then syncs the
+independent database; if no database can be copied, it initializes one for this already-enabled
+project. CodeGraph must be on PATH; missing CodeGraph prints a warning. Setup failures stop setup.
+No hooks, global instructions, task orchestration, or worktree integration settings are changed.
+
 Bootstrap terminal tooling:
 
 ```bash

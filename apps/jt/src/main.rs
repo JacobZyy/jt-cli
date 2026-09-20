@@ -1,5 +1,6 @@
 mod ai_hook;
 mod cli;
+mod codex;
 mod icon;
 mod nlab_api_cli;
 mod node;
@@ -28,6 +29,7 @@ use semver::Version;
 Examples:
   jt repo cicd
   jt node init
+  jt codex init
   jt nlab-api generate --help
   jt cli bootstrap
   jt ghostty install
@@ -53,6 +55,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
 enum Commands {
+    #[command(about = "Configure project-local Codex environments")]
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommand,
+    },
     #[command(name = "repo", about = "Configure Node.js/Rust release automation")]
     Repo {
         #[command(subcommand)]
@@ -124,6 +131,13 @@ enum RepoCommand {
         about = "Configure release automation in current directory"
     )]
     Cicd,
+}
+
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum CodexCommand {
+    #[command(about = "Create environment.toml in the current project without running setup")]
+    Init,
 }
 
 #[derive(Debug, Subcommand)]
@@ -256,6 +270,9 @@ fn main() -> ExitCode {
     let cli = Cli::parse_from(&arguments);
 
     match cli.command {
+        Commands::Codex {
+            command: CodexCommand::Init,
+        } => ExitCode::from(codex::run()),
         Commands::Repo {
             command: RepoCommand::Cicd,
         } => repo_cicd(),
