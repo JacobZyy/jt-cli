@@ -158,7 +158,11 @@ enum NlabApiCommand {
         about = "Inspect and configure a frontend project for nlab-api generation"
     )]
     Init(nlab_api::InitArgs),
-    #[command(name = "generate", about = "Run complete frontend API generation")]
+    #[command(
+        name = "generate",
+        about = "Run complete frontend API generation",
+        after_long_help = "Only code-verified enum primary values generate enum definitions. Unverified comment candidates and auxiliary properties remain scalar."
+    )]
     Generate(nlab_api::GenerateArgs),
     #[command(
         name = "discover",
