@@ -38,6 +38,7 @@ fn help_lists_new_commands_only() {
     assert!(output.status.success());
     assert!(stdout.contains("jt repo cicd"));
     assert!(stdout.contains("jt node init"));
+    assert!(stdout.contains("jt codex init"));
     assert!(stdout.contains("jt nlab-api generate --help"));
     assert!(stdout.contains("jt cli bootstrap"));
     assert!(stdout.contains("jt ghostty install"));
@@ -57,6 +58,34 @@ fn help_lists_new_commands_only() {
             .any(|line| line.trim_start().starts_with("help "))
     );
     assert!(!stdout.contains("jt release init"));
+}
+
+#[test]
+fn codex_init_creates_configuration_without_executing_package_scripts() {
+    let project = tempdir().unwrap();
+    fs::write(
+        project.path().join("package.json"),
+        r#"{"scripts":{"dev":"exit 99","postinstall":"exit 99"}}"#,
+    )
+    .unwrap();
+    for message in ["created", "preserved existing"] {
+        let output = jt()
+            .args(["codex", "init"])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(message));
+    }
+    let content =
+        fs::read_to_string(project.path().join(".codex/environments/environment.toml")).unwrap();
+    assert!(content.contains("npm run dev"));
+    assert!(!content.contains("Unit tests"));
+    assert!(!project.path().join("node_modules").exists());
 }
 
 #[test]
