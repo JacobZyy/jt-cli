@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/JacobZyy/jt-cli/compare/v2.1.0...v2.1.1) (2026-09-20)
+
+
+### Features
+
+* initialize project Codex environments ([#85](https://github.com/JacobZyy/jt-cli/issues/85)) ([74084a9](https://github.com/JacobZyy/jt-cli/commit/74084a9700c6fde3865062e4d3a2d785c62bee8e))
+
 ## [2.1.0](https://github.com/JacobZyy/jt-cli/compare/v2.0.1...v2.1.0) (2026-09-18)
 
 
