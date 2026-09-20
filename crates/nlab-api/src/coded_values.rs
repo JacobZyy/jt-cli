@@ -28,10 +28,10 @@ static NUMERIC_MAPPING_START: LazyLock<Regex> = LazyLock::new(|| {
 });
 static STRING_MAPPING_START: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?x)(?:^|[\s,，;；、:：（(])(?:
-            (?P<colon>-?\d+(?:\.\d+)?(?:_\d+)*(?:\s*[/／]\s*-?\d+(?:\.\d+)?)*|[A-Za-z][A-Za-z0-9_$.-]*)\s*[=：:] |
-            (?P<hyphen>-?\d+(?:\.\d+)?(?:_\d+)*(?:\s*[/／]\s*-?\d+(?:\.\d+)?)*|[A-Za-z][A-Za-z0-9_$.]*)\s*-
-        )\s*",
+        r#"(?x)(?:^|[\s,，;；、:：（(])(?:
+            (?P<colon>\"[^\"]+\"|'[^']+'|-?\d+(?:\.\d+)?(?:_\d+)*(?:\s*[/／]\s*-?\d+(?:\.\d+)?)*|[A-Za-z][A-Za-z0-9_$.-]*)\s*[=：:] |
+            (?P<hyphen>\"[^\"]+\"|'[^']+'|-?\d+(?:\.\d+)?(?:_\d+)*(?:\s*[/／]\s*-?\d+(?:\.\d+)?)*|[A-Za-z][A-Za-z0-9_$.]*)\s*-
+        )\s*"#,
     )
     .expect("string mapping start regex")
 });
@@ -149,19 +149,6 @@ pub fn parse(
     None
 }
 
-pub fn with_fallback_keys(field_name: &str, values: &[CodedValue]) -> Vec<CodedValue> {
-    values
-        .iter()
-        .cloned()
-        .map(|mut value| {
-            if value.key.is_none() {
-                value.key = Some(fallback_key(field_name, &value.value));
-            }
-            value
-        })
-        .collect()
-}
-
 fn parse_pairs(text: &str, kind: ValueKind) -> Vec<CodedValue> {
     let source = sanitize(text);
     let structured = match kind {
@@ -178,6 +165,46 @@ fn parse_pairs(text: &str, kind: ValueKind) -> Vec<CodedValue> {
     parse_inline_numbers(&source)
 }
 
+fn has_explicit_string_mapping_signal(source: &str, starts: &[(&str, usize, usize)]) -> bool {
+    if starts
+        .iter()
+        .flat_map(|(raw_values, _, _)| raw_values.split(['/', '／']))
+        .any(is_quoted_mapping_code)
+    {
+        return true;
+    }
+    if source.lines().take(3).any(is_key_value_header) {
+        return false;
+    }
+    source.lines().take(3).map(str::trim).any(|line| {
+        let header = line
+            .split_once(['：', ':'])
+            .map_or(line, |(header, _)| header);
+        EXPLICIT_STRING_HEADER.is_match(header) || header == "状态" || header.contains("场景")
+    })
+}
+
+fn is_key_value_header(line: &str) -> bool {
+    line.split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|words| words == ["key", "value"])
+}
+
+fn is_quoted_mapping_code(value: &str) -> bool {
+    let value = value.trim();
+    (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''))
+}
+
+fn is_numeric_mapping_code(value: &str) -> bool {
+    let value = strip_quotes(value.trim());
+    !value.is_empty()
+        && value
+            .split(['/', '／'])
+            .all(|part| part.trim().replace('_', "").parse::<f64>().is_ok())
+}
+
 fn sanitize(text: &str) -> String {
     let value = DATE_LINE.replace_all(text, " ");
     let value = DATE_FORMAT.replace_all(&value, " ");
@@ -191,6 +218,14 @@ fn parse_mappings(source: &str, kind: ValueKind) -> Vec<CodedValue> {
         ValueKind::Number => mapping_starts(&NUMERIC_MAPPING_START, source, "code", None),
         ValueKind::String => mapping_starts(&STRING_MAPPING_START, source, "colon", Some("hyphen")),
     };
+    if kind == ValueKind::String
+        && starts
+            .iter()
+            .all(|(raw_values, _, _)| is_numeric_mapping_code(raw_values))
+        && !has_explicit_string_mapping_signal(source, &starts)
+    {
+        return Vec::new();
+    }
     let mut values = Vec::new();
     for (index, (raw_values, _, label_start)) in starts.iter().enumerate() {
         let label_end = starts
@@ -455,7 +490,7 @@ fn append_values(values: &mut Vec<CodedValue>, raw_values: &str, raw_label: &str
     for raw_value in raw_values.split(['/', '／']).map(str::trim) {
         let value = match kind {
             ValueKind::Number => parse_number(raw_value),
-            ValueKind::String => Some(WireValue::String(raw_value.to_owned())),
+            ValueKind::String => Some(WireValue::String(strip_quotes(raw_value))),
         };
         let Some(value) = value else {
             continue;
@@ -469,6 +504,19 @@ fn append_values(values: &mut Vec<CodedValue>, raw_values: &str, raw_label: &str
             key: key.clone(),
         });
     }
+}
+
+fn strip_quotes(value: &str) -> String {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value)
+        .to_owned()
 }
 
 fn parse_number(value: &str) -> Option<WireValue> {
@@ -493,24 +541,6 @@ fn value_kind(java_type: &TypeRef) -> Option<ValueKind> {
     }
 }
 
-fn fallback_key(field_name: &str, value: &WireValue) -> String {
-    let raw_value = match value {
-        WireValue::String(value) => value.clone(),
-        WireValue::Number(value) => value.to_string(),
-        WireValue::Decimal(value) => value.to_string(),
-    };
-    let raw_value = raw_value
-        .strip_prefix('-')
-        .map(|value| format!("NEGATIVE_{value}"))
-        .unwrap_or(raw_value);
-    let value = upper_snake(&raw_value);
-    format!(
-        "{}_{}",
-        upper_snake(field_name),
-        if value.is_empty() { "VALUE" } else { &value }
-    )
-}
-
 fn upper_camel(value: &str) -> String {
     let mut output = String::new();
     let mut uppercase = true;
@@ -525,30 +555,6 @@ fn upper_camel(value: &str) -> String {
         }
     }
     output
-}
-
-fn upper_snake(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_is_lower_or_digit = false;
-    for character in value.chars() {
-        if !character.is_ascii_alphanumeric() {
-            if !output.is_empty() && !output.ends_with('_') {
-                output.push('_');
-            }
-            previous_is_lower_or_digit = false;
-        } else {
-            if character.is_ascii_uppercase()
-                && previous_is_lower_or_digit
-                && !output.ends_with('_')
-            {
-                output.push('_');
-            }
-            output.push(character.to_ascii_uppercase());
-            previous_is_lower_or_digit =
-                character.is_ascii_lowercase() || character.is_ascii_digit();
-        }
-    }
-    output.trim_matches('_').to_owned()
 }
 
 #[cfg(test)]
@@ -822,16 +828,34 @@ mod tests {
     }
 
     #[test]
-    fn fallback_keys_match_old_skill() {
-        let values = parse(
-            "statusCode",
-            Some("状态码：-1-失败 2-成功"),
-            None,
-            &java_type("Integer"),
-        )
-        .unwrap();
-        let values = with_fallback_keys("statusCode", &values.values);
-        assert_eq!(values[0].key.as_deref(), Some("STATUS_CODE_NEGATIVE_1"));
-        assert_eq!(values[1].key.as_deref(), Some("STATUS_CODE_2"));
+    fn ignores_status_prose_that_looks_like_string_mappings() {
+        for comment in [
+            "状态展示文案\n200: （待签收）黄色\n300: （已签收待整备）蓝色",
+            "状态综合描述\n状态： key      value\n300: 签收仓    中山仓 · 08-24 11:08 已签收\n310: 整备完成   08-23 14:20",
+        ] {
+            assert!(
+                parse("status", Some(comment), None, &java_type("String")).is_none(),
+                "status prose was mistaken for string enum"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_explicit_numeric_string_mappings() {
+        assert_values(
+            "status",
+            "String",
+            "枚举值：\"200\"-待签收 \"300\"-已签收",
+            vec![(json!("200"), "待签收"), (json!("300"), "已签收")],
+        );
+        assert_values(
+            "scene",
+            "String",
+            "按钮场景：recycle-list:回收，refurb-list:整备",
+            vec![
+                (json!("recycle-list"), "回收"),
+                (json!("refurb-list"), "整备"),
+            ],
+        );
     }
 }

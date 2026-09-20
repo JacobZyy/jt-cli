@@ -217,6 +217,21 @@ pub enum ProvenanceStatus {
     Unresolved,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnumCandidateStatus {
+    Verified,
+    Conflict,
+    Unverified,
+    Ignored,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EnumCandidateVerification {
+    pub status: EnumCandidateStatus,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticPatch {
@@ -229,8 +244,40 @@ pub struct SemanticPatch {
     /// Confirmed enum declaration members without proof that the field domain is closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_values: Vec<CodedValue>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enum_associated: bool,
+    /// The field is proven to use the enum's serialized primary value.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub primary_enum_value: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_candidate: Option<EnumCandidateVerification>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nullable: bool,
     pub evidence: Vec<String>,
     pub warning: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+impl SemanticPatch {
+    pub fn has_enum_null_branch(&self) -> bool {
+        self.nullable && self.enum_fqn.is_some()
+    }
+
+    pub fn associated_values(&self) -> Option<&[CodedValue]> {
+        if !self.primary_enum_value {
+            return None;
+        }
+        if self.status == ProvenanceStatus::Closed && !self.values.is_empty() {
+            Some(&self.values)
+        } else if self.enum_associated && !self.known_values.is_empty() {
+            Some(&self.known_values)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -304,6 +351,7 @@ pub struct GenerateResult {
     pub placeholders: usize,
     pub semantic_patches: usize,
     pub closed_enum_patches: usize,
+    pub associated_enum_patches: usize,
     pub api_files: usize,
     pub type_files: usize,
     pub enum_files: usize,
@@ -314,4 +362,86 @@ pub struct GenerateResult {
     pub warnings: usize,
     pub report: String,
     pub duration_ms: u128,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn patch(
+        status: ProvenanceStatus,
+        values: Vec<CodedValue>,
+        known_values: Vec<CodedValue>,
+    ) -> SemanticPatch {
+        SemanticPatch {
+            target: FieldTarget {
+                source: FieldSource::Response,
+                operation_key: "Facade#method".to_owned(),
+                schema_fqn: "p.Schema".to_owned(),
+                field_path: "status".to_owned(),
+                field_name: "status".to_owned(),
+            },
+            status,
+            enum_fqn: None,
+            enum_source: None,
+            accessor: None,
+            values,
+            known_values,
+            enum_associated: false,
+            primary_enum_value: false,
+            enum_candidate: None,
+            nullable: false,
+            evidence: Vec::new(),
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn associated_values_preserves_closed_and_known_meanings() {
+        let value = CodedValue {
+            value: WireValue::String("ready".to_owned()),
+            key: Some("READY".to_owned()),
+            label: "Ready".to_owned(),
+        };
+        let mut closed = patch(ProvenanceStatus::Closed, vec![value.clone()], vec![]);
+        closed.primary_enum_value = true;
+        assert_eq!(closed.associated_values(), Some([value.clone()].as_slice()));
+
+        let mut known = patch(ProvenanceStatus::Known, vec![], vec![value.clone()]);
+        assert_eq!(known.associated_values(), None);
+        known.enum_associated = true;
+        known.primary_enum_value = true;
+        assert_eq!(known.associated_values(), Some([value].as_slice()));
+        assert!(closed.known_values.is_empty());
+    }
+
+    #[test]
+    fn semantic_patch_new_fields_are_optional_in_old_json() {
+        let json = serde_json::json!({
+            "target": {
+                "operationKey": "Facade#method",
+                "schemaFqn": "p.Schema",
+                "fieldPath": "status",
+                "fieldName": "status"
+            },
+            "status": "known",
+            "enumFqn": null,
+            "enumSource": null,
+            "accessor": null,
+            "values": [],
+            "evidence": [],
+            "warning": null
+        });
+        let patch = serde_json::from_value::<SemanticPatch>(json).unwrap();
+        assert!(!patch.enum_associated);
+        assert!(!patch.primary_enum_value);
+        assert!(!patch.nullable);
+        assert!(
+            !serde_json::to_value(patch)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("enumAssociated")
+        );
+    }
 }

@@ -3,12 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
-use super::coded_values;
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, type_output_path};
 use super::model::{
-    CodedValue, ContractIr, FieldSource, Operation, ProvenanceStatus, RouteSource, RouteStatus,
-    Schema, SemanticPatch, TypeRef, WireValue,
+    CodedValue, ContractIr, FieldSource, Operation, RouteSource, RouteStatus, Schema,
+    SemanticPatch, TypeRef, WireValue,
 };
 use super::naming::{
     fqn_seed, shortest_unique_names, shortest_unique_names_avoiding, without_interface_prefix,
@@ -370,9 +369,7 @@ fn schema_object(
                 .semantic_patches
                 .iter()
                 .filter(|patch| {
-                    patch.target.schema_fqn == schema.fqn
-                        && patch.target.source == source
-                        && patch.status == ProvenanceStatus::Closed
+                    patch.target.schema_fqn == schema.fqn && patch.target.source == source
                 })
                 .map(|patch| (patch.target.field_name.as_str(), patch))
                 .collect::<HashMap<_, _>>()
@@ -388,27 +385,37 @@ fn schema_object(
                 .expect("schema object")
                 .insert("description".to_owned(), json!(description));
         }
-        if let Some(patch) = patches.get(field.name.as_str()) {
-            apply_enum(&mut property, &patch.values);
-        } else if let Some(linked) = &field.linked_enum {
-            apply_enum(&mut property, &linked.values);
-            property.as_object_mut().expect("schema object").insert(
-                "x-nlab-linked-enum".to_owned(),
-                json!({
-                    "enumFqn": linked.enum_fqn,
-                    "enumSource": linked.enum_source,
-                    "accessor": linked.accessor,
-                }),
-            );
-        } else if let Some(values) = &field.declared_values {
+        let associated_patch = patches
+            .get(field.name.as_str())
+            .filter(|patch| patch.associated_values().is_some());
+        if let Some(patch) = associated_patch {
             apply_enum(
                 &mut property,
-                &coded_values::with_fallback_keys(&field.name, &values.values),
+                patch.associated_values().expect("associated enum values"),
             );
-            property
-                .as_object_mut()
-                .expect("schema object")
-                .insert("x-nlab-known-values".to_owned(), json!(values));
+        }
+        if patches
+            .get(field.name.as_str())
+            .is_some_and(|patch| patch.has_enum_null_branch())
+        {
+            apply_nullable(&mut property);
+        }
+        if let Some(patch) = associated_patch {
+            let mut association = Map::new();
+            association.insert("enumAssociated".to_owned(), json!(true));
+            if let Some(enum_fqn) = &patch.enum_fqn {
+                association.insert("enumFqn".to_owned(), json!(enum_fqn));
+            }
+            if let Some(enum_source) = &patch.enum_source {
+                association.insert("enumSource".to_owned(), json!(enum_source));
+            }
+            if let Some(accessor) = &patch.accessor {
+                association.insert("accessor".to_owned(), json!(accessor));
+            }
+            property.as_object_mut().expect("schema object").insert(
+                "x-nlab-enum-association".to_owned(),
+                Value::Object(association),
+            );
         }
         properties.insert(field.name.clone(), property);
         if !optional_fields && !field.optional {
@@ -530,10 +537,33 @@ fn apply_enum(schema: &mut Value, values: &[CodedValue]) {
     );
 }
 
+fn apply_nullable(schema: &mut Value) {
+    let description = schema
+        .as_object_mut()
+        .and_then(|value| value.remove("description"));
+    let original = std::mem::take(schema);
+    *schema = json!({ "anyOf": [original, { "type": "null" }] });
+    if let Some(description) = description {
+        schema["description"] = description;
+    }
+}
+
 fn semantic_patch(patch: &SemanticPatch) -> Value {
     let mut value = Map::new();
     value.insert("target".to_owned(), json!(patch.target));
     value.insert("status".to_owned(), json!(patch.status));
+    if patch.enum_associated {
+        value.insert("enumAssociated".to_owned(), json!(true));
+    }
+    if patch.primary_enum_value {
+        value.insert("primaryEnumValue".to_owned(), json!(true));
+    }
+    if let Some(candidate) = &patch.enum_candidate {
+        value.insert("enumCandidate".to_owned(), json!(candidate));
+    }
+    if patch.nullable {
+        value.insert("nullable".to_owned(), json!(true));
+    }
     if let Some(enum_fqn) = &patch.enum_fqn {
         value.insert("enumFqn".to_owned(), json!(enum_fqn));
     }
@@ -575,7 +605,8 @@ fn operation_aliases(
                 source == FieldSource::Response && !reachable.is_disjoint(requests);
             if !preserves_requiredness
                 && !operation.semantic_patches.iter().any(|patch| {
-                    patch.target.source == source && patch.status == ProvenanceStatus::Closed
+                    patch.target.source == source
+                        && (patch.associated_values().is_some() || patch.has_enum_null_branch())
                 })
             {
                 continue;
@@ -751,5 +782,44 @@ fn visit_refs(value: &Value, visitor: &mut impl FnMut(&str)) {
             }
         }),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nullable_enum_schema_accepts_null_instances() {
+        let mut schema = json!({"type": "string"});
+        apply_enum(
+            &mut schema,
+            &[
+                CodedValue {
+                    value: WireValue::String("a".to_owned()),
+                    key: None,
+                    label: "A".to_owned(),
+                },
+                CodedValue {
+                    value: WireValue::String("b".to_owned()),
+                    key: None,
+                    label: "B".to_owned(),
+                },
+            ],
+        );
+        apply_nullable(&mut schema);
+
+        let validator = jsonschema::options().build(&schema).unwrap();
+        assert!(validator.is_valid(&Value::Null));
+        assert!(validator.is_valid(&json!("a")));
+        assert!(!validator.is_valid(&json!("c")));
+        let enum_schema = &schema["anyOf"][0];
+        assert_eq!(enum_schema["enum"], json!(["a", "b"]));
+        assert_eq!(enum_schema["x-enum-varnames"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            enum_schema["x-enum-descriptions"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(schema["anyOf"][1], json!({"type": "null"}));
     }
 }

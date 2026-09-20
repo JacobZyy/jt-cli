@@ -1,6 +1,9 @@
+mod candidates;
+mod copy_origin;
 mod cross_repository;
 mod discovery;
 mod lookup;
+mod primary;
 mod request;
 
 pub(crate) use discovery::RemoteCall;
@@ -26,8 +29,12 @@ struct Domain {
     accessor: Option<String>,
     values: Vec<CodedValue>,
     complete: bool,
+    primary_enum_value: bool,
+    auxiliary_enum_value: bool,
     external: BTreeSet<String>,
     unknown: BTreeSet<String>,
+    /// Gaps in proving a closed value domain, not gaps in the enum association.
+    closure_gaps: BTreeSet<String>,
     literals: BTreeSet<String>,
     transformed: bool,
     evidence: Vec<String>,
@@ -71,7 +78,7 @@ pub struct SemanticAnalyzer<'a> {
     enum_lookups: HashMap<String, lookup::EnumLookup>,
     request_domains: HashMap<(String, String), Domain>,
     field_domain_cache: HashMap<(String, String, String), Domain>,
-    lookup_forwarder_cache: HashMap<String, Option<Domain>>,
+    lookup_forwarder_cache: HashMap<(String, usize), Option<Domain>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -108,6 +115,16 @@ impl<'a> SemanticAnalyzer<'a> {
             let mut patches = self.request_patches(operation, schemas, &reachable)?;
             patches.extend(self.operation_patches(operation, schemas, &reachable)?);
             reconcile_schema_paths(&mut patches);
+            for patch in &mut patches {
+                if let Some(schema) = schemas.get(&patch.target.schema_fqn)
+                    && let Some(field) = schema
+                        .fields
+                        .iter()
+                        .find(|field| field.name == patch.target.field_name)
+                {
+                    patch.enum_candidate = self.verify_enum_candidate(schema, field, patch);
+                }
+            }
             operation.semantic_patches = patches;
         }
         Ok(())
@@ -119,7 +136,12 @@ impl<'a> SemanticAnalyzer<'a> {
                 let Some(description) = field.description.as_deref() else {
                     continue;
                 };
-                let candidates = linked_enum_nodes(self.project, description);
+                // @see may be stale: only code evidence may narrow an operation field.
+                if !see_enum_references(description).is_empty() {
+                    continue;
+                }
+                let candidates =
+                    linked_enum_nodes(self.project, &schema.source_path, &schema.fqn, description);
                 let [enum_node] = candidates.as_slice() else {
                     continue;
                 };
@@ -129,7 +151,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         field.linked_enum = Some(LinkedEnum {
                             enum_fqn: enum_node.qualified_name.replace("::", "."),
                             enum_source: enum_node.file_path.clone(),
-                            accessor,
+                            accessor: domain.accessor.expect("primary enum field"),
                             values: domain.values,
                         });
                         break;
@@ -340,6 +362,23 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             owners = parents;
         }
+        if candidates.is_empty() && invocation.receiver.is_none() {
+            for owner in self.lexical_owners(method).into_iter().skip(1) {
+                candidates.extend(
+                    graph
+                        .contained(&owner.id, "method")
+                        .into_iter()
+                        .filter(|target| {
+                            target.name == invocation.name
+                                && signature_arity(&target.signature) == Some(invocation.arity)
+                        })
+                        .map(|target| target.id.clone()),
+                );
+                if !candidates.is_empty() {
+                    break;
+                }
+            }
+        }
         candidates.sort();
         candidates.dedup();
         Ok(if candidates.len() == 1 {
@@ -347,6 +386,25 @@ impl<'a> SemanticAnalyzer<'a> {
         } else {
             Vec::new()
         })
+    }
+
+    fn lexical_owners(&self, method: &GraphNode) -> Vec<&GraphNode> {
+        let mut scope = method
+            .qualified_name
+            .rsplit_once("::")
+            .map(|(owner, _)| owner);
+        let mut owners = Vec::new();
+        while let Some(name) = scope {
+            if let Some(owner) = self
+                .project
+                .node_for_fqn(&name.replace("::", "."))
+                .filter(|node| matches!(node.kind.as_str(), "class" | "interface" | "enum"))
+            {
+                owners.push(owner);
+            }
+            scope = name.rsplit_once("::").map(|(owner, _)| owner);
+        }
+        owners
     }
 
     fn receiver_type(
@@ -368,27 +426,17 @@ impl<'a> SemanticAnalyzer<'a> {
         {
             return Ok(Some(type_name));
         }
-        let owner_fqn = method
-            .qualified_name
-            .rsplit_once("::")
-            .map(|(owner, _)| owner.replace("::", "."));
-        if let Some(owner) = owner_fqn
-            .as_deref()
-            .and_then(|owner| self.project.node_for_fqn(owner))
-        {
-            if let Some(field) = self
-                .project
+        let field_type = self.lexical_owners(method).into_iter().find_map(|owner| {
+            self.project
                 .graph()
                 .contained(&owner.id, "field")
                 .into_iter()
                 .find(|field| field.name == receiver)
-            {
-                return Ok(declared_variable_type(&field.signature, &field.name));
-            }
-        }
+                .and_then(|field| declared_variable_type(&field.signature, &field.name))
+        });
         let parsed = self.parsed(&method.file_path)?;
         let Some(declaration) = lookup::method_declaration(parsed, method) else {
-            return Ok(None);
+            return Ok(field_type);
         };
         let local = descendants(declaration)
             .into_iter()
@@ -410,7 +458,20 @@ impl<'a> SemanticAnalyzer<'a> {
                     .child_by_field_name("type")
                     .map(|type_node| text_of(&parsed.source, type_node).to_owned())
             });
-        Ok(local)
+        let loop_type = descendants(declaration)
+            .into_iter()
+            .find(|node| {
+                node.kind() == "enhanced_for_statement"
+                    && node
+                        .child_by_field_name("name")
+                        .is_some_and(|name| text_of(&parsed.source, name) == receiver)
+                    && node.child_by_field_name("body").is_some_and(|body| {
+                        body.start_byte() <= before_offset && before_offset < body.end_byte()
+                    })
+            })
+            .and_then(|node| node.child_by_field_name("type"))
+            .map(|node| text_of(&parsed.source, node).to_owned());
+        Ok(local.or(loop_type).or(field_type))
     }
 
     fn operation_patches(
@@ -521,7 +582,7 @@ impl<'a> SemanticAnalyzer<'a> {
             );
             domains.push(domain);
         }
-        for gap in self.unindexed_setter_calls(reachable, &setter.name, &known_sites)? {
+        for gap in self.unindexed_setter_calls(reachable, setter, &known_sites)? {
             let mut domain = Domain::default();
             domain.unknown.insert(gap);
             domains.push(domain);
@@ -551,7 +612,7 @@ impl<'a> SemanticAnalyzer<'a> {
     fn unindexed_setter_calls(
         &mut self,
         reachable: &Reachability,
-        setter_name: &str,
+        setter: &GraphNode,
         known_sites: &BTreeSet<(String, usize)>,
     ) -> Result<Vec<String>> {
         let mut gaps = BTreeSet::new();
@@ -560,9 +621,13 @@ impl<'a> SemanticAnalyzer<'a> {
                 continue;
             };
             for invocation in self.method_invocations(method)? {
-                if invocation.name == setter_name
+                if invocation.name == setter.name
                     && !known_sites.contains(&(method.id.clone(), invocation.line))
                 {
+                    let targets = self.resolve_invocation(method, &invocation)?;
+                    if !targets.is_empty() && !targets.contains(&setter.id) {
+                        continue;
+                    }
                     gaps.insert(format!(
                         "unindexed setter call:{}:{}:{}",
                         method.file_path, invocation.line, invocation.column
@@ -630,15 +695,15 @@ impl<'a> SemanticAnalyzer<'a> {
                 if let Some(enum_node) = self.enum_for_receiver(writer, &receiver, offset)? {
                     return self.enum_domain(&enum_node, &accessor);
                 }
-                if !self.project.graph().source_roots.is_empty() {
-                    if let Some(domain) = self.lookup_field_domain(writer, &receiver, &accessor)? {
-                        return Ok(domain);
-                    }
-                    if let Some(domain) = self.copied_field_domain(
-                        operation, writer, &receiver, &accessor, offset, reachable, visiting,
-                    )? {
-                        return Ok(domain);
-                    }
+                if let Some(domain) =
+                    self.lookup_field_domain(writer, &receiver, &accessor, offset)?
+                {
+                    return Ok(domain);
+                }
+                if let Some(domain) = self.copied_field_domain(
+                    operation, writer, &receiver, &accessor, offset, reachable, visiting,
+                )? {
+                    return Ok(domain);
                 }
                 let mut domain = Domain::default();
                 domain
@@ -684,6 +749,14 @@ impl<'a> SemanticAnalyzer<'a> {
                             visiting,
                         );
                     }
+                }
+                if let Some(literal) = self.constant_literal(writer, &value)? {
+                    let mut domain = Domain::default();
+                    domain.literals.insert(literal);
+                    domain
+                        .evidence
+                        .push(format!("constant:{}:{value}", writer.file_path));
+                    return Ok(domain);
                 }
                 let mut domain = Domain::default();
                 domain.unknown.insert(value);
@@ -825,6 +898,67 @@ impl<'a> SemanticAnalyzer<'a> {
         let domain = extract_enum_domain(self.project, enum_node, accessor)?;
         self.enum_cache.insert(key, domain.clone());
         Ok(domain)
+    }
+
+    fn constant_literal(&mut self, method: &GraphNode, name: &str) -> Result<Option<String>> {
+        let (qualifier, name) = name
+            .rsplit_once('.')
+            .map_or((None, name), |(owner, name)| (Some(owner), name));
+        let owners = match qualifier {
+            None | Some("this") => self.lexical_owners(method),
+            Some(owner) => parse_java_type(owner)
+                .and_then(|kind| {
+                    self.project
+                        .resolve_type(&method.file_path, &method.qualified_name, &kind)
+                })
+                .into_iter()
+                .collect(),
+        };
+        let field = owners.into_iter().find_map(|owner| {
+            self.project
+                .graph()
+                .contained(&owner.id, "field")
+                .into_iter()
+                .chain(self.project.graph().contained(&owner.id, "constant"))
+                .find(|field| field.name == name)
+                .cloned()
+        });
+        let Some(field) = field else {
+            return Ok(None);
+        };
+        let parsed = self.parsed(&field.file_path)?;
+        let declaration = descendants(parsed.tree.root_node())
+            .into_iter()
+            .find(|node| {
+                node.kind() == "field_declaration"
+                    && node.start_position().row + 1 == field.start_line
+            });
+        let Some(declaration) = declaration else {
+            return Ok(None);
+        };
+        let modifiers = named_children(declaration)
+            .into_iter()
+            .find(|node| node.kind() == "modifiers")
+            .map(|node| {
+                text_of(&parsed.source, node)
+                    .split_whitespace()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        if !modifiers.contains("static") || !modifiers.contains("final") {
+            return Ok(None);
+        }
+        let value = named_children(declaration)
+            .into_iter()
+            .filter(|node| node.kind() == "variable_declarator")
+            .find(|node| {
+                node.child_by_field_name("name")
+                    .is_some_and(|node| text_of(&parsed.source, node) == name)
+            })
+            .and_then(|node| node.child_by_field_name("value"))
+            .and_then(|node| wire_value(&parsed.source, node));
+        // Literal initializers only: do not evaluate methods or configuration lookups.
+        Ok(value.map(|value| serde_json::to_string(&value).expect("wire value is serializable")))
     }
 
     fn parsed(&mut self, file_path: &str) -> Result<&ParsedFile> {
@@ -1070,26 +1204,27 @@ fn extract_enum_domain(
     let body = declaration
         .child_by_field_name("body")
         .context("enum body not found")?;
-    let fields = descendants(body)
-        .into_iter()
-        .filter(|child| child.kind() == "field_declaration")
-        .filter(|child| !text_of(source, *child).contains(" static "))
-        .filter_map(|field| {
-            descendants(field)
-                .into_iter()
-                .find(|child| child.kind() == "variable_declarator")
-                .and_then(|variable| variable.child_by_field_name("name"))
-                .map(|name| text_of(source, name).to_owned())
-        })
-        .collect::<Vec<_>>();
-    let signal = getter_signal(accessor).unwrap_or_else(|| accessor.to_owned());
-    let Some(value_index) = fields.iter().position(|field| field == &signal) else {
+    let fields = primary::instance_fields(source, declaration);
+    let Some(signal) = primary::accessor_field(source, declaration, accessor, &fields) else {
         return Ok(incomplete_enum_domain(
             enum_node,
             accessor,
             "enum field projection missing",
         ));
     };
+    let Some(primary_field) = primary::field_name(source, declaration, &fields) else {
+        return Ok(incomplete_enum_domain(
+            enum_node,
+            accessor,
+            "enum primary value is not proven",
+        ));
+    };
+    if signal != primary_field {
+        let mut domain =
+            incomplete_enum_domain(enum_node, accessor, "enum auxiliary value is not emitted");
+        domain.auxiliary_enum_value = true;
+        return Ok(domain);
+    }
     let label_index = fields.iter().position(|field| {
         field != &signal
             && ["name", "desc", "description", "label", "title"]
@@ -1111,10 +1246,19 @@ fn extract_enum_domain(
             .child_by_field_name("arguments")
             .map(named_children)
             .unwrap_or_default();
-        let value = arguments
-            .get(value_index)
+        let value = primary::argument_index(source, declaration, &signal, &fields, arguments.len())
+            .and_then(|index| arguments.get(index))
             .and_then(|node| wire_value(source, *node));
         let label = label_index
+            .and_then(|index| {
+                primary::argument_index(
+                    source,
+                    declaration,
+                    &fields[index],
+                    &fields,
+                    arguments.len(),
+                )
+            })
             .and_then(|index| arguments.get(index))
             .and_then(|node| string_literal(source, *node));
         let Some(value) = value else {
@@ -1136,9 +1280,10 @@ fn extract_enum_domain(
     let mut domain = Domain {
         enum_fqn: Some(enum_node.qualified_name.replace("::", ".")),
         enum_source: Some(enum_node.file_path.clone()),
-        accessor: Some(accessor.to_owned()),
+        accessor: Some(primary_field),
         values,
         complete: complete && unique,
+        primary_enum_value: true,
         ..Domain::default()
     };
     if !domain.complete {
@@ -1149,45 +1294,69 @@ fn extract_enum_domain(
     Ok(domain)
 }
 
-fn linked_enum_nodes<'a>(project: &'a JavaProject<'_>, description: &str) -> Vec<&'a GraphNode> {
+fn see_enum_references(description: &str) -> Vec<String> {
+    description
+        .match_indices("@see")
+        .filter_map(|(offset, _)| {
+            let remainder = &description[offset + "@see".len()..];
+            if remainder
+                .chars()
+                .next()
+                .is_some_and(|character| !character.is_whitespace())
+            {
+                return None;
+            }
+            let reference = remainder
+                .trim_start()
+                .split(|character: char| {
+                    character.is_whitespace() || matches!(character, '}' | '#')
+                })
+                .next()
+                .unwrap_or("");
+            // Keep invalid or missing targets visible instead of falling back to
+            // unrelated Enum words elsewhere in the same documentation.
+            Some(reference.to_owned())
+        })
+        .collect()
+}
+
+fn linked_enum_nodes<'a>(
+    project: &'a JavaProject<'_>,
+    file_path: &str,
+    owner_fqn: &str,
+    description: &str,
+) -> Vec<&'a GraphNode> {
     let mut nodes = BTreeMap::new();
-    let mut references = Vec::new();
-    for (offset, _) in description.match_indices("{@link ") {
-        let start = offset + "{@link ".len();
-        let reference = description[start..]
-            .split(|character: char| character.is_whitespace() || matches!(character, '}' | '#'))
-            .next()
-            .unwrap_or("")
-            .trim();
-        if reference.is_empty() {
-            continue;
+    let mut references = see_enum_references(description);
+    if references.is_empty() {
+        for (offset, _) in description.match_indices("{@link ") {
+            let start = offset + "{@link ".len();
+            let reference = description[start..]
+                .split(|character: char| {
+                    character.is_whitespace() || matches!(character, '}' | '#')
+                })
+                .next()
+                .unwrap_or("")
+                .trim();
+            if reference.is_empty() {
+                continue;
+            }
+            references.push(reference.to_owned());
         }
-        references.push(reference.to_owned());
+        references.extend(
+            description
+                .split(|character: char| {
+                    !(character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '$'))
+                })
+                .filter(|token| token.ends_with("Enum"))
+                .map(ToOwned::to_owned),
+        );
     }
-    references.extend(
-        description
-            .split(|character: char| {
-                !(character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '$'))
-            })
-            .filter(|token| token.ends_with("Enum"))
-            .map(ToOwned::to_owned),
-    );
     references.sort();
     references.dedup();
     for reference in references {
-        let node = project.node_for_fqn(&reference).or_else(|| {
-            if reference.contains('.') {
-                return None;
-            }
-            let simple = reference.rsplit('.').next()?;
-            let candidates = project
-                .graph()
-                .candidates(simple)
-                .into_iter()
-                .filter(|node| node.kind == "enum")
-                .collect::<Vec<_>>();
-            (candidates.len() == 1).then(|| candidates[0])
-        });
+        let node = parse_java_type(&reference)
+            .and_then(|kind| project.resolve_type(file_path, owner_fqn, &kind));
         if let Some(node) = node.filter(|node| node.kind == "enum") {
             nodes.insert(node.id.clone(), node);
         }
@@ -1254,6 +1423,7 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
             && domain.complete
             && domain.external.is_empty()
             && domain.unknown.is_empty()
+            && domain.closure_gaps.is_empty()
             && domain.literals.is_empty()
             && !domain.transformed
     });
@@ -1278,6 +1448,7 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
             merged
                 .unknown
                 .iter()
+                .chain(merged.closure_gaps.iter())
                 .next()
                 .map(|reason| format!(": {reason}"))
                 .unwrap_or_default()
@@ -1298,9 +1469,33 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
             )
         }),
     };
+    let enum_associated = merged.complete
+        && merged.primary_enum_value
+        && merged.enum_fqn.is_some()
+        && merged.unknown.is_empty()
+        && merged.external.is_empty()
+        && !merged.transformed
+        && merged.literals.iter().all(|value| {
+            value == "null"
+                || serde_json::from_str::<WireValue>(value)
+                    .ok()
+                    .is_some_and(|literal| {
+                        merged.values.iter().any(|member| member.value == literal)
+                    })
+        });
+    let nullable = merged.literals.contains("null");
     SemanticPatch {
         target,
         status,
+        enum_associated,
+        primary_enum_value: merged.primary_enum_value,
+        enum_candidate: merged.auxiliary_enum_value.then(|| {
+            crate::model::EnumCandidateVerification {
+                status: crate::model::EnumCandidateStatus::Ignored,
+                reason: "auxiliary enum attributes are not generated".to_owned(),
+            }
+        }),
+        nullable,
         enum_fqn: merged.enum_fqn,
         enum_source: merged.enum_source,
         accessor: merged.accessor,
@@ -1328,6 +1523,10 @@ fn unresolved_patch(target: FieldTarget, reason: &str) -> SemanticPatch {
         accessor: None,
         values: Vec::new(),
         known_values: Vec::new(),
+        enum_associated: false,
+        primary_enum_value: false,
+        enum_candidate: None,
+        nullable: false,
         evidence: Vec::new(),
         warning: Some(reason.to_owned()),
     }
@@ -1336,30 +1535,49 @@ fn unresolved_patch(target: FieldTarget, reason: &str) -> SemanticPatch {
 fn reconcile_schema_paths(patches: &mut [SemanticPatch]) {
     let conflicts = patches
         .iter()
-        .filter(|patch| patch.status == ProvenanceStatus::Closed)
+        .filter(|patch| patch.associated_values().is_some())
         .filter(|patch| {
             patches.iter().any(|other| {
                 other.target.source == patch.target.source
                     && other.target.schema_fqn == patch.target.schema_fqn
                     && other.target.field_name == patch.target.field_name
-                    && (other.status != ProvenanceStatus::Closed
+                    && (other.associated_values().is_none()
                         || other.enum_fqn != patch.enum_fqn
                         || other.accessor != patch.accessor
-                        || other.values != patch.values)
+                        || other.associated_values() != patch.associated_values())
             })
         })
         .map(|patch| patch.target.clone())
         .collect::<BTreeSet<_>>();
-    for patch in patches
-        .iter_mut()
-        .filter(|patch| conflicts.contains(&patch.target))
-    {
-        patch.status = ProvenanceStatus::Known;
-        patch.known_values = std::mem::take(&mut patch.values);
-        patch.warning = Some(
-            "field has different domains at different paths; shared schema is not narrowed"
-                .to_owned(),
-        );
+    // Shared schemas can represent multiple paths only when their enum identities agree.
+    let nullable = patches
+        .iter()
+        .filter(|patch| patch.nullable)
+        .map(|patch| {
+            (
+                patch.target.source,
+                patch.target.schema_fqn.clone(),
+                patch.target.field_name.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for patch in patches {
+        if conflicts.contains(&patch.target) {
+            patch.enum_associated = false;
+            if patch.status == ProvenanceStatus::Closed {
+                patch.status = ProvenanceStatus::Known;
+                patch.known_values = std::mem::take(&mut patch.values);
+            }
+            patch.warning = Some(
+                "field has different domains at different paths; shared schema is not narrowed"
+                    .to_owned(),
+            );
+        }
+        patch.nullable |= nullable.contains(&(
+            patch.target.source,
+            patch.target.schema_fqn.clone(),
+            patch.target.field_name.clone(),
+        ));
     }
 }
 
@@ -1371,9 +1589,13 @@ fn merge_domain(target: &mut Domain, source: Domain) {
             target.accessor = source.accessor.clone();
             target.values = source.values.clone();
             target.complete = source.complete;
+            target.primary_enum_value = source.primary_enum_value;
+            target.auxiliary_enum_value = source.auxiliary_enum_value;
         }
         (Some(left), Some(right)) if left != right || target.accessor != source.accessor => {
             target.complete = false;
+            target.primary_enum_value = false;
+            target.auxiliary_enum_value = false;
             target
                 .unknown
                 .insert(format!("conflicting enum projections:{left}:{right}"));
@@ -1382,6 +1604,7 @@ fn merge_domain(target: &mut Domain, source: Domain) {
     }
     target.external.extend(source.external);
     target.unknown.extend(source.unknown);
+    target.closure_gaps.extend(source.closure_gaps);
     target.literals.extend(source.literals);
     target.transformed |= source.transformed;
     for evidence in source.evidence {
@@ -1625,6 +1848,97 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn literal_constants_preserve_enum_membership_checks() {
+        let repo = tempfile::tempdir().unwrap();
+        let source = "package p;\nclass Writer {\n static final String DEFAULT_COLOR = \"gray\";\n static String mutable = \"gray\";\n static final String dynamic = loadColor();\n static final String outside = \"other\";\n void render() {}\n}\n";
+        write(repo.path(), "Writer.java", source);
+        let names = ["DEFAULT_COLOR", "mutable", "dynamic", "outside"];
+        let mut nodes = vec![
+            node(
+                "writer",
+                "class",
+                "Writer",
+                "p::Writer",
+                "Writer.java",
+                2,
+                "",
+            ),
+            node(
+                "render",
+                "method",
+                "render",
+                "p::Writer::render",
+                "Writer.java",
+                7,
+                "void ()",
+            ),
+        ];
+        let mut edges = vec![contains("writer", "render")];
+        for (index, name) in names.iter().enumerate() {
+            nodes.push(node(
+                name,
+                if *name == "mutable" {
+                    "field"
+                } else {
+                    "constant"
+                },
+                name,
+                &format!("p::Writer::{name}"),
+                "Writer.java",
+                index + 3,
+                &format!("String {name}"),
+            ));
+            edges.push(contains("writer", name));
+        }
+        let graph = test_snapshot(nodes, edges);
+        let project = JavaProject::load(repo.path(), &graph).unwrap();
+        let mut analyzer = SemanticAnalyzer::new(&project);
+        let method = &graph.nodes["render"];
+        for name in [
+            "DEFAULT_COLOR",
+            "this.DEFAULT_COLOR",
+            "Writer.DEFAULT_COLOR",
+        ] {
+            assert_eq!(
+                analyzer.constant_literal(method, name).unwrap().as_deref(),
+                Some("\"gray\"")
+            );
+        }
+        for name in ["mutable", "dynamic", "missing"] {
+            assert_eq!(analyzer.constant_literal(method, name).unwrap(), None);
+        }
+        for (name, associated) in [("DEFAULT_COLOR", true), ("outside", false)] {
+            let domain = Domain {
+                enum_fqn: Some("p.Color".to_owned()),
+                accessor: Some("getColor".to_owned()),
+                complete: true,
+                primary_enum_value: true,
+                values: vec![CodedValue {
+                    value: WireValue::String("gray".to_owned()),
+                    key: Some("GRAY".to_owned()),
+                    label: "Gray".to_owned(),
+                }],
+                literals: BTreeSet::from([analyzer
+                    .constant_literal(method, name)
+                    .unwrap()
+                    .unwrap()]),
+                ..Domain::default()
+            };
+            let target = FieldTarget {
+                source: FieldSource::Response,
+                operation_key: "Facade#query".to_owned(),
+                schema_fqn: "p.Payload".to_owned(),
+                field_path: "color".to_owned(),
+                field_name: "color".to_owned(),
+            };
+            assert_eq!(
+                classify_patch(target, vec![domain]).enum_associated,
+                associated
+            );
+        }
+    }
+
+    #[test]
     fn closed_requires_every_write_to_share_complete_enum() {
         let target = FieldTarget {
             source: FieldSource::Response,
@@ -1828,6 +2142,14 @@ mod tests {
     }
 
     fn request_fixture(body: &str, fallback: &str) -> crate::model::ContractIr {
+        request_fixture_with_comment(body, fallback, None)
+    }
+
+    fn request_fixture_with_comment(
+        body: &str,
+        fallback: &str,
+        comment: Option<&str>,
+    ) -> crate::model::ContractIr {
         let repo = tempfile::tempdir().unwrap();
         let contract = "contract/src/main/java/p/contract/IFacade.java";
         let implementation = "service/src/main/java/p/Facade.java";
@@ -1841,7 +2163,10 @@ mod tests {
         write(
             repo.path(),
             payload,
-            "package p;\nclass Payload {\n int code;\n int getCode() { return code; }\n void setCode(int code) { this.code = code; }\n}\n",
+            &format!(
+                "package p;\nclass Payload {{\n /** {} */ int code;\n int getCode() {{ return code; }}\n void setCode(int code) {{ this.code = code; }}\n}}\n",
+                comment.unwrap_or_default()
+            ),
         );
         write(
             repo.path(),
@@ -1855,7 +2180,8 @@ mod tests {
                 "package p;\nenum Kind {{\n A(1), B(2);\n final int type;\n Kind(int type) {{ this.type = type; }}\n int getType() {{ return type; }}\n static Kind decode(int input) {{ for (Kind item : values()) {{ if (item.type == input) {{ return item; }} }} return {fallback}; }}\n}}\n"
             ),
         );
-        let graph = test_snapshot(
+        write(repo.path(), "Other.java", "package p; enum Other { X, Y; }");
+        let mut graph = test_snapshot(
             vec![
                 node(
                     "contract",
@@ -1922,6 +2248,7 @@ mod tests {
                     "void (int code)",
                 ),
                 node("kind", "enum", "Kind", "p::Kind", kind, 2, ""),
+                node("other", "enum", "Other", "p::Other", "Other.java", 1, ""),
                 node(
                     "decode",
                     "method",
@@ -1943,6 +2270,7 @@ mod tests {
                 call("query", "setter", 3),
             ],
         );
+        graph.nodes.get_mut("code").unwrap().docstring = comment.map(ToOwned::to_owned);
         let project = JavaProject::load(repo.path(), &graph).unwrap();
         let target = TargetIdentity {
             app_name: "demo".into(),
@@ -1962,6 +2290,115 @@ mod tests {
             operations,
             schemas,
         }
+    }
+
+    #[test]
+    fn comment_candidates_require_independent_code_evidence_per_direction() {
+        use crate::model::EnumCandidateStatus;
+        let checked = "int code = req.getCode(); Kind kind = Kind.decode(code); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;";
+        for (comment, expected) in [
+            ("1=Ready; 2=Done", EnumCandidateStatus::Verified),
+            ("1=Ready; 9=Outdated", EnumCandidateStatus::Conflict),
+            ("@see p.Other", EnumCandidateStatus::Conflict),
+            ("@see missing.Kind", EnumCandidateStatus::Unverified),
+        ] {
+            let ir = request_fixture_with_comment(checked, "null", Some(comment));
+            let request = ir.operations[0]
+                .semantic_patches
+                .iter()
+                .find(|patch| patch.target.source == FieldSource::Request)
+                .unwrap();
+            let response = ir.operations[0]
+                .semantic_patches
+                .iter()
+                .find(|patch| patch.target.source == FieldSource::Response)
+                .unwrap();
+            assert_eq!(
+                request.enum_candidate.as_ref().unwrap().status,
+                expected,
+                "{comment}"
+            );
+            assert!(request.associated_values().is_some());
+            assert_eq!(
+                response.enum_candidate.as_ref().unwrap().status,
+                EnumCandidateStatus::Unverified
+            );
+            assert!(response.associated_values().is_none());
+            let generated =
+                crate::typescript::generate(&ir, &crate::typescript::tests::config()).unwrap();
+            assert_eq!(
+                generated.enum_files.len(),
+                1,
+                "untrusted comments must not add enum files"
+            );
+            assert!(
+                crate::semantic_diagnostics(&ir)
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == "ENUM_CANDIDATE_VERIFICATION")
+            );
+        }
+        let ir = request_fixture_with_comment(
+            "Payload result = new Payload(); result.setCode(req.getCode()); return result;",
+            "null",
+            Some("@see p.Kind"),
+        );
+        assert!(
+            ir.operations[0].semantic_patches.iter().all(|patch| patch
+                .associated_values()
+                .is_none()
+                && patch.enum_candidate.as_ref().unwrap().status
+                    == EnumCandidateStatus::Unverified)
+        );
+        assert!(
+            crate::typescript::generate(&ir, &crate::typescript::tests::config())
+                .unwrap()
+                .enum_files
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn primary_field_identity_is_shared_by_getter_val_and_direct_access() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "Kind.java",
+            "package p;\nenum Kind { A(1), B(2); final int type; Kind(int type) { this.type=type; } int getType() { return type; } int val() { return type; } }",
+        );
+        let graph = test_snapshot(
+            vec![node("enum", "enum", "Kind", "p::Kind", "Kind.java", 2, "")],
+            vec![],
+        );
+        let project = JavaProject::load(root.path(), &graph).unwrap();
+        let domains = ["getType", "val", "type"]
+            .iter()
+            .map(|accessor| extract_enum_domain(&project, &graph.nodes["enum"], accessor).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            domains
+                .iter()
+                .all(|domain| domain.accessor.as_deref() == Some("type"))
+        );
+        let mut ir = request_fixture(
+            "Payload result = new Payload(); result.setCode(1); return result;",
+            "null",
+        );
+        for patch in &mut ir.operations[0].semantic_patches {
+            *patch = classify_patch(patch.target.clone(), domains.clone());
+        }
+        assert!(
+            ir.operations[0]
+                .semantic_patches
+                .iter()
+                .all(|patch| patch.associated_values().is_some())
+        );
+        assert_eq!(
+            crate::typescript::generate(&ir, &crate::typescript::tests::config())
+                .unwrap()
+                .enum_files
+                .len(),
+            1
+        );
     }
 
     #[test]

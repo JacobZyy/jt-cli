@@ -120,7 +120,7 @@ impl SemanticAnalyzer<'_> {
                     merge_domain(&mut domain, candidate.clone());
                 }
                 if !validated {
-                    domain.unknown.insert(
+                    domain.closure_gaps.insert(
                         "enum lookup does not prove rejection of unmatched request values"
                             .to_owned(),
                     );

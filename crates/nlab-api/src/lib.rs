@@ -368,12 +368,21 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         .iter()
         .filter(|operation| operation.route.status == RouteStatus::Placeholder)
         .count();
-    let status = if diagnostics.is_empty() {
+    let associated_enum_patches = ir
+        .operations
+        .iter()
+        .flat_map(|operation| &operation.semantic_patches)
+        .filter(|patch| patch.associated_values().is_some())
+        .count();
+    let warning_count = diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic["level"].as_str(), Some("warning" | "error")))
+        .count();
+    let status = if warning_count == 0 {
         "complete"
     } else {
         "complete-with-warnings"
     };
-    let warning_count = diagnostics.len();
     let report = json!({
         "version": 1,
         "status": status,
@@ -426,6 +435,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         placeholders,
         semantic_patches,
         closed_enum_patches,
+        associated_enum_patches,
         api_files: written.api_files.len(),
         type_files: written.type_files.len(),
         enum_files: written.enum_files.len(),
@@ -440,7 +450,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
 }
 
 fn semantic_diagnostics(ir: &ContractIr) -> Vec<Value> {
-    ir.operations
+    let mut diagnostics = ir.operations
         .iter()
         .flat_map(|operation| {
             operation
@@ -454,9 +464,11 @@ fn semantic_diagnostics(ir: &ContractIr) -> Vec<Value> {
                 })
                 .map(|patch| {
                     json!({
-                        "level": "info",
+                    "level": "info",
                         "stage": "generate",
-                        "code": format!("ENUM_{:?}", patch.status).to_ascii_uppercase(),
+                        "code": if patch.enum_associated { "ENUM_ASSOCIATED".to_owned() } else { format!("ENUM_{:?}", patch.status).to_ascii_uppercase() },
+                        "enumAssociated": patch.enum_associated,
+                        "primaryEnumValue": patch.primary_enum_value,
                         "operationKey": operation.key,
                         "source": patch.target.source,
                         "schemaFqn": patch.target.schema_fqn,
@@ -465,7 +477,23 @@ fn semantic_diagnostics(ir: &ContractIr) -> Vec<Value> {
                     })
                 })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    diagnostics.extend(ir.operations.iter().flat_map(|operation| {
+        operation.semantic_patches.iter().filter_map(|patch| {
+                let candidate = patch.enum_candidate.as_ref()?;
+                Some(json!({
+                    "level": if matches!(candidate.status, model::EnumCandidateStatus::Conflict | model::EnumCandidateStatus::Unverified) { "warning" } else { "info" },
+                "stage": "generate",
+                "code": "ENUM_CANDIDATE_VERIFICATION",
+                "operationKey": operation.key,
+                "source": patch.target.source,
+                "schemaFqn": patch.target.schema_fqn,
+                "fieldPath": patch.target.field_path,
+                "verification": candidate,
+            }))
+        })
+    }));
+    diagnostics
 }
 
 fn migration_diagnostics(project: &Path) -> Result<Vec<Value>> {
