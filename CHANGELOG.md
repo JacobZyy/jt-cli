@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/JacobZyy/jt-cli/compare/v2.1.1...v2.2.0) (2026-09-20)
+
+
+### Documentation
+
+* explain verified enum generation in CLI help ([d508cb4](https://github.com/JacobZyy/jt-cli/commit/d508cb4b8e9337204dc21f312c311cb950846e61))
+
 ## [2.1.1](https://github.com/JacobZyy/jt-cli/compare/v2.1.0...v2.1.1) (2026-09-20)
 
 
