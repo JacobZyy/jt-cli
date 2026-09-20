@@ -66,7 +66,7 @@ fn database_value_lookup_exports_known_members_without_closing_the_field() {
     let mut analyzer = SemanticAnalyzer::new(&project);
     analyzer.index_enum_lookups().unwrap();
     let domain = analyzer
-        .lookup_field_domain(&graph.nodes["copy"], "source", "getCode")
+        .lookup_field_domain(&graph.nodes["copy"], "source", "getCode", usize::MAX)
         .unwrap()
         .unwrap();
     let patch = classify_patch(
@@ -82,9 +82,10 @@ fn database_value_lookup_exports_known_members_without_closing_the_field() {
     assert_eq!(patch.status, ProvenanceStatus::Known);
     assert!(patch.values.is_empty());
     assert_eq!(patch.known_values.len(), 2);
+    assert!(patch.enum_associated);
     assert!(
         analyzer
-            .lookup_field_domain(&graph.nodes["copy"], "source", "getState")
+            .lookup_field_domain(&graph.nodes["copy"], "source", "getState", usize::MAX)
             .unwrap()
             .is_none()
     );
@@ -464,6 +465,7 @@ fn remote_request_validation_and_copied_response_generate_without_false_narrowin
             "{response:#?}"
         );
         assert!(response.values.is_empty());
+        assert_eq!(response.enum_associated, bound && !caught, "{response:#?}");
         assert_eq!(response.known_values.len(), if bound { 2 } else { 0 });
         if bound {
             assert!(
@@ -488,17 +490,433 @@ fn remote_request_validation_and_copied_response_generate_without_false_narrowin
         }
         let openapi = crate::openapi::generate(&ir, &config).unwrap();
         let openapi: serde_json::Value = serde_json::from_str(&openapi.source).unwrap();
+        let mut associated_codes = 0;
         for schema in openapi["components"]["schemas"]
             .as_object()
             .unwrap()
             .values()
         {
             if let Some(code) = schema["properties"].get("code") {
-                assert!(code.get("enum").is_none());
+                if bound && code.get("enum").is_some() {
+                    associated_codes += 1;
+                    assert_eq!(code["enum"], serde_json::json!(["a", "b"]));
+                } else {
+                    assert!(code.get("enum").is_none());
+                }
             }
         }
+        assert_eq!(associated_codes > 0, bound && !caught);
         project.verify_sources(primary.path()).unwrap();
         write(dependency.path(), "Code.java", "changed during generation");
         assert!(project.verify_sources(primary.path()).is_err());
     }
+}
+
+#[test]
+fn association_tracks_same_values_for_lookups_aliases_and_non_description_helpers() {
+    for (body, associated) in [
+        (
+            "int value = source.getCode(); Code.fromCode(source.getCode());",
+            true,
+        ),
+        (
+            "int value = source.getCode(); Code.color(\"primary\", value);",
+            true,
+        ),
+        (
+            "int value = source.getCode(); Code.fromCode(other.getCode());",
+            false,
+        ),
+        (
+            "int value = source.getCode(); Code.fromCode(source.getCode() + 1);",
+            false,
+        ),
+        (
+            "int value = source.getCode(); source.setCode(999); Code.fromCode(source.getCode());",
+            false,
+        ),
+        (
+            "int value = source.getCode(); value = 999; Code.fromCode(value);",
+            false,
+        ),
+        (
+            "int value = source.getCode(); Source alias = source; alias.code++; Code.fromCode(source.getCode());",
+            false,
+        ),
+        (
+            "int value = source.getCode(); Source alias = source; alias.code = 9; Code.fromCode(source.getCode());",
+            false,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "Code.java",
+            "package p;\nenum Code {\nA(1), B(2);\nfinal int code;\nCode(int code) { this.code=code; }\nint getCode() { return code; }\nstatic Code fromCode(int code) {\nfor (Code item : values()) { if (item.getCode() == code) { return item; } }\nreturn null;\n}\nstatic String color(String theme, int code) { Code item = fromCode(code); return item == null ? theme : item.name(); }\n}\n",
+        );
+        let source = format!(
+            "package p;\nclass Service {{\nvoid copy(Source source, Source other) {{ {body} }}\n}}\n"
+        );
+        write(root.path(), "Service.java", &source);
+        let graph = test_snapshot(
+            vec![
+                node("enum", "enum", "Code", "p::Code", "Code.java", 2, ""),
+                node(
+                    "lookup",
+                    "method",
+                    "fromCode",
+                    "p::Code::fromCode",
+                    "Code.java",
+                    7,
+                    "Code (int code)",
+                ),
+                node(
+                    "color",
+                    "method",
+                    "color",
+                    "p::Code::color",
+                    "Code.java",
+                    11,
+                    "String (String theme, int code)",
+                ),
+                node(
+                    "service",
+                    "class",
+                    "Service",
+                    "p::Service",
+                    "Service.java",
+                    2,
+                    "",
+                ),
+                node(
+                    "copy",
+                    "method",
+                    "copy",
+                    "p::Service::copy",
+                    "Service.java",
+                    3,
+                    "void (Source source, Source other)",
+                ),
+            ],
+            vec![
+                contains("enum", "lookup"),
+                contains("enum", "color"),
+                contains("service", "copy"),
+            ],
+        );
+        let project = JavaProject::load(root.path(), &graph).unwrap();
+        let mut analyzer = SemanticAnalyzer::new(&project);
+        analyzer.index_enum_lookups().unwrap();
+        let domain = analyzer
+            .lookup_field_domain(
+                &graph.nodes["copy"],
+                "source",
+                "getCode",
+                source.find("source.getCode()").unwrap(),
+            )
+            .unwrap();
+        assert!(
+            analyzer
+                .lookup_field_domain(&graph.nodes["copy"], "provider.next()", "getCode", 0)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(domain.is_some(), associated, "{body}");
+    }
+}
+
+#[test]
+fn enum_association_rejects_conflicts_transforms_and_unknown_writes_but_keeps_null() {
+    let target = FieldTarget {
+        source: FieldSource::Response,
+        operation_key: "query".to_owned(),
+        schema_fqn: "p.DTO".to_owned(),
+        field_path: "state".to_owned(),
+        field_name: "state".to_owned(),
+    };
+    let domain = Domain {
+        enum_fqn: Some("p.State".to_owned()),
+        enum_source: Some("State.java".to_owned()),
+        accessor: Some("getCode".to_owned()),
+        complete: true,
+        values: vec![CodedValue {
+            value: WireValue::Number(1),
+            key: Some("A".to_owned()),
+            label: "A".to_owned(),
+        }],
+        ..Domain::default()
+    };
+    let mut raw = domain.clone();
+    raw.closure_gaps.insert("read-side enum lookup".to_owned());
+    let patch = classify_patch(target.clone(), vec![raw]);
+    assert_eq!(patch.status, ProvenanceStatus::Known);
+    assert!(patch.enum_associated);
+    let nullable = Domain {
+        literals: BTreeSet::from(["null".to_owned()]),
+        ..Domain::default()
+    };
+    let patch = classify_patch(target.clone(), vec![domain.clone(), nullable]);
+    assert!(patch.enum_associated && patch.nullable);
+    for bad in [
+        Domain {
+            enum_fqn: Some("p.Other".to_owned()),
+            ..domain.clone()
+        },
+        Domain {
+            accessor: Some("getOther".to_owned()),
+            ..domain.clone()
+        },
+        Domain {
+            unknown: BTreeSet::from(["opaque write".to_owned()]),
+            ..Domain::default()
+        },
+        Domain {
+            transformed: true,
+            ..Domain::default()
+        },
+        Domain {
+            literals: BTreeSet::from(["999".to_owned()]),
+            ..Domain::default()
+        },
+    ] {
+        assert!(!classify_patch(target.clone(), vec![domain.clone(), bad]).enum_associated);
+    }
+}
+
+#[test]
+fn enhanced_for_enum_receivers_keep_their_lexical_scope() {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path(),
+        "Code.java",
+        "package p;\nenum Code { A, B; }\n",
+    );
+    let source = "package p;\nclass Service {\nvoid copy() { for (Code item : Code.values()) { item.getCode(); } after(); }\n}\n";
+    write(root.path(), "Service.java", source);
+    let graph = test_snapshot(
+        vec![
+            node("enum", "enum", "Code", "p::Code", "Code.java", 2, ""),
+            node(
+                "service",
+                "class",
+                "Service",
+                "p::Service",
+                "Service.java",
+                2,
+                "",
+            ),
+            node(
+                "copy",
+                "method",
+                "copy",
+                "p::Service::copy",
+                "Service.java",
+                3,
+                "void ()",
+            ),
+        ],
+        vec![contains("service", "copy")],
+    );
+    let project = JavaProject::load(root.path(), &graph).unwrap();
+    let mut analyzer = SemanticAnalyzer::new(&project);
+    assert!(
+        analyzer
+            .enum_for_receiver(
+                &graph.nodes["copy"],
+                "item",
+                source.find("item.getCode").unwrap()
+            )
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        analyzer
+            .enum_for_receiver(
+                &graph.nodes["copy"],
+                "item",
+                source.find("after()").unwrap()
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn abstract_dispatch_keeps_argument_identity_without_same_name_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path(),
+        "Base.java",
+        "package p;\nabstract class Base {\nabstract void render(DTO value);\n}\n",
+    );
+    write(
+        root.path(),
+        "Child.java",
+        "package p;\nclass Child extends Base {\nvoid render(DTO value) {}\n}\n",
+    );
+    write(
+        root.path(),
+        "Other.java",
+        "package p;\nclass Other {\nvoid render(DTO value) {}\n}\n",
+    );
+    write(
+        root.path(),
+        "Caller.java",
+        "package p;\nclass Caller {\nvoid run(Base base, DTO value) { base.render(value); }\n}\n",
+    );
+    let graph = test_snapshot(
+        vec![
+            node("base", "class", "Base", "p::Base", "Base.java", 2, ""),
+            node(
+                "abstract",
+                "method",
+                "render",
+                "p::Base::render",
+                "Base.java",
+                3,
+                "void (DTO value)",
+            ),
+            node("child", "class", "Child", "p::Child", "Child.java", 2, ""),
+            node(
+                "override",
+                "method",
+                "render",
+                "p::Child::render",
+                "Child.java",
+                3,
+                "void (DTO value)",
+            ),
+            node("other", "class", "Other", "p::Other", "Other.java", 2, ""),
+            node(
+                "unrelated",
+                "method",
+                "render",
+                "p::Other::render",
+                "Other.java",
+                3,
+                "void (DTO value)",
+            ),
+            node(
+                "caller",
+                "class",
+                "Caller",
+                "p::Caller",
+                "Caller.java",
+                2,
+                "",
+            ),
+            node(
+                "run",
+                "method",
+                "run",
+                "p::Caller::run",
+                "Caller.java",
+                3,
+                "void (Base base, DTO value)",
+            ),
+        ],
+        vec![
+            contains("base", "abstract"),
+            contains("child", "override"),
+            contains("other", "unrelated"),
+            contains("caller", "run"),
+            GraphEdge {
+                kind: "extends".to_owned(),
+                ..contains("child", "base")
+            },
+        ],
+    );
+    let project = JavaProject::load(root.path(), &graph).unwrap();
+    let mut analyzer = SemanticAnalyzer::new(&project);
+    let invocation = analyzer
+        .method_invocations(&graph.nodes["run"])
+        .unwrap()
+        .into_iter()
+        .find(|site| site.name == "render")
+        .unwrap();
+    assert!(
+        analyzer
+            .invocation_reaches(&graph.nodes["run"], &invocation, "override")
+            .unwrap()
+    );
+    assert!(
+        !analyzer
+            .invocation_reaches(&graph.nodes["run"], &invocation, "unrelated")
+            .unwrap()
+    );
+}
+
+#[test]
+fn anonymous_callbacks_resolve_captured_outer_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let source = "package p;\nclass Service {\nService delegate;\nvoid run() {\nnew Template() { void process() { delegate.run(); } };\n}\n}\n";
+    write(root.path(), "Service.java", source);
+    let graph = test_snapshot(
+        vec![
+            node(
+                "service",
+                "class",
+                "Service",
+                "p::Service",
+                "Service.java",
+                2,
+                "",
+            ),
+            node(
+                "field",
+                "field",
+                "delegate",
+                "p::Service::delegate",
+                "Service.java",
+                3,
+                "Service delegate",
+            ),
+            node(
+                "run",
+                "method",
+                "run",
+                "p::Service::run",
+                "Service.java",
+                4,
+                "void ()",
+            ),
+            node(
+                "anonymous",
+                "class",
+                "Anonymous",
+                "p::Service::run::<Anonymous>",
+                "Service.java",
+                5,
+                "",
+            ),
+            node(
+                "process",
+                "method",
+                "process",
+                "p::Service::run::<Anonymous>::process",
+                "Service.java",
+                5,
+                "void ()",
+            ),
+        ],
+        vec![
+            contains("service", "field"),
+            contains("service", "run"),
+            contains("anonymous", "process"),
+        ],
+    );
+    let project = JavaProject::load(root.path(), &graph).unwrap();
+    let mut analyzer = SemanticAnalyzer::new(&project);
+    let invocation = analyzer
+        .method_invocations(&graph.nodes["process"])
+        .unwrap()
+        .into_iter()
+        .find(|site| site.name == "run")
+        .unwrap();
+    assert_eq!(
+        analyzer
+            .resolve_invocation(&graph.nodes["process"], &invocation)
+            .unwrap(),
+        ["run"]
+    );
 }

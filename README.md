@@ -383,9 +383,12 @@ leave related domains open; generation continues using available sources. Failed
 stale repository indexes. Ambiguous associations or independent index failures still block generation.
 
 Resolved repository indexes are combined with separate node/file identities. Enum extraction follows
-cross-repository requests and DTO copies. Proven closed domains narrow fields; confirmed enum members
-with incomplete field-flow evidence are exported as enum definitions and `knownValues`, while fields
-remain open scalars. `init`, `discover`, and `generate` accept `--offline` to use the current checkout without Git
+cross-repository requests and DTO copies. A verified same-value enum lookup or traceable DTO copy
+can associate an HTTP field with a complete enum projection without proving database write invariants.
+Such patches retain `known` status and `knownValues`, add `enumAssociated: true`, and generate enum
+references in TypeScript and OpenAPI. Explicit null branches remain nullable. Conflicting projections,
+unresolved writes, transformed values, and unrelated objects stay open; incomplete evidence can still
+produce standalone enum definitions without associating the field. `init`, `discover`, and `generate` accept `--offline` to use the current checkout without Git
 network operations; offline discovery skips SIC queries and cloning; offline generation also skips Gateway queries. See
 [repository discovery](apps/nlab-api-docs/docs/quick-start.md#跨仓库准备情况检查) for scope and limitations.
 
@@ -401,8 +404,9 @@ an enum field through a complete `values()` iteration, stream filter, or private
 all enum constants. Method names such as `valueOfType` alone are not evidence. Request analysis follows
 DTO getters, local aliases, and delegated parameters to those lookups; response analysis retains
 setter provenance and can reuse a validated request value when it is echoed. A request domain is
-closed only when unmatched values are rejected on a mandatory path. Defaulting or uncertain lookups
-remain known evidence without narrowing from that evidence. Semantic targets record `source` as
+closed only when unmatched values are rejected on a mandatory path. A unique, source-proven request
+association can still produce an enum type with known status; rewritten or ambiguous request origins
+are not associated. Semantic targets record `source` as
 `request` or `response`; older snapshots without it mean `response`. Operation-specific request and
 response types remain separate, including when both use the same Java DTO.
 

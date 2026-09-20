@@ -1,3 +1,4 @@
+mod copy_origin;
 mod cross_repository;
 mod discovery;
 mod lookup;
@@ -28,6 +29,8 @@ struct Domain {
     complete: bool,
     external: BTreeSet<String>,
     unknown: BTreeSet<String>,
+    /// Gaps in proving a closed value domain, not gaps in the enum association.
+    closure_gaps: BTreeSet<String>,
     literals: BTreeSet<String>,
     transformed: bool,
     evidence: Vec<String>,
@@ -71,7 +74,7 @@ pub struct SemanticAnalyzer<'a> {
     enum_lookups: HashMap<String, lookup::EnumLookup>,
     request_domains: HashMap<(String, String), Domain>,
     field_domain_cache: HashMap<(String, String, String), Domain>,
-    lookup_forwarder_cache: HashMap<String, Option<Domain>>,
+    lookup_forwarder_cache: HashMap<(String, usize), Option<Domain>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -340,6 +343,23 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             owners = parents;
         }
+        if candidates.is_empty() && invocation.receiver.is_none() {
+            for owner in self.lexical_owners(method).into_iter().skip(1) {
+                candidates.extend(
+                    graph
+                        .contained(&owner.id, "method")
+                        .into_iter()
+                        .filter(|target| {
+                            target.name == invocation.name
+                                && signature_arity(&target.signature) == Some(invocation.arity)
+                        })
+                        .map(|target| target.id.clone()),
+                );
+                if !candidates.is_empty() {
+                    break;
+                }
+            }
+        }
         candidates.sort();
         candidates.dedup();
         Ok(if candidates.len() == 1 {
@@ -347,6 +367,25 @@ impl<'a> SemanticAnalyzer<'a> {
         } else {
             Vec::new()
         })
+    }
+
+    fn lexical_owners(&self, method: &GraphNode) -> Vec<&GraphNode> {
+        let mut scope = method
+            .qualified_name
+            .rsplit_once("::")
+            .map(|(owner, _)| owner);
+        let mut owners = Vec::new();
+        while let Some(name) = scope {
+            if let Some(owner) = self
+                .project
+                .node_for_fqn(&name.replace("::", "."))
+                .filter(|node| matches!(node.kind.as_str(), "class" | "interface" | "enum"))
+            {
+                owners.push(owner);
+            }
+            scope = name.rsplit_once("::").map(|(owner, _)| owner);
+        }
+        owners
     }
 
     fn receiver_type(
@@ -368,27 +407,17 @@ impl<'a> SemanticAnalyzer<'a> {
         {
             return Ok(Some(type_name));
         }
-        let owner_fqn = method
-            .qualified_name
-            .rsplit_once("::")
-            .map(|(owner, _)| owner.replace("::", "."));
-        if let Some(owner) = owner_fqn
-            .as_deref()
-            .and_then(|owner| self.project.node_for_fqn(owner))
-        {
-            if let Some(field) = self
-                .project
+        let field_type = self.lexical_owners(method).into_iter().find_map(|owner| {
+            self.project
                 .graph()
                 .contained(&owner.id, "field")
                 .into_iter()
                 .find(|field| field.name == receiver)
-            {
-                return Ok(declared_variable_type(&field.signature, &field.name));
-            }
-        }
+                .and_then(|field| declared_variable_type(&field.signature, &field.name))
+        });
         let parsed = self.parsed(&method.file_path)?;
         let Some(declaration) = lookup::method_declaration(parsed, method) else {
-            return Ok(None);
+            return Ok(field_type);
         };
         let local = descendants(declaration)
             .into_iter()
@@ -410,7 +439,20 @@ impl<'a> SemanticAnalyzer<'a> {
                     .child_by_field_name("type")
                     .map(|type_node| text_of(&parsed.source, type_node).to_owned())
             });
-        Ok(local)
+        let loop_type = descendants(declaration)
+            .into_iter()
+            .find(|node| {
+                node.kind() == "enhanced_for_statement"
+                    && node
+                        .child_by_field_name("name")
+                        .is_some_and(|name| text_of(&parsed.source, name) == receiver)
+                    && node.child_by_field_name("body").is_some_and(|body| {
+                        body.start_byte() <= before_offset && before_offset < body.end_byte()
+                    })
+            })
+            .and_then(|node| node.child_by_field_name("type"))
+            .map(|node| text_of(&parsed.source, node).to_owned());
+        Ok(local.or(loop_type).or(field_type))
     }
 
     fn operation_patches(
@@ -521,7 +563,7 @@ impl<'a> SemanticAnalyzer<'a> {
             );
             domains.push(domain);
         }
-        for gap in self.unindexed_setter_calls(reachable, &setter.name, &known_sites)? {
+        for gap in self.unindexed_setter_calls(reachable, setter, &known_sites)? {
             let mut domain = Domain::default();
             domain.unknown.insert(gap);
             domains.push(domain);
@@ -551,7 +593,7 @@ impl<'a> SemanticAnalyzer<'a> {
     fn unindexed_setter_calls(
         &mut self,
         reachable: &Reachability,
-        setter_name: &str,
+        setter: &GraphNode,
         known_sites: &BTreeSet<(String, usize)>,
     ) -> Result<Vec<String>> {
         let mut gaps = BTreeSet::new();
@@ -560,9 +602,13 @@ impl<'a> SemanticAnalyzer<'a> {
                 continue;
             };
             for invocation in self.method_invocations(method)? {
-                if invocation.name == setter_name
+                if invocation.name == setter.name
                     && !known_sites.contains(&(method.id.clone(), invocation.line))
                 {
+                    let targets = self.resolve_invocation(method, &invocation)?;
+                    if !targets.is_empty() && !targets.contains(&setter.id) {
+                        continue;
+                    }
                     gaps.insert(format!(
                         "unindexed setter call:{}:{}:{}",
                         method.file_path, invocation.line, invocation.column
@@ -630,15 +676,15 @@ impl<'a> SemanticAnalyzer<'a> {
                 if let Some(enum_node) = self.enum_for_receiver(writer, &receiver, offset)? {
                     return self.enum_domain(&enum_node, &accessor);
                 }
-                if !self.project.graph().source_roots.is_empty() {
-                    if let Some(domain) = self.lookup_field_domain(writer, &receiver, &accessor)? {
-                        return Ok(domain);
-                    }
-                    if let Some(domain) = self.copied_field_domain(
-                        operation, writer, &receiver, &accessor, offset, reachable, visiting,
-                    )? {
-                        return Ok(domain);
-                    }
+                if let Some(domain) =
+                    self.lookup_field_domain(writer, &receiver, &accessor, offset)?
+                {
+                    return Ok(domain);
+                }
+                if let Some(domain) = self.copied_field_domain(
+                    operation, writer, &receiver, &accessor, offset, reachable, visiting,
+                )? {
+                    return Ok(domain);
                 }
                 let mut domain = Domain::default();
                 domain
@@ -1254,6 +1300,7 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
             && domain.complete
             && domain.external.is_empty()
             && domain.unknown.is_empty()
+            && domain.closure_gaps.is_empty()
             && domain.literals.is_empty()
             && !domain.transformed
     });
@@ -1278,6 +1325,7 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
             merged
                 .unknown
                 .iter()
+                .chain(merged.closure_gaps.iter())
                 .next()
                 .map(|reason| format!(": {reason}"))
                 .unwrap_or_default()
@@ -1298,9 +1346,25 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
             )
         }),
     };
+    let enum_associated = merged.complete
+        && merged.enum_fqn.is_some()
+        && merged.unknown.is_empty()
+        && merged.external.is_empty()
+        && !merged.transformed
+        && merged.literals.iter().all(|value| {
+            value == "null"
+                || serde_json::from_str::<WireValue>(value)
+                    .ok()
+                    .is_some_and(|literal| {
+                        merged.values.iter().any(|member| member.value == literal)
+                    })
+        });
+    let nullable = merged.literals.contains("null");
     SemanticPatch {
         target,
         status,
+        enum_associated,
+        nullable,
         enum_fqn: merged.enum_fqn,
         enum_source: merged.enum_source,
         accessor: merged.accessor,
@@ -1328,6 +1392,8 @@ fn unresolved_patch(target: FieldTarget, reason: &str) -> SemanticPatch {
         accessor: None,
         values: Vec::new(),
         known_values: Vec::new(),
+        enum_associated: false,
+        nullable: false,
         evidence: Vec::new(),
         warning: Some(reason.to_owned()),
     }
@@ -1336,30 +1402,49 @@ fn unresolved_patch(target: FieldTarget, reason: &str) -> SemanticPatch {
 fn reconcile_schema_paths(patches: &mut [SemanticPatch]) {
     let conflicts = patches
         .iter()
-        .filter(|patch| patch.status == ProvenanceStatus::Closed)
+        .filter(|patch| patch.associated_values().is_some())
         .filter(|patch| {
             patches.iter().any(|other| {
                 other.target.source == patch.target.source
                     && other.target.schema_fqn == patch.target.schema_fqn
                     && other.target.field_name == patch.target.field_name
-                    && (other.status != ProvenanceStatus::Closed
+                    && (other.associated_values().is_none()
                         || other.enum_fqn != patch.enum_fqn
                         || other.accessor != patch.accessor
-                        || other.values != patch.values)
+                        || other.associated_values() != patch.associated_values())
             })
         })
         .map(|patch| patch.target.clone())
         .collect::<BTreeSet<_>>();
-    for patch in patches
-        .iter_mut()
-        .filter(|patch| conflicts.contains(&patch.target))
-    {
-        patch.status = ProvenanceStatus::Known;
-        patch.known_values = std::mem::take(&mut patch.values);
-        patch.warning = Some(
-            "field has different domains at different paths; shared schema is not narrowed"
-                .to_owned(),
-        );
+    // Shared schemas can represent multiple paths only when their enum identities agree.
+    let nullable = patches
+        .iter()
+        .filter(|patch| patch.nullable)
+        .map(|patch| {
+            (
+                patch.target.source,
+                patch.target.schema_fqn.clone(),
+                patch.target.field_name.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for patch in patches {
+        if conflicts.contains(&patch.target) {
+            patch.enum_associated = false;
+            if patch.status == ProvenanceStatus::Closed {
+                patch.status = ProvenanceStatus::Known;
+                patch.known_values = std::mem::take(&mut patch.values);
+            }
+            patch.warning = Some(
+                "field has different domains at different paths; shared schema is not narrowed"
+                    .to_owned(),
+            );
+        }
+        patch.nullable |= nullable.contains(&(
+            patch.target.source,
+            patch.target.schema_fqn.clone(),
+            patch.target.field_name.clone(),
+        ));
     }
 }
 
@@ -1382,6 +1467,7 @@ fn merge_domain(target: &mut Domain, source: Domain) {
     }
     target.external.extend(source.external);
     target.unknown.extend(source.unknown);
+    target.closure_gaps.extend(source.closure_gaps);
     target.literals.extend(source.literals);
     target.transformed |= source.transformed;
     for evidence in source.evidence {

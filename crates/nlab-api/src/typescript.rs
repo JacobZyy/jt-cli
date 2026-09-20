@@ -183,9 +183,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
                 source == FieldSource::Response && !reachable.is_disjoint(&requests);
             if !preserves_requiredness
                 && !operation.semantic_patches.iter().any(|patch| {
-                    patch.target.source == source
-                        && patch.status == ProvenanceStatus::Closed
-                        && !patch.values.is_empty()
+                    patch.target.source == source && patch.associated_values().is_some()
                 })
             {
                 continue;
@@ -234,7 +232,7 @@ fn target_plan(ir: &ContractIr, config: &ProjectConfig) -> Result<TargetPlan> {
                 .entry(identity.clone())
                 .or_default()
                 .insert(directory.clone());
-            if patch.status == ProvenanceStatus::Closed {
+            if patch.associated_values().is_some() {
                 patch_enums.insert(patch_symbol(patch), identity);
             }
         }
@@ -559,9 +557,7 @@ fn render_interface(
                 .semantic_patches
                 .iter()
                 .filter(|patch| {
-                    patch.target.schema_fqn == schema.fqn
-                        && patch.target.source == source
-                        && patch.status == ProvenanceStatus::Closed
+                    patch.target.schema_fqn == schema.fqn && patch.target.source == source
                 })
                 .map(|patch| (patch.target.field_name.as_str(), patch))
                 .collect::<HashMap<_, _>>()
@@ -569,33 +565,38 @@ fn render_interface(
         .unwrap_or_default();
     let mut fields = String::new();
     for field in &schema.fields {
-        let type_name = if let Some(patch) = patches.get(field.name.as_str()) {
-            let enum_target = enum_targets
-                .get(&patch_symbol(patch))
-                .with_context(|| format!("enum target missing for {}", patch_symbol(patch)))?;
-            imports
-                .entry(import_specifier(&target.path, &enum_target.path, config))
-                .or_default()
-                .insert(enum_target.name.clone());
-            enum_target.name.clone()
-        } else if let Some(enum_target) =
-            field_enum_targets.get(&field_symbol(&schema.fqn, &field.name))
-        {
-            imports
-                .entry(import_specifier(&target.path, &enum_target.path, config))
-                .or_default()
-                .insert(enum_target.name.clone());
-            enum_target.name.clone()
-        } else {
-            type_expression(
-                &field.java_type,
-                target,
-                base_targets,
-                aliases,
-                &mut imports,
-                config,
-            )
-        };
+        let patch = patches.get(field.name.as_str());
+        let mut type_name =
+            if let Some(patch) = patch.filter(|patch| patch.associated_values().is_some()) {
+                let enum_target = enum_targets
+                    .get(&patch_symbol(patch))
+                    .with_context(|| format!("enum target missing for {}", patch_symbol(patch)))?;
+                imports
+                    .entry(import_specifier(&target.path, &enum_target.path, config))
+                    .or_default()
+                    .insert(enum_target.name.clone());
+                enum_target.name.clone()
+            } else if let Some(enum_target) =
+                field_enum_targets.get(&field_symbol(&schema.fqn, &field.name))
+            {
+                imports
+                    .entry(import_specifier(&target.path, &enum_target.path, config))
+                    .or_default()
+                    .insert(enum_target.name.clone());
+                enum_target.name.clone()
+            } else {
+                type_expression(
+                    &field.java_type,
+                    target,
+                    base_targets,
+                    aliases,
+                    &mut imports,
+                    config,
+                )
+            };
+        if patch.is_some_and(|patch| patch.nullable && patch.associated_values().is_some()) {
+            type_name.push_str(" | null");
+        }
         if let Some(description) = &field.description {
             fields.push_str(&render_doc(description, "  "));
         }
@@ -1545,5 +1546,64 @@ pub(crate) mod tests {
             patched_type
                 .contains("@service-enums/checkapp/goodsQueryFacade/refurbButtonActionCode")
         );
+
+        let mut associated_ir = ir.clone();
+        {
+            let patch = &mut associated_ir.operations[0].semantic_patches[0];
+            patch.status = ProvenanceStatus::Known;
+            patch.values.clear();
+            patch.known_values = vec![CodedValue {
+                value: WireValue::String("start_refurb".to_owned()),
+                key: Some("START_REFURB".to_owned()),
+                label: "去整备".to_owned(),
+            }];
+            patch.enum_associated = true;
+            patch.nullable = true;
+        }
+        let associated = generate(&associated_ir, &config()).unwrap();
+        let associated_type = associated
+            .files
+            .values()
+            .find(|source| source.contains("actionCode: RefurbButtonActionCode"))
+            .expect("associated operation type");
+        assert!(associated_type.contains("actionCode: RefurbButtonActionCode | null;"));
+        let associated_openapi =
+            super::super::openapi::generate(&associated_ir, &config()).unwrap();
+        let associated_document =
+            serde_json::from_str::<serde_json::Value>(&associated_openapi.source).unwrap();
+        let response_ref = associated_document["paths"]["/query"]["post"]["responses"]["200"]
+            ["content"]["application/json"]["schema"]["$ref"]
+            .as_str()
+            .unwrap();
+        let property = associated_document
+            .pointer(&format!("{}/properties/actionCode", &response_ref[1..]))
+            .unwrap();
+        assert_eq!(
+            property["anyOf"][0]["enum"],
+            serde_json::json!(["start_refurb"])
+        );
+        assert_eq!(property["anyOf"][1], serde_json::json!({"type": "null"}));
+        assert_eq!(
+            property["x-nlab-enum-association"]["enumAssociated"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            associated_document["paths"]["/query"]["post"]["x-nlab-semantic-patches"][0]["enumAssociated"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            associated_document["paths"]["/query"]["post"]["x-nlab-semantic-patches"][0]["nullable"],
+            serde_json::json!(true)
+        );
+
+        associated_ir.operations[0].semantic_patches[0].enum_associated = false;
+        associated_ir.operations[0].semantic_patches[0].nullable = true;
+        let known_only = generate(&associated_ir, &config()).unwrap();
+        let known_only_type = known_only
+            .files
+            .values()
+            .find(|source| source.contains("export interface BizButton"))
+            .expect("known-only operation type");
+        assert!(known_only_type.contains("actionCode: string;"));
     }
 }

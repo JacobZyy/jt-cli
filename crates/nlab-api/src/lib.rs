@@ -368,6 +368,12 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         .iter()
         .filter(|operation| operation.route.status == RouteStatus::Placeholder)
         .count();
+    let associated_enum_patches = ir
+        .operations
+        .iter()
+        .flat_map(|operation| &operation.semantic_patches)
+        .filter(|patch| patch.associated_values().is_some())
+        .count();
     let status = if diagnostics.is_empty() {
         "complete"
     } else {
@@ -426,6 +432,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         placeholders,
         semantic_patches,
         closed_enum_patches,
+        associated_enum_patches,
         api_files: written.api_files.len(),
         type_files: written.type_files.len(),
         enum_files: written.enum_files.len(),
@@ -456,7 +463,8 @@ fn semantic_diagnostics(ir: &ContractIr) -> Vec<Value> {
                     json!({
                         "level": "info",
                         "stage": "generate",
-                        "code": format!("ENUM_{:?}", patch.status).to_ascii_uppercase(),
+                        "code": if patch.enum_associated { "ENUM_ASSOCIATED".to_owned() } else { format!("ENUM_{:?}", patch.status).to_ascii_uppercase() },
+                        "enumAssociated": patch.enum_associated,
                         "operationKey": operation.key,
                         "source": patch.target.source,
                         "schemaFqn": patch.target.schema_fqn,
