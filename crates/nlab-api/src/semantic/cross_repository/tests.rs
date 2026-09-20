@@ -781,6 +781,7 @@ fn enum_association_rejects_conflicts_transforms_and_unknown_writes_but_keeps_nu
         enum_source: Some("State.java".to_owned()),
         accessor: Some("getCode".to_owned()),
         complete: true,
+        primary_enum_value: true,
         values: vec![CodedValue {
             value: WireValue::Number(1),
             key: Some("A".to_owned()),

@@ -229,7 +229,11 @@ fn returned_value(node: Node<'_>) -> Option<Node<'_>> {
         .flatten()
 }
 
-fn lookup_projection(source: &str, method: Node<'_>, enum_name: &str) -> Option<(String, bool)> {
+pub(super) fn lookup_projection(
+    source: &str,
+    method: Node<'_>,
+    enum_name: &str,
+) -> Option<(String, bool)> {
     let params = method
         .child_by_field_name("parameters")
         .map(named_children)?;

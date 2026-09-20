@@ -217,6 +217,21 @@ pub enum ProvenanceStatus {
     Unresolved,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnumCandidateStatus {
+    Verified,
+    Conflict,
+    Unverified,
+    Ignored,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EnumCandidateVerification {
+    pub status: EnumCandidateStatus,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticPatch {
@@ -231,6 +246,11 @@ pub struct SemanticPatch {
     pub known_values: Vec<CodedValue>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub enum_associated: bool,
+    /// The field is proven to use the enum's serialized primary value.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub primary_enum_value: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_candidate: Option<EnumCandidateVerification>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub nullable: bool,
     pub evidence: Vec<String>,
@@ -242,7 +262,14 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl SemanticPatch {
+    pub fn has_enum_null_branch(&self) -> bool {
+        self.nullable && self.enum_fqn.is_some()
+    }
+
     pub fn associated_values(&self) -> Option<&[CodedValue]> {
+        if !self.primary_enum_value {
+            return None;
+        }
         if self.status == ProvenanceStatus::Closed && !self.values.is_empty() {
             Some(&self.values)
         } else if self.enum_associated && !self.known_values.is_empty() {
@@ -361,6 +388,8 @@ mod tests {
             values,
             known_values,
             enum_associated: false,
+            primary_enum_value: false,
+            enum_candidate: None,
             nullable: false,
             evidence: Vec::new(),
             warning: None,
@@ -374,12 +403,14 @@ mod tests {
             key: Some("READY".to_owned()),
             label: "Ready".to_owned(),
         };
-        let closed = patch(ProvenanceStatus::Closed, vec![value.clone()], vec![]);
+        let mut closed = patch(ProvenanceStatus::Closed, vec![value.clone()], vec![]);
+        closed.primary_enum_value = true;
         assert_eq!(closed.associated_values(), Some([value.clone()].as_slice()));
 
         let mut known = patch(ProvenanceStatus::Known, vec![], vec![value.clone()]);
         assert_eq!(known.associated_values(), None);
         known.enum_associated = true;
+        known.primary_enum_value = true;
         assert_eq!(known.associated_values(), Some([value].as_slice()));
         assert!(closed.known_values.is_empty());
     }
@@ -403,6 +434,7 @@ mod tests {
         });
         let patch = serde_json::from_value::<SemanticPatch>(json).unwrap();
         assert!(!patch.enum_associated);
+        assert!(!patch.primary_enum_value);
         assert!(!patch.nullable);
         assert!(
             !serde_json::to_value(patch)

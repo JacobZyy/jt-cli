@@ -348,9 +348,9 @@ the detected request adapter. The same command then queries testserver ZGateway 
 migrates business imports from the fixed previous `.nlab` snapshot, optionally generates Mock files
 when `mock.enabled` is true, promotes the stable OpenAPI snapshot, and writes one final report.
 By default it does not invoke Bun, Node.js, Orval, Python, frontend typecheck, tests, builds, or lint;
-configured `afterGenerate` hooks may run project-owned commands. A DTO field
-uses a complete code-provenance enum first, then a complete linked Java enum, then explicit comment or
-annotation values; otherwise it remains its original scalar type.
+configured `afterGenerate` hooks may run project-owned commands. A DTO field uses an enum only when
+code evidence confirms its association with the enum's primary value. Comments, annotations, and
+linked class names remain candidates; unverified fields keep their original scalar type.
 
 Generated request arguments and the outermost request DTO fields are optional, including inherited
 fields flattened into that DTO. Nested object and array-item fields retain their original requiredness.
@@ -362,8 +362,8 @@ the generator does not create an extra per-operation `*Data` alias file. Import 
 the configured API, type, and enum aliases as well as relative imports and `@/`.
 Each API file keeps its paths in one local `API_URLS` object, and request functions read their paths
 from that object. No per-operation URL getter functions are generated.
-Each generated enum has a source comment identifying a Java enum class or field comment/annotation,
-with the qualified class and accessor or field reference.
+Each generated enum identifies its Java class and canonical primary field. Display names, descriptions,
+colors, and other auxiliary properties do not produce separate enums or frontend mapping tables.
 
 Enable automatic discovery and cross-repository enum analysis with a backend collection:
 
@@ -385,10 +385,11 @@ stale repository indexes. Ambiguous associations or independent index failures s
 Resolved repository indexes are combined with separate node/file identities. Enum extraction follows
 cross-repository requests and DTO copies. A verified same-value enum lookup or traceable DTO copy
 can associate an HTTP field with a complete enum projection without proving database write invariants.
-Such patches retain `known` status and `knownValues`, add `enumAssociated: true`, and generate enum
-references in TypeScript and OpenAPI. Explicit null branches remain nullable. Conflicting projections,
-unresolved writes, transformed values, and unrelated objects stay open; incomplete evidence can still
-produce standalone enum definitions without associating the field. `init`, `discover`, and `generate` accept `--offline` to use the current checkout without Git
+Such patches retain `known` status and `knownValues`; generation requires both a verified association
+and `primaryEnumValue: true`. Explicit null branches remain nullable. Conflicting projections,
+unresolved writes, transformed values, and unrelated objects stay open and do not create orphan enum
+files. `enumCandidate` records whether a comment candidate is verified, conflicting, unverified, or
+ignored; actual code evidence takes precedence. No AI calls are used. `init`, `discover`, and `generate` accept `--offline` to use the current checkout without Git
 network operations; offline discovery skips SIC queries and cloning; offline generation also skips Gateway queries. See
 [repository discovery](apps/nlab-api-docs/docs/quick-start.md#跨仓库准备情况检查) for scope and limitations.
 

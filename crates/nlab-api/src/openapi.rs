@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
-use super::coded_values;
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, type_output_path};
 use super::model::{
@@ -394,29 +393,10 @@ fn schema_object(
                 &mut property,
                 patch.associated_values().expect("associated enum values"),
             );
-        } else if let Some(linked) = &field.linked_enum {
-            apply_enum(&mut property, &linked.values);
-            property.as_object_mut().expect("schema object").insert(
-                "x-nlab-linked-enum".to_owned(),
-                json!({
-                    "enumFqn": linked.enum_fqn,
-                    "enumSource": linked.enum_source,
-                    "accessor": linked.accessor,
-                }),
-            );
-        } else if let Some(values) = &field.declared_values {
-            apply_enum(
-                &mut property,
-                &coded_values::with_fallback_keys(&field.name, &values.values),
-            );
-            property
-                .as_object_mut()
-                .expect("schema object")
-                .insert("x-nlab-known-values".to_owned(), json!(values));
         }
         if patches
             .get(field.name.as_str())
-            .is_some_and(|patch| patch.nullable && patch.associated_values().is_some())
+            .is_some_and(|patch| patch.has_enum_null_branch())
         {
             apply_nullable(&mut property);
         }
@@ -575,6 +555,12 @@ fn semantic_patch(patch: &SemanticPatch) -> Value {
     if patch.enum_associated {
         value.insert("enumAssociated".to_owned(), json!(true));
     }
+    if patch.primary_enum_value {
+        value.insert("primaryEnumValue".to_owned(), json!(true));
+    }
+    if let Some(candidate) = &patch.enum_candidate {
+        value.insert("enumCandidate".to_owned(), json!(candidate));
+    }
     if patch.nullable {
         value.insert("nullable".to_owned(), json!(true));
     }
@@ -619,7 +605,8 @@ fn operation_aliases(
                 source == FieldSource::Response && !reachable.is_disjoint(requests);
             if !preserves_requiredness
                 && !operation.semantic_patches.iter().any(|patch| {
-                    patch.target.source == source && patch.associated_values().is_some()
+                    patch.target.source == source
+                        && (patch.associated_values().is_some() || patch.has_enum_null_branch())
                 })
             {
                 continue;

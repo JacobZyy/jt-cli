@@ -1,7 +1,9 @@
+mod candidates;
 mod copy_origin;
 mod cross_repository;
 mod discovery;
 mod lookup;
+mod primary;
 mod request;
 
 pub(crate) use discovery::RemoteCall;
@@ -27,6 +29,8 @@ struct Domain {
     accessor: Option<String>,
     values: Vec<CodedValue>,
     complete: bool,
+    primary_enum_value: bool,
+    auxiliary_enum_value: bool,
     external: BTreeSet<String>,
     unknown: BTreeSet<String>,
     /// Gaps in proving a closed value domain, not gaps in the enum association.
@@ -111,6 +115,16 @@ impl<'a> SemanticAnalyzer<'a> {
             let mut patches = self.request_patches(operation, schemas, &reachable)?;
             patches.extend(self.operation_patches(operation, schemas, &reachable)?);
             reconcile_schema_paths(&mut patches);
+            for patch in &mut patches {
+                if let Some(schema) = schemas.get(&patch.target.schema_fqn)
+                    && let Some(field) = schema
+                        .fields
+                        .iter()
+                        .find(|field| field.name == patch.target.field_name)
+                {
+                    patch.enum_candidate = self.verify_enum_candidate(schema, field, patch);
+                }
+            }
             operation.semantic_patches = patches;
         }
         Ok(())
@@ -137,7 +151,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         field.linked_enum = Some(LinkedEnum {
                             enum_fqn: enum_node.qualified_name.replace("::", "."),
                             enum_source: enum_node.file_path.clone(),
-                            accessor,
+                            accessor: domain.accessor.expect("primary enum field"),
                             values: domain.values,
                         });
                         break;
@@ -1190,26 +1204,27 @@ fn extract_enum_domain(
     let body = declaration
         .child_by_field_name("body")
         .context("enum body not found")?;
-    let fields = descendants(body)
-        .into_iter()
-        .filter(|child| child.kind() == "field_declaration")
-        .filter(|child| !text_of(source, *child).contains(" static "))
-        .filter_map(|field| {
-            descendants(field)
-                .into_iter()
-                .find(|child| child.kind() == "variable_declarator")
-                .and_then(|variable| variable.child_by_field_name("name"))
-                .map(|name| text_of(source, name).to_owned())
-        })
-        .collect::<Vec<_>>();
-    let signal = getter_signal(accessor).unwrap_or_else(|| accessor.to_owned());
-    let Some(value_index) = fields.iter().position(|field| field == &signal) else {
+    let fields = primary::instance_fields(source, declaration);
+    let Some(signal) = primary::accessor_field(source, declaration, accessor, &fields) else {
         return Ok(incomplete_enum_domain(
             enum_node,
             accessor,
             "enum field projection missing",
         ));
     };
+    let Some(primary_field) = primary::field_name(source, declaration, &fields) else {
+        return Ok(incomplete_enum_domain(
+            enum_node,
+            accessor,
+            "enum primary value is not proven",
+        ));
+    };
+    if signal != primary_field {
+        let mut domain =
+            incomplete_enum_domain(enum_node, accessor, "enum auxiliary value is not emitted");
+        domain.auxiliary_enum_value = true;
+        return Ok(domain);
+    }
     let label_index = fields.iter().position(|field| {
         field != &signal
             && ["name", "desc", "description", "label", "title"]
@@ -1231,10 +1246,19 @@ fn extract_enum_domain(
             .child_by_field_name("arguments")
             .map(named_children)
             .unwrap_or_default();
-        let value = arguments
-            .get(value_index)
+        let value = primary::argument_index(source, declaration, &signal, &fields, arguments.len())
+            .and_then(|index| arguments.get(index))
             .and_then(|node| wire_value(source, *node));
         let label = label_index
+            .and_then(|index| {
+                primary::argument_index(
+                    source,
+                    declaration,
+                    &fields[index],
+                    &fields,
+                    arguments.len(),
+                )
+            })
             .and_then(|index| arguments.get(index))
             .and_then(|node| string_literal(source, *node));
         let Some(value) = value else {
@@ -1256,9 +1280,10 @@ fn extract_enum_domain(
     let mut domain = Domain {
         enum_fqn: Some(enum_node.qualified_name.replace("::", ".")),
         enum_source: Some(enum_node.file_path.clone()),
-        accessor: Some(accessor.to_owned()),
+        accessor: Some(primary_field),
         values,
         complete: complete && unique,
+        primary_enum_value: true,
         ..Domain::default()
     };
     if !domain.complete {
@@ -1445,6 +1470,7 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
         }),
     };
     let enum_associated = merged.complete
+        && merged.primary_enum_value
         && merged.enum_fqn.is_some()
         && merged.unknown.is_empty()
         && merged.external.is_empty()
@@ -1462,6 +1488,13 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
         target,
         status,
         enum_associated,
+        primary_enum_value: merged.primary_enum_value,
+        enum_candidate: merged.auxiliary_enum_value.then(|| {
+            crate::model::EnumCandidateVerification {
+                status: crate::model::EnumCandidateStatus::Ignored,
+                reason: "auxiliary enum attributes are not generated".to_owned(),
+            }
+        }),
         nullable,
         enum_fqn: merged.enum_fqn,
         enum_source: merged.enum_source,
@@ -1491,6 +1524,8 @@ fn unresolved_patch(target: FieldTarget, reason: &str) -> SemanticPatch {
         values: Vec::new(),
         known_values: Vec::new(),
         enum_associated: false,
+        primary_enum_value: false,
+        enum_candidate: None,
         nullable: false,
         evidence: Vec::new(),
         warning: Some(reason.to_owned()),
@@ -1554,9 +1589,13 @@ fn merge_domain(target: &mut Domain, source: Domain) {
             target.accessor = source.accessor.clone();
             target.values = source.values.clone();
             target.complete = source.complete;
+            target.primary_enum_value = source.primary_enum_value;
+            target.auxiliary_enum_value = source.auxiliary_enum_value;
         }
         (Some(left), Some(right)) if left != right || target.accessor != source.accessor => {
             target.complete = false;
+            target.primary_enum_value = false;
+            target.auxiliary_enum_value = false;
             target
                 .unknown
                 .insert(format!("conflicting enum projections:{left}:{right}"));
@@ -1873,6 +1912,7 @@ mod tests {
                 enum_fqn: Some("p.Color".to_owned()),
                 accessor: Some("getColor".to_owned()),
                 complete: true,
+                primary_enum_value: true,
                 values: vec![CodedValue {
                     value: WireValue::String("gray".to_owned()),
                     key: Some("GRAY".to_owned()),
@@ -2102,6 +2142,14 @@ mod tests {
     }
 
     fn request_fixture(body: &str, fallback: &str) -> crate::model::ContractIr {
+        request_fixture_with_comment(body, fallback, None)
+    }
+
+    fn request_fixture_with_comment(
+        body: &str,
+        fallback: &str,
+        comment: Option<&str>,
+    ) -> crate::model::ContractIr {
         let repo = tempfile::tempdir().unwrap();
         let contract = "contract/src/main/java/p/contract/IFacade.java";
         let implementation = "service/src/main/java/p/Facade.java";
@@ -2115,7 +2163,10 @@ mod tests {
         write(
             repo.path(),
             payload,
-            "package p;\nclass Payload {\n int code;\n int getCode() { return code; }\n void setCode(int code) { this.code = code; }\n}\n",
+            &format!(
+                "package p;\nclass Payload {{\n /** {} */ int code;\n int getCode() {{ return code; }}\n void setCode(int code) {{ this.code = code; }}\n}}\n",
+                comment.unwrap_or_default()
+            ),
         );
         write(
             repo.path(),
@@ -2129,7 +2180,8 @@ mod tests {
                 "package p;\nenum Kind {{\n A(1), B(2);\n final int type;\n Kind(int type) {{ this.type = type; }}\n int getType() {{ return type; }}\n static Kind decode(int input) {{ for (Kind item : values()) {{ if (item.type == input) {{ return item; }} }} return {fallback}; }}\n}}\n"
             ),
         );
-        let graph = test_snapshot(
+        write(repo.path(), "Other.java", "package p; enum Other { X, Y; }");
+        let mut graph = test_snapshot(
             vec![
                 node(
                     "contract",
@@ -2196,6 +2248,7 @@ mod tests {
                     "void (int code)",
                 ),
                 node("kind", "enum", "Kind", "p::Kind", kind, 2, ""),
+                node("other", "enum", "Other", "p::Other", "Other.java", 1, ""),
                 node(
                     "decode",
                     "method",
@@ -2217,6 +2270,7 @@ mod tests {
                 call("query", "setter", 3),
             ],
         );
+        graph.nodes.get_mut("code").unwrap().docstring = comment.map(ToOwned::to_owned);
         let project = JavaProject::load(repo.path(), &graph).unwrap();
         let target = TargetIdentity {
             app_name: "demo".into(),
@@ -2236,6 +2290,115 @@ mod tests {
             operations,
             schemas,
         }
+    }
+
+    #[test]
+    fn comment_candidates_require_independent_code_evidence_per_direction() {
+        use crate::model::EnumCandidateStatus;
+        let checked = "int code = req.getCode(); Kind kind = Kind.decode(code); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;";
+        for (comment, expected) in [
+            ("1=Ready; 2=Done", EnumCandidateStatus::Verified),
+            ("1=Ready; 9=Outdated", EnumCandidateStatus::Conflict),
+            ("@see p.Other", EnumCandidateStatus::Conflict),
+            ("@see missing.Kind", EnumCandidateStatus::Unverified),
+        ] {
+            let ir = request_fixture_with_comment(checked, "null", Some(comment));
+            let request = ir.operations[0]
+                .semantic_patches
+                .iter()
+                .find(|patch| patch.target.source == FieldSource::Request)
+                .unwrap();
+            let response = ir.operations[0]
+                .semantic_patches
+                .iter()
+                .find(|patch| patch.target.source == FieldSource::Response)
+                .unwrap();
+            assert_eq!(
+                request.enum_candidate.as_ref().unwrap().status,
+                expected,
+                "{comment}"
+            );
+            assert!(request.associated_values().is_some());
+            assert_eq!(
+                response.enum_candidate.as_ref().unwrap().status,
+                EnumCandidateStatus::Unverified
+            );
+            assert!(response.associated_values().is_none());
+            let generated =
+                crate::typescript::generate(&ir, &crate::typescript::tests::config()).unwrap();
+            assert_eq!(
+                generated.enum_files.len(),
+                1,
+                "untrusted comments must not add enum files"
+            );
+            assert!(
+                crate::semantic_diagnostics(&ir)
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == "ENUM_CANDIDATE_VERIFICATION")
+            );
+        }
+        let ir = request_fixture_with_comment(
+            "Payload result = new Payload(); result.setCode(req.getCode()); return result;",
+            "null",
+            Some("@see p.Kind"),
+        );
+        assert!(
+            ir.operations[0].semantic_patches.iter().all(|patch| patch
+                .associated_values()
+                .is_none()
+                && patch.enum_candidate.as_ref().unwrap().status
+                    == EnumCandidateStatus::Unverified)
+        );
+        assert!(
+            crate::typescript::generate(&ir, &crate::typescript::tests::config())
+                .unwrap()
+                .enum_files
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn primary_field_identity_is_shared_by_getter_val_and_direct_access() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "Kind.java",
+            "package p;\nenum Kind { A(1), B(2); final int type; Kind(int type) { this.type=type; } int getType() { return type; } int val() { return type; } }",
+        );
+        let graph = test_snapshot(
+            vec![node("enum", "enum", "Kind", "p::Kind", "Kind.java", 2, "")],
+            vec![],
+        );
+        let project = JavaProject::load(root.path(), &graph).unwrap();
+        let domains = ["getType", "val", "type"]
+            .iter()
+            .map(|accessor| extract_enum_domain(&project, &graph.nodes["enum"], accessor).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            domains
+                .iter()
+                .all(|domain| domain.accessor.as_deref() == Some("type"))
+        );
+        let mut ir = request_fixture(
+            "Payload result = new Payload(); result.setCode(1); return result;",
+            "null",
+        );
+        for patch in &mut ir.operations[0].semantic_patches {
+            *patch = classify_patch(patch.target.clone(), domains.clone());
+        }
+        assert!(
+            ir.operations[0]
+                .semantic_patches
+                .iter()
+                .all(|patch| patch.associated_values().is_some())
+        );
+        assert_eq!(
+            crate::typescript::generate(&ir, &crate::typescript::tests::config())
+                .unwrap()
+                .enum_files
+                .len(),
+            1
+        );
     }
 
     #[test]

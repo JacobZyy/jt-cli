@@ -149,19 +149,6 @@ pub fn parse(
     None
 }
 
-pub fn with_fallback_keys(field_name: &str, values: &[CodedValue]) -> Vec<CodedValue> {
-    values
-        .iter()
-        .cloned()
-        .map(|mut value| {
-            if value.key.is_none() {
-                value.key = Some(fallback_key(field_name, &value.value));
-            }
-            value
-        })
-        .collect()
-}
-
 fn parse_pairs(text: &str, kind: ValueKind) -> Vec<CodedValue> {
     let source = sanitize(text);
     let structured = match kind {
@@ -554,24 +541,6 @@ fn value_kind(java_type: &TypeRef) -> Option<ValueKind> {
     }
 }
 
-fn fallback_key(field_name: &str, value: &WireValue) -> String {
-    let raw_value = match value {
-        WireValue::String(value) => value.clone(),
-        WireValue::Number(value) => value.to_string(),
-        WireValue::Decimal(value) => value.to_string(),
-    };
-    let raw_value = raw_value
-        .strip_prefix('-')
-        .map(|value| format!("NEGATIVE_{value}"))
-        .unwrap_or(raw_value);
-    let value = upper_snake(&raw_value);
-    format!(
-        "{}_{}",
-        upper_snake(field_name),
-        if value.is_empty() { "VALUE" } else { &value }
-    )
-}
-
 fn upper_camel(value: &str) -> String {
     let mut output = String::new();
     let mut uppercase = true;
@@ -586,30 +555,6 @@ fn upper_camel(value: &str) -> String {
         }
     }
     output
-}
-
-fn upper_snake(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_is_lower_or_digit = false;
-    for character in value.chars() {
-        if !character.is_ascii_alphanumeric() {
-            if !output.is_empty() && !output.ends_with('_') {
-                output.push('_');
-            }
-            previous_is_lower_or_digit = false;
-        } else {
-            if character.is_ascii_uppercase()
-                && previous_is_lower_or_digit
-                && !output.ends_with('_')
-            {
-                output.push('_');
-            }
-            output.push(character.to_ascii_uppercase());
-            previous_is_lower_or_digit =
-                character.is_ascii_lowercase() || character.is_ascii_digit();
-        }
-    }
-    output.trim_matches('_').to_owned()
 }
 
 #[cfg(test)]
@@ -912,19 +857,5 @@ mod tests {
                 (json!("refurb-list"), "整备"),
             ],
         );
-    }
-
-    #[test]
-    fn fallback_keys_match_old_skill() {
-        let values = parse(
-            "statusCode",
-            Some("状态码：-1-失败 2-成功"),
-            None,
-            &java_type("Integer"),
-        )
-        .unwrap();
-        let values = with_fallback_keys("statusCode", &values.values);
-        assert_eq!(values[0].key.as_deref(), Some("STATUS_CODE_NEGATIVE_1"));
-        assert_eq!(values[1].key.as_deref(), Some("STATUS_CODE_2"));
     }
 }
