@@ -64,19 +64,12 @@ pub(super) fn scan_with(
     mut acquire: impl FnMut(&str, &str, Option<&Path>, &Path) -> Acquisition,
 ) -> Result<DiscoveryRun> {
     let config = ProjectConfig::load(&args.project)?;
-    let root = args
-        .repositories_root
-        .clone()
-        .or(LocalProjectConfig::load(&args.project)?
-            .backend
-            .repositories_root)
-        .context("repositories root missing; pass --repositories-root <path>")?
-        .canonicalize()?;
     let backend = repo::resolve_path(
         &config.backend.repo_path,
         config.backend.repository.as_deref(),
     )?
     .canonicalize()?;
+    let root = resolve_root(&args.project, args.repositories_root.as_deref(), &backend)?;
     let previous = config.discovery.unwrap_or_default();
     let mut synchronized = BTreeMap::new();
     let mut acquisitions = BTreeMap::new();

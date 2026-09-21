@@ -160,7 +160,7 @@ enum NlabApiCommand {
     Init(nlab_api::InitArgs),
     #[command(
         name = "generate",
-        about = "Run complete frontend API generation",
+        about = "Generate frontend APIs with automatic cross-repository discovery",
         after_long_help = "Only code-verified enum primary values generate enum definitions. Unverified comment candidates and auxiliary properties remain scalar."
     )]
     Generate(nlab_api::GenerateArgs),

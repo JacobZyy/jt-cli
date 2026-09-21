@@ -25,7 +25,7 @@ pub struct DiscoverArgs {
     /// Frontend project containing the existing generation config
     #[arg(long, default_value = ".")]
     project: PathBuf,
-    /// Directory containing backend Git repositories and their CodeGraph indexes
+    /// Backend collection; defaults to the configured directory or the backend repository's parent
     #[arg(long)]
     repositories_root: Option<PathBuf>,
     /// Remember a dependency branch; unspecified services use master
@@ -191,6 +191,25 @@ pub(crate) fn save_root(project: &Path, root: &Path) -> Result<()> {
     local.save(project)
 }
 
+pub(crate) fn resolve_root(
+    project: &Path,
+    requested: Option<&Path>,
+    backend: &Path,
+) -> Result<PathBuf> {
+    let local = LocalProjectConfig::load(project)?;
+    let root = requested
+        .or(local.backend.repositories_root.as_deref())
+        .or_else(|| backend.parent())
+        .context("backend repository has no parent; pass --repositories-root <path>")?;
+    let root = absolute_path(root)?
+        .canonicalize()
+        .context("resolve repositories root")?;
+    if !root.is_dir() {
+        bail!("repositories root must be a directory: {}", root.display());
+    }
+    Ok(root)
+}
+
 pub(crate) fn prepare(
     project: &Path,
     root: &Path,
@@ -329,13 +348,6 @@ fn scan(
 ) -> Result<DiscoveryRun> {
     let project_path = absolute_path(&args.project)?.canonicalize()?;
     let config = ProjectConfig::load(&project_path)?;
-    let root = args
-        .repositories_root
-        .or(LocalProjectConfig::load(&project_path)?
-            .backend
-            .repositories_root)
-        .context("repositories root missing; pass --repositories-root <path>")?;
-    let root = absolute_path(&root)?.canonicalize()?;
     let backend = repo::resolve_path(
         &config.backend.repo_path,
         config.backend.repository.as_deref(),
@@ -348,6 +360,7 @@ fn scan(
         );
     }
     let backend = backend.canonicalize()?;
+    let root = resolve_root(&project_path, args.repositories_root.as_deref(), &backend)?;
     let mut paths = fs::read_dir(&root)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;

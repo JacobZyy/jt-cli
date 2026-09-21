@@ -53,7 +53,7 @@ fn upgrade_alias_exposes_the_standalone_update_options() {
 }
 
 #[test]
-fn discovery_requires_roots_and_does_not_create_project_state() {
+fn discovery_requires_project_config_and_does_not_create_project_state() {
     let project = tempdir().unwrap();
     let help = nlab_api().args(["discover", "--help"]).output().unwrap();
     assert!(help.status.success());
@@ -276,6 +276,7 @@ fn init_and_generate_case(vite: bool) {
     assert_eq!(shared["EnumIrisable"], true);
     assert_eq!(shared["backend"]["repository"], remote.to_str().unwrap());
     assert!(shared["backend"].get("repoPath").is_none());
+    assert!(shared["discovery"]["services"].is_object());
     let mut native_config = shared.clone();
     native_config["EnumIrisable"] = serde_json::json!(false);
     write(
@@ -328,6 +329,10 @@ fn init_and_generate_case(vite: bool) {
     );
     assert!(local.get("runner").is_none());
     assert_eq!(
+        local["backend"]["repositoriesRoot"],
+        root.path().canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
         fs::read_to_string(frontend.join(".gitignore")).unwrap(),
         "/.nlab/nlab-api.local.json\n"
     );
@@ -345,6 +350,25 @@ fn init_and_generate_case(vite: bool) {
             .to_string_lossy()
     );
 
+    // Existing projects without discovery settings must also take the default discovery path.
+    let mut legacy_shared = repeated_config;
+    legacy_shared.as_object_mut().unwrap().remove("discovery");
+    write(
+        &frontend,
+        ".nlab/nlab-api.config.json",
+        &serde_json::to_string(&legacy_shared).unwrap(),
+    );
+    let mut legacy_local = local;
+    legacy_local["backend"]
+        .as_object_mut()
+        .unwrap()
+        .remove("repositoriesRoot");
+    write(
+        &frontend,
+        ".nlab/nlab-api.local.json",
+        &serde_json::to_string(&legacy_local).unwrap(),
+    );
+
     let feature = nlab_api()
         .args([
             "generate",
@@ -360,6 +384,13 @@ fn init_and_generate_case(vite: bool) {
         .unwrap();
     assert_eq!(feature.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&feature.stderr).contains("codegraph init failed"));
+    let discovered_local: serde_json::Value =
+        serde_json::from_slice(&fs::read(frontend.join(".nlab/nlab-api.local.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        discovered_local["backend"]["repositoriesRoot"],
+        root.path().canonicalize().unwrap().to_str().unwrap()
+    );
     assert_eq!(
         String::from_utf8(
             Command::new("git")

@@ -365,15 +365,18 @@ from that object. No per-operation URL getter functions are generated.
 Each generated enum identifies its Java class and canonical primary field. Display names, descriptions,
 colors, and other auxiliary properties do not produce separate enums or frontend mapping tables.
 
-Enable automatic discovery and cross-repository enum analysis with a backend collection:
+Cross-repository discovery is enabled by default, including for existing projects without discovery
+settings. The backend collection defaults to the entry backend repository's parent directory. A saved
+local collection takes precedence; override and persist it with:
 
 ```bash
 jt nlab-api generate --project /path/to/frontend --repositories-root /path/to/backend-projects
 ```
 
-The collection path is saved locally; subsequent `generate` runs discover dependencies before
-writing generated artifacts. Each repository has its own CodeGraph index, initialized or synchronized
-automatically. Missing services are resolved through SIC and cloned from the company GitLab.
+`init` saves the collection locally, and every `generate` discovers dependencies before writing
+generated artifacts. Direct `discover` uses the same default directory. Each repository has its own
+CodeGraph index, initialized or synchronized automatically. Missing services are resolved through SIC
+and cloned from the company GitLab.
 Every online run retries unavailable services and updates existing dependencies with fast-forward Git
 pulls. Dependency branches default to `master`; persist an override with
 `jt nlab-api discover --project /path/to/frontend --service-branch service-name=feature-branch`.

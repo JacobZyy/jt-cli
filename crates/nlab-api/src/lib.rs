@@ -28,7 +28,6 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde_json::{Value, json};
 
-use graph::Snapshot;
 use java::JavaProject;
 use model::{ContractIr, GenerateResult, ProvenanceStatus, RouteStatus, TargetIdentity};
 use output::OutputLock;
@@ -44,7 +43,7 @@ pub struct GenerateArgs {
     /// Backend branch for this run; defaults to the shared project config
     #[arg(long)]
     branch: Option<String>,
-    /// Enable discovery using this backend collection, saved to local config
+    /// Override the backend collection, saved locally; defaults to the backend repository's parent
     #[arg(long)]
     repositories_root: Option<PathBuf>,
     /// Use the current backend branch without Git network operations or Gateway queries
@@ -127,17 +126,6 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     let config = config::ProjectConfig::load(&output_dir)?;
     config.validate_project(&output_dir)?;
     let _lock = OutputLock::acquire(&output_dir)?;
-    if let Some(root) = &args.repositories_root {
-        discover::save_root(&output_dir, root)?;
-    }
-    let repositories_root = LocalProjectConfig::load(&output_dir)?
-        .backend
-        .repositories_root;
-    if config.discovery.is_some() && repositories_root.is_none() {
-        bail!(
-            "discovery is configured but repositories root is missing; pass --repositories-root <path>"
-        );
-    }
     let branch = args.branch.as_deref().unwrap_or(&config.backend.branch);
     let repo_path = repo::resolve_path(
         &config.backend.repo_path,
@@ -155,20 +143,15 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     if path_inside(&target.root, &output_dir) {
         bail!("frontend project must stay outside backend repository");
     }
-    reporter.phase(10, "同步 CodeGraph");
-    if repositories_root.is_none() {
-        repo::sync_codegraph(target, deadline)?;
-    }
-
-    reporter.phase(25, "读取后端索引");
+    let repositories_root =
+        discover::resolve_root(&output_dir, args.repositories_root.as_deref(), &target.root)?;
+    discover::save_root(&output_dir, &repositories_root)?;
+    reporter.phase(10, "Discover 关联仓库并同步 CodeGraph");
     ensure_before_deadline(deadline)?;
-    let (graph, discovery_report) = if let Some(root) = &repositories_root {
-        reporter.phase(30, "Discover 关联仓库");
-        let discovery = discover::prepare(&output_dir, root, args.offline, deadline)?;
-        (discovery.graph, Some(discovery.report))
-    } else {
-        (Snapshot::load(&target.root)?, None)
-    };
+    let discover::DiscoveryRun {
+        graph,
+        report: discovery_report,
+    } = discover::prepare(&output_dir, &repositories_root, args.offline, deadline)?;
     ensure_before_deadline(deadline)?;
     let legacy = if config.migration.enabled {
         migrate::snapshot_legacy(&output_dir)?
@@ -203,12 +186,10 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         schemas,
     };
     let mut diagnostics = semantic_diagnostics(&ir);
-    if let Some(discovery) = &discovery_report {
-        diagnostics.extend(discovery.unavailable_services.iter().map(|service| json!({
-            "level": "warning", "stage": "discovery", "code": "UNAVAILABLE_SERVICE",
-            "service": service, "message": "Source unavailable in this run; related field domains remain open. Discovery retries on the next online run."
-        })));
-    }
+    diagnostics.extend(discovery_report.unavailable_services.iter().map(|service| json!({
+        "level": "warning", "stage": "discovery", "code": "UNAVAILABLE_SERVICE",
+        "service": service, "message": "Source unavailable in this run; related field domains remain open. Discovery retries on the next online run."
+    })));
 
     reporter.phase(60, "补全 Gateway 路由");
     let route_summary = if config.gateway.enabled && !args.offline {
