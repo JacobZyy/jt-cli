@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/JacobZyy/jt-cli/compare/v2.2.0...v2.2.1) (2026-09-21)
+
+
+### Features
+
+* **nlab-api:** enable repository discovery by default ([a754240](https://github.com/JacobZyy/jt-cli/commit/a754240ff7893ee3c20177bbb541b24153d0a18f))
+
 ## [2.2.0](https://github.com/JacobZyy/jt-cli/compare/v2.1.1...v2.2.0) (2026-09-20)
 
 
