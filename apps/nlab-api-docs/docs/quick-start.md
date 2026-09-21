@@ -297,7 +297,9 @@ jt nlab-api config --unset --project /path/to/frontend
 
 ## 跨仓库准备情况检查
 
-启用跨仓库分析时，给 generate 或 init 提供后端公共目录：
+跨仓库发现默认开启，新项目和未配置 discovery 的旧项目都适用。
+默认使用入口后端仓库的父目录，优先复用本地已保存的公共目录。
+需要覆盖目录时，给 generate、init 或 discover 提供：
 
 ```bash
 jt nlab-api generate \
@@ -306,8 +308,10 @@ jt nlab-api generate \
 ```
 
 公共目录持久化到本地配置 `backend.repositoriesRoot`，不写入共享配置。
-后续每次 generate 自动执行 Discover，不需要重复传目录或手动调用 discover。
-旧项目没有配置 discovery 和公共目录时，保留原单仓库生成行为。
+init 会记录默认目录；旧项目首次 generate 时自动补齐，不需要重新初始化。
+每次 generate 自动执行 Discover，不需要重复传目录或手动调用 discover。
+例如入口仓库为 `/path/to/backend-projects/service-a` 时，默认扫描同级仓库，缺失依赖也 clone 到 `/path/to/backend-projects`。
+`--offline` 跳过联网获取，仍执行本地跨仓库发现。
 
 CLI 将发现结果保存到共享配置 `.nlab/nlab-api.config.json` 的 `discovery.services`：
 

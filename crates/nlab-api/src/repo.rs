@@ -187,11 +187,6 @@ pub fn inspect(repo: &Path, requested_branch: &str) -> Result<RepositoryTarget> 
     })
 }
 
-pub fn sync_codegraph(target: &RepositoryTarget, deadline: Instant) -> Result<()> {
-    sync_index(&target.root, deadline)?;
-    verify_unchanged(target)
-}
-
 pub fn sync_index(root: &Path, deadline: Instant) -> Result<()> {
     let action = if root.join(".codegraph/codegraph.db").is_file() {
         "sync"

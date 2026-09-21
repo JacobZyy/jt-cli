@@ -50,7 +50,7 @@ pub struct InitArgs {
     /// Generated implementation directory family; default: detect existing api/service layout
     #[arg(long, value_enum)]
     layout: Option<LayoutPreset>,
-    /// Backend collection for automatic discovery and cross-repository enums
+    /// Backend collection; defaults to the configured directory or the backend repository's parent
     #[arg(long)]
     repositories_root: Option<PathBuf>,
     /// Configure the current backend checkout without Git network operations
@@ -124,18 +124,12 @@ fn run_inner(args: InitArgs) -> Result<Value> {
             .unwrap_or_else(|| "nlab".to_owned()),
     };
     let config = ProjectConfig {
-        discovery: if args.repositories_root.is_some() {
-            Some(
-                previous
-                    .as_ref()
-                    .and_then(|config| config.discovery.clone())
-                    .unwrap_or_default(),
-            )
-        } else {
+        discovery: Some(
             previous
                 .as_ref()
                 .and_then(|config| config.discovery.clone())
-        },
+                .unwrap_or_default(),
+        ),
         version: CONFIG_VERSION,
         enum_erasable: previous.as_ref().is_none_or(|config| config.enum_erasable),
         backend: BackendConfig {
@@ -174,10 +168,11 @@ fn run_inner(args: InitArgs) -> Result<Value> {
     let config_source = config.shared_source()?;
     let mut local_config = LocalProjectConfig::load(&project)?;
     local_config.backend.repo_path = Some(backend.root.clone());
-    if let Some(root) = args.repositories_root {
-        local_config.backend.repositories_root =
-            Some(root.canonicalize().context("resolve repositories root")?);
-    }
+    local_config.backend.repositories_root = Some(super::discover::resolve_root(
+        &project,
+        args.repositories_root.as_deref(),
+        &backend.root,
+    )?);
     let local_config_source = local_config.source()?;
     let config_path = project.join(CONFIG_FILE);
     changes.push(FileChange::load(config_path.clone(), config_source)?);
@@ -198,6 +193,7 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         "config": config_path,
         "localConfig": local_config_path,
         "backend": config.backend.repo_path,
+        "repositoriesRoot": local_config.backend.repositories_root,
         "branch": config.backend.branch,
         "contractRoots": config.backend.contract_roots,
         "buildTool": config.frontend.build_tool.kind,

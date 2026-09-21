@@ -153,6 +153,76 @@ fn fixture(unified: bool) -> (tempfile::TempDir, DiscoverArgs) {
 }
 
 #[test]
+fn default_discovery_follows_sibling_repositories_without_configuration() {
+    let (temp, mut args) = fixture(false);
+    args.repositories_root = None;
+    assert!(
+        ProjectConfig::load(&args.project)
+            .unwrap()
+            .discovery
+            .is_none()
+    );
+    let mut synced = Vec::new();
+    let result = acquisition::scan_with(
+        args.clone(),
+        |path| {
+            synced.push(path.to_owned());
+            Ok(())
+        },
+        |_, _, _, _| panic!("offline discovery must not acquire repositories"),
+    )
+    .unwrap();
+    let result = finish_preflight(&args.project, result).unwrap();
+    assert_eq!(
+        result.report.repositories_root,
+        temp.path().canonicalize().unwrap()
+    );
+    assert_eq!(result.report.calls[0].status, "source-matched");
+    assert!(synced.iter().any(|path| path.ends_with("b")));
+    assert_eq!(result.report.unavailable_services, ["missing"]);
+    assert_eq!(
+        ProjectConfig::load(&args.project)
+            .unwrap()
+            .discovery
+            .unwrap()
+            .services["b"]
+            .status,
+        "resolved"
+    );
+}
+
+#[test]
+fn discovery_root_prefers_explicit_then_saved_and_rejects_invalid_overrides() {
+    let (temp, args) = fixture(false);
+    let backend = temp.path().join("a").canonicalize().unwrap();
+    let configured = temp.path().join("configured");
+    let requested = temp.path().join("requested");
+    fs::create_dir(&configured).unwrap();
+    fs::create_dir(&requested).unwrap();
+    save_root(&args.project, &configured).unwrap();
+    assert_eq!(
+        resolve_root(&args.project, None, &backend).unwrap(),
+        configured.canonicalize().unwrap()
+    );
+    assert_eq!(
+        resolve_root(&args.project, Some(&requested), &backend).unwrap(),
+        requested.canonicalize().unwrap()
+    );
+    let missing = temp.path().join("missing");
+    assert!(resolve_root(&args.project, Some(&missing), &backend).is_err());
+    let file = temp.path().join("file");
+    fs::write(&file, "not a directory").unwrap();
+    assert!(
+        resolve_root(&args.project, Some(&file), &backend)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a directory")
+    );
+    fs::remove_dir(&configured).unwrap();
+    assert!(resolve_root(&args.project, None, &backend).is_err());
+}
+
+#[test]
 fn discovers_only_reachable_services_with_repository_indexes() {
     {
         let (temp, args) = fixture(false);
