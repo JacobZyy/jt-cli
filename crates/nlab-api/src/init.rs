@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -22,7 +22,7 @@ pub struct InitArgs {
     /// Frontend project to inspect and configure
     #[arg(long, value_name = "path", default_value = ".")]
     project: PathBuf,
-    /// Existing Java backend repository containing @ServiceContract Facades
+    /// Existing Java backend repository containing gateway RPC contracts
     #[arg(
         long,
         value_name = "path",
@@ -541,64 +541,65 @@ fn has_interface_field(source: &str, field: &str) -> bool {
 }
 
 fn detect_contract_roots(repo: &Path) -> Result<Vec<String>> {
-    let parents = WalkBuilder::new(repo)
+    let mut roots = BTreeMap::<String, PathBuf>::new();
+    for entry in WalkBuilder::new(repo)
         .standard_filters(true)
         .hidden(false)
         .build()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-        .filter(|entry| {
-            entry
+    {
+        let entry = entry.context("scan Java contract sources")?;
+        if !entry.file_type().is_some_and(|kind| kind.is_file())
+            || entry
                 .path()
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| name.ends_with("Facade.java"))
-        })
-        .filter_map(|entry| {
-            let source = fs::read_to_string(entry.path()).ok()?;
-            source
-                .contains("ServiceContract")
-                .then(|| entry.path().parent().map(Path::to_owned))
-                .flatten()
-        })
-        .collect::<BTreeSet<_>>();
-    if parents.is_empty() {
-        bail!("no @ServiceContract Facade declarations found");
-    }
-    let mut roots = BTreeSet::new();
-    for parent in parents {
-        let mut root = parent;
-        while root.file_name().and_then(|value| value.to_str()) != Some("contract") {
-            if !root.pop() || root == repo {
-                bail!("Facade declaration is not below one semantic contract package");
+                .extension()
+                .is_none_or(|extension| extension != "java")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(entry.path())?;
+        if crate::gateway::methods(&source)
+            .with_context(|| {
+                format!(
+                    "identify gateway declarations in {}",
+                    entry.path().display()
+                )
+            })?
+            .is_empty()
+        {
+            continue;
+        }
+        let parent = entry
+            .path()
+            .parent()
+            .context("contract source has no parent")?
+            .strip_prefix(repo)?;
+        let group = parent
+            .components()
+            .next()
+            .context("gateway declarations must be inside a source directory")?
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
+        match roots.get_mut(&group) {
+            Some(root) => {
+                while !parent.starts_with(&*root) {
+                    root.pop();
+                }
+            }
+            None => {
+                roots.insert(group, parent.to_path_buf());
             }
         }
-        let relative = root.strip_prefix(repo)?;
-        let value = relative
-            .components()
-            .filter_map(|component| match component {
-                Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("/");
-        if !value.contains("src/main/java/") {
-            bail!("Facade contract root is too broad: {value}");
-        }
-        roots.insert(value);
     }
     if roots.is_empty() {
-        bail!("no semantic contract roots found");
+        bail!(
+            "no @ServiceContract gateway declarations found; first parameter must come from com.zhuanzhuan.arch.zgateway.support"
+        );
     }
-    for root in &roots {
-        if roots
-            .iter()
-            .any(|candidate| candidate != root && Path::new(root).starts_with(candidate))
-        {
-            bail!("Facade declarations are not below one semantic contract package");
-        }
-    }
-    Ok(roots.into_iter().collect())
+    Ok(roots
+        .into_values()
+        .map(|root| root.to_string_lossy().replace('\\', "/"))
+        .collect())
 }
 
 fn patch_vite_aliases(source: &str, frontend: &FrontendConfig) -> Result<String> {
@@ -955,22 +956,22 @@ mod tests {
     }
 
     #[test]
-    fn contract_probe_stops_at_semantic_contract_package() {
+    fn contract_probe_uses_gateway_methods_in_actual_directories() {
         let root = tempfile::tempdir().unwrap();
         for relative in [
             "contract/src/main/java/p/contract/checkapp/IGoodsFacade.java",
             "contract/src/main/java/p/contract/operations/IOrderFacade.java",
-            "other/src/main/java/q/contract/IOtherFacade.java",
+            "other/src/main/java/q/rpc/IOtherRemote.java",
         ] {
             let path = root.path().join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "@ServiceContract public interface Facade {}").unwrap();
+            fs::write(path, "@ServiceContract public interface Entry { String query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user); }").unwrap();
         }
         assert_eq!(
             detect_contract_roots(root.path()).unwrap(),
             vec![
                 "contract/src/main/java/p/contract",
-                "other/src/main/java/q/contract"
+                "other/src/main/java/q/rpc"
             ]
         );
     }

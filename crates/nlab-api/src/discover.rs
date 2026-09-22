@@ -421,6 +421,7 @@ fn scan(
         .transpose()?;
     let mut entry_ids = Vec::new();
     let mut entries = Vec::new();
+    let project = JavaProject::load(&backend, graph)?;
     for node in graph.nodes.values().filter(|node| node.kind == "interface") {
         let selected = match &entry {
             Some(entry) => Path::new(&node.file_path) == entry,
@@ -431,17 +432,22 @@ fn scan(
                 .any(|root| Path::new(&node.file_path).starts_with(root)),
         };
         if selected {
-            entries.push(node.qualified_name.replace("::", "."));
-            entry_ids.extend(
-                graph
-                    .contained(&node.id, "method")
-                    .iter()
-                    .map(|method| method.id.clone()),
-            );
+            let mut methods = Vec::new();
+            for method in graph.contained(&node.id, "method") {
+                if project.is_gateway_method(node, method)? {
+                    methods.push(method.id.clone());
+                }
+            }
+            if !methods.is_empty() {
+                entries.push(node.qualified_name.replace("::", "."));
+                entry_ids.extend(methods);
+            }
         }
     }
     if entry_ids.is_empty() {
-        bail!("no indexed interface methods found in selected entry/contractRoots");
+        bail!(
+            "no gateway methods found in selected entry/contractRoots; first parameter must come from com.zhuanzhuan.arch.zgateway.support"
+        );
     }
     entry_ids.sort();
     entries.sort();

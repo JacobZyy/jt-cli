@@ -296,7 +296,7 @@ fn remote_request_validation_and_copied_response_generate_without_false_narrowin
         write(
             primary.path(),
             facade,
-            "package p.contract;\nimport p.DTO;\nimport p.Request;\n@ServiceContract public interface IFacade { DTO query(Request req); }\n",
+            "package p.contract;\nimport p.DTO;\nimport p.Request;\n@ServiceContract public interface IFacade { DTO query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Request req); }\n",
         );
         write(
             primary.path(),
@@ -317,7 +317,7 @@ fn remote_request_validation_and_copied_response_generate_without_false_narrowin
             primary.path(),
             "Facade.java",
             &format!(
-                "package p;\nimport dep.IRemote;\nimport dep.Result;\nclass Facade {{\nIRemote remote;\nDTO query(Request req) {{\n{invocation}\nDTO dto = new DTO();\ndto.setCode(result.getCode());\nreturn dto;\n}}\n}}\n"
+                "package p;\nimport dep.IRemote;\nimport dep.Result;\nclass Facade {{\nIRemote remote;\nDTO query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Request req) {{\n{invocation}\nDTO dto = new DTO();\ndto.setCode(result.getCode());\nreturn dto;\n}}\n}}\n"
             ),
         );
         let mut graph = test_snapshot(
@@ -338,7 +338,7 @@ fn remote_request_validation_and_copied_response_generate_without_false_narrowin
                     "p.contract::IFacade::query",
                     facade,
                     4,
-                    "DTO (Request req)",
+                    "DTO (com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Request req)",
                 ),
                 node("impl", "class", "Facade", "p::Facade", "Facade.java", 4, ""),
                 node(
@@ -357,7 +357,7 @@ fn remote_request_validation_and_copied_response_generate_without_false_narrowin
                     "p::Facade::query",
                     "Facade.java",
                     6,
-                    "DTO (Request req)",
+                    "DTO (com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Request req)",
                 ),
                 node("dto", "class", "DTO", "p::DTO", "DTO.java", 2, ""),
                 node(

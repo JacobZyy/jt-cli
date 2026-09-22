@@ -18,20 +18,13 @@ const RESULT_WRAPPERS: &[&str] = &[
     "CompletableFuture",
     "Future",
 ];
-const CONTEXT_TYPES: &[&str] = &[
-    "EmployeeUser",
-    "ClientContext",
-    "HttpServletRequest",
-    "HttpServletResponse",
-    "Principal",
-];
-
 pub struct JavaProject<'a> {
     graph: &'a Snapshot,
     sources: BTreeMap<String, String>,
     packages: HashMap<String, String>,
     imports: HashMap<String, Vec<String>>,
     type_by_fqn: HashMap<String, String>,
+    gateway_methods: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl<'a> JavaProject<'a> {
@@ -45,11 +38,25 @@ impl<'a> JavaProject<'a> {
         let mut sources = BTreeMap::new();
         let mut packages = HashMap::new();
         let mut imports = HashMap::new();
+        let mut gateway_methods = BTreeMap::new();
+        let interface_files = graph
+            .nodes
+            .values()
+            .filter(|node| node.kind == "interface")
+            .map(|node| node.file_path.as_str())
+            .collect::<HashSet<_>>();
         for path in &paths {
             let source = fs::read_to_string(graph.source_path(repo, path))
                 .with_context(|| format!("read Java source {path}"))?;
             packages.insert(path.clone(), java_package(&source).unwrap_or_default());
             imports.insert(path.clone(), java_imports(&source));
+            if interface_files.contains(path.as_str()) {
+                gateway_methods.insert(
+                    path.clone(),
+                    crate::gateway::methods(&source)
+                        .with_context(|| format!("identify gateway methods in {path}"))?,
+                );
+            }
             sources.insert(path.clone(), source);
         }
         paths.clear();
@@ -74,6 +81,7 @@ impl<'a> JavaProject<'a> {
             packages,
             imports,
             type_by_fqn,
+            gateway_methods,
         })
     }
 
@@ -85,7 +93,7 @@ impl<'a> JavaProject<'a> {
         let mut schemas = BTreeMap::new();
         let mut operations = Vec::new();
         let mut keys = BTreeSet::new();
-        for facade in self.facades(contract_roots) {
+        for facade in self.contract_interfaces(contract_roots) {
             let mut methods = self.graph.contained(&facade.id, "method");
             methods.sort_by(|left, right| {
                 left.name
@@ -93,10 +101,13 @@ impl<'a> JavaProject<'a> {
                     .then_with(|| left.signature.cmp(&right.signature))
             });
             for method in methods {
+                if !self.is_gateway_method(facade, method)? {
+                    continue;
+                }
                 let operation = self.operation(target, facade, method, &mut schemas)?;
                 if !keys.insert(operation.key.clone()) {
                     bail!(
-                        "overloaded Facade operation is unsupported: {} ({})",
+                        "duplicate gateway operation identity is unsupported: {} ({})",
                         operation.key,
                         operation.signature
                     );
@@ -200,24 +211,42 @@ impl<'a> JavaProject<'a> {
         (candidates.len() == 1).then(|| candidates[0])
     }
 
-    fn facades(&self, contract_roots: &[String]) -> Vec<&GraphNode> {
+    fn contract_interfaces(&self, contract_roots: &[String]) -> Vec<&GraphNode> {
         let mut result = self
             .graph
             .nodes
             .values()
             .filter(|node| {
                 node.kind == "interface"
-                    && node.name.ends_with("Facade")
                     && contract_roots
                         .iter()
                         .any(|root| Path::new(&node.file_path).starts_with(root))
-                    && self.sources.get(&node.file_path).is_some_and(|source| {
-                        source.contains("@ServiceContract") || source.contains("ServiceContract")
-                    })
             })
             .collect::<Vec<_>>();
         result.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
         result
+    }
+
+    pub(crate) fn is_gateway_method(
+        &self,
+        interface: &GraphNode,
+        method: &GraphNode,
+    ) -> Result<bool> {
+        let Some(methods) = self
+            .gateway_methods
+            .get(&method.file_path)
+            .filter(|methods| !methods.is_empty())
+        else {
+            return Ok(false);
+        };
+        let (_, parameters) = parse_method_signature(&method.signature).with_context(|| {
+            format!("parse indexed gateway candidate: {}", method.qualified_name)
+        })?;
+        Ok(methods.contains(&crate::gateway::method_key(
+            &interface.name,
+            &method.name,
+            &parameters,
+        )))
     }
 
     fn operation(
@@ -231,33 +260,17 @@ impl<'a> JavaProject<'a> {
             .with_context(|| format!("parse operation signature: {}", method.qualified_name))?;
         self.qualify_type(&method.file_path, &facade.qualified_name, &mut response);
         let response = unwrap_result(response);
-        let mut request_candidates = Vec::new();
-        for mut parameter in parameters {
-            self.qualify_type(&method.file_path, &facade.qualified_name, &mut parameter);
-            if !CONTEXT_TYPES.contains(&parameter.simple_name())
-                && self
-                    .resolve_type(&method.file_path, &facade.qualified_name, &parameter)
-                    .is_some()
-            {
-                request_candidates.push(parameter);
-            }
-        }
-        let mut warnings = Vec::new();
-        let request = match request_candidates.as_slice() {
-            [] => None,
-            [request] => Some(request.clone()),
-            requests => {
-                warnings.push(format!(
-                    "multiple request DTO candidates; selected last parameter: {}",
-                    requests
-                        .iter()
-                        .map(TypeRef::render_java)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                requests.last().cloned()
-            }
+        let mut request = match parameters.as_slice() {
+            [_context] => None,
+            [_context, request] => Some(request.clone()),
+            _ => bail!(
+                "gateway operation requires a context and at most one business parameter: {}",
+                method.qualified_name
+            ),
         };
+        if let Some(request) = &mut request {
+            self.qualify_type(&method.file_path, &facade.qualified_name, request);
+        }
         let request_schema = request
             .as_ref()
             .and_then(|value| self.root_schema(&method.file_path, &facade.qualified_name, value));
@@ -312,7 +325,7 @@ impl<'a> JavaProject<'a> {
                 host: None,
             },
             semantic_patches: Vec::new(),
-            warnings,
+            warnings: Vec::new(),
         })
     }
 
@@ -656,14 +669,35 @@ pub(crate) fn parse_method_signature(signature: &str) -> Option<(TypeRef, Vec<Ty
     let close = signature.rfind(')')?;
     let return_type = signature[..open].trim();
     let response = parse_java_type(return_type)?;
+    if signature.contains('@') || signature.contains("final ") {
+        let source = format!(
+            "interface Signature {{ {return_type} method({}); }}",
+            &signature[open + 1..close]
+        );
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .ok()?;
+        let tree = parser.parse(&source, None)?;
+        if tree.root_node().has_error() {
+            return None;
+        }
+        let parameters = descendants(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "formal_parameters")?;
+        return Some((
+            response,
+            crate::gateway::parameter_types(&source, parameters)?,
+        ));
+    }
     let parameters = split_top_level(&signature[open + 1..close], ',')
         .into_iter()
-        .filter_map(|parameter| {
+        .map(|parameter| {
             let value = parameter.trim();
             let boundary = value.rfind(char::is_whitespace)?;
             parse_java_type(value[..boundary].trim())
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     Some((response, parameters))
 }
 
@@ -805,6 +839,151 @@ fn encode_path_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_contracts_keep_pending_and_exclude_context_and_internal_types() {
+        use crate::graph::{GraphEdge, test_snapshot};
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir(repo.path().join("rpc")).unwrap();
+        fs::write(repo.path().join("rpc/OrdersRemote.java"), "package p;\nimport com.zhuanzhuan.arch.zgateway.support.CustomContext;\n@ServiceContract interface OrdersRemote {\nPayload save(@Valid final CustomContext context, Payload request);\nString count(CustomContext context);\nInternal internal(Internal request);\n}\n").unwrap();
+        fs::write(
+            repo.path().join("Payload.java"),
+            "package p;\nclass Payload { String value; }",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("Internal.java"),
+            "package p;\nclass Internal { String secret; }",
+        )
+        .unwrap();
+        fs::write(repo.path().join("Context.java"), "package com.zhuanzhuan.arch.zgateway.support;\nclass CustomContext { String employeeId; }").unwrap();
+        let node =
+            |id: &str, kind: &str, name: &str, fqn: &str, file: &str, signature: &str| GraphNode {
+                id: id.into(),
+                kind: kind.into(),
+                name: name.into(),
+                qualified_name: fqn.into(),
+                file_path: file.into(),
+                start_line: 1,
+                start_column: 0,
+                docstring: None,
+                signature: signature.into(),
+                decorators: String::new(),
+                return_type: String::new(),
+            };
+        let graph = test_snapshot(
+            vec![
+                node(
+                    "interface",
+                    "interface",
+                    "OrdersRemote",
+                    "p::OrdersRemote",
+                    "rpc/OrdersRemote.java",
+                    "",
+                ),
+                node(
+                    "save",
+                    "method",
+                    "save",
+                    "p::OrdersRemote::save",
+                    "rpc/OrdersRemote.java",
+                    "Payload (@Valid final CustomContext context, Payload request)",
+                ),
+                node(
+                    "count",
+                    "method",
+                    "count",
+                    "p::OrdersRemote::count",
+                    "rpc/OrdersRemote.java",
+                    "String (CustomContext context)",
+                ),
+                node(
+                    "internal",
+                    "method",
+                    "internal",
+                    "p::OrdersRemote::internal",
+                    "rpc/OrdersRemote.java",
+                    "Internal (Internal request)",
+                ),
+                node(
+                    "payload",
+                    "class",
+                    "Payload",
+                    "p::Payload",
+                    "Payload.java",
+                    "",
+                ),
+                node(
+                    "value",
+                    "field",
+                    "value",
+                    "p::Payload::value",
+                    "Payload.java",
+                    "String value",
+                ),
+                node(
+                    "internal-type",
+                    "class",
+                    "Internal",
+                    "p::Internal",
+                    "Internal.java",
+                    "",
+                ),
+                node(
+                    "context",
+                    "class",
+                    "CustomContext",
+                    "com.zhuanzhuan.arch.zgateway.support::CustomContext",
+                    "Context.java",
+                    "",
+                ),
+            ],
+            [
+                ("interface", "save"),
+                ("interface", "count"),
+                ("interface", "internal"),
+                ("payload", "value"),
+            ]
+            .into_iter()
+            .map(|(source, target)| GraphEdge {
+                source: source.into(),
+                target: target.into(),
+                kind: "contains".into(),
+                line: 0,
+                column: 0,
+                metadata: String::new(),
+                provenance: String::new(),
+            })
+            .collect(),
+        );
+        let project = JavaProject::load(repo.path(), &graph).unwrap();
+        let target = TargetIdentity {
+            app_name: "demo".into(),
+            branch: "feature".into(),
+            commit: "test".into(),
+            codegraph_version: "test".into(),
+            codegraph_extraction_version: "test".into(),
+        };
+        let (operations, schemas) = project.build_contracts(&target, &["rpc".into()]).unwrap();
+        assert_eq!(
+            operations
+                .iter()
+                .map(|operation| operation.method_name.as_str())
+                .collect::<Vec<_>>(),
+            ["count", "save"]
+        );
+        assert!(operations[0].request.is_none());
+        assert_eq!(operations[1].request.as_ref().unwrap().name, "p.Payload");
+        assert_eq!(
+            schemas.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["p.Payload"]
+        );
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation.route.status == RouteStatus::Placeholder)
+        );
+    }
 
     #[test]
     fn java_type_parser_preserves_nested_generics_and_arrays() {

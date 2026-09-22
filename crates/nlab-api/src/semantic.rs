@@ -2158,7 +2158,7 @@ mod tests {
         write(
             repo.path(),
             contract,
-            "package p.contract;\nimport p.Payload;\n@ServiceContract\ninterface IFacade { Payload query(Payload req); }\n",
+            "package p.contract;\nimport p.Payload;\n@ServiceContract\ninterface IFacade { Payload query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Payload req); }\n",
         );
         write(
             repo.path(),
@@ -2171,7 +2171,9 @@ mod tests {
         write(
             repo.path(),
             implementation,
-            &format!("package p;\nclass Facade {{\n Payload query(Payload req) {{ {body} }}\n}}\n"),
+            &format!(
+                "package p;\nclass Facade {{\n Payload query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Payload req) {{ {body} }}\n}}\n"
+            ),
         );
         write(
             repo.path(),
@@ -2199,7 +2201,7 @@ mod tests {
                     "p.contract::IFacade::query",
                     contract,
                     4,
-                    "Payload (Payload req)",
+                    "Payload (com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Payload req)",
                 ),
                 node(
                     "facade",
@@ -2217,7 +2219,7 @@ mod tests {
                     "p::Facade::query",
                     implementation,
                     3,
-                    "Payload (Payload req)",
+                    "Payload (com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, Payload req)",
                 ),
                 node("payload", "class", "Payload", "p::Payload", payload, 2, ""),
                 node(
@@ -2546,7 +2548,7 @@ mod tests {
         write(
             repo.path(),
             "contract/src/main/java/p/contract/IFacade.java",
-            "package p.contract;\nimport p.DTO;\n@ServiceContract\ninterface IFacade { ApiResult<DTO> query(QueryReq req); }\n",
+            "package p.contract;\nimport p.DTO;\n@ServiceContract\ninterface IFacade { ApiResult<DTO> query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, QueryReq req); }\n",
         );
         write(
             repo.path(),
@@ -2561,7 +2563,7 @@ mod tests {
         write(
             repo.path(),
             "service/src/main/java/p/interfaces/Facade.java",
-            "package p.interfaces;\nimport p.service.Service;\nclass Facade {\n  Service service;\n  DTO query(QueryReq req) { return service.query(req); }\n}\n",
+            "package p.interfaces;\nimport p.service.Service;\nclass Facade {\n  Service service;\n  DTO query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, QueryReq req) { return service.query(req); }\n}\n",
         );
         write(
             repo.path(),
@@ -2586,7 +2588,7 @@ mod tests {
                     "p.contract::IFacade::query",
                     "contract/src/main/java/p/contract/IFacade.java",
                     4,
-                    "ApiResult<DTO> (QueryReq req)",
+                    "ApiResult<DTO> (com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, QueryReq req)",
                 ),
                 node(
                     "impl-class",
@@ -2613,7 +2615,7 @@ mod tests {
                     "p.interfaces::Facade::query",
                     "service/src/main/java/p/interfaces/Facade.java",
                     5,
-                    "DTO (QueryReq req)",
+                    "DTO (com.zhuanzhuan.arch.zgateway.support.EmployeeUser user, QueryReq req)",
                 ),
                 node(
                     "service-class",
