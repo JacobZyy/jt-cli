@@ -32,3 +32,10 @@
 # (this file) takes precedence over user-level `~/.codex/config.toml`.
 [agents]
 max_depth = 1
+
+[tools.update_plan]
+enabled = true
+
+[memories]
+use_memories = false
+generate_memories = false
