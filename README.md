@@ -273,7 +273,16 @@ pnpm --filter @workspace/nlab-api-docs dev
 ```
 
 Initialize one frontend project from its real build, TypeScript, request, response-envelope, output,
-and backend Facade layout:
+and backend RPC contract layout:
+
+Gateway entry methods are declared on `@ServiceContract` interfaces and take a first parameter
+whose type belongs to `com.zhuanzhuan.arch.zgateway.support`. Interface names need not end in
+`Facade`. Init, discovery entry selection, and generation use the same method-level rule.
+The context is excluded from the frontend request; the optional second parameter is the business
+request. Multiple business parameters are reported rather than silently selecting one. Types
+containing `ZZOpen` are excluded as legacy gateway contracts. A missing gateway route still produces
+a Pending operation. Use explicit context imports or fully qualified types; ambiguous wildcard
+imports are reported instead of guessing their package.
 
 ```bash
 jt nlab-api config --runner jt --project /path/to/frontend
@@ -431,7 +440,7 @@ src/types/service-enums/**/*.ts
 The backend may start on another branch; nlab-api switches it when the checkout is clean. The frontend
 must remain outside the backend repository. Existing tracked backend changes, concurrent
 use of the same backend checkout, non-generated frontend files, symlink path escapes, config drift,
-incomplete CodeGraph state, branch movement, ambiguous Facade overloads, and incomplete schema
+incomplete CodeGraph state, branch movement, ambiguous RPC operation identities, and incomplete schema
 references stop the run. A legacy bridge manifest marked
 `service-paths` permits its owned generated files to be replaced during the first Facade-layout
 generation. Missing enums, external value sources, Gateway errors, missing routes, removed unused

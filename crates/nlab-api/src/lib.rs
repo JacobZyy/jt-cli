@@ -3,6 +3,7 @@ mod after_generate;
 mod coded_values;
 mod config;
 mod discover;
+mod gateway;
 mod graph;
 mod init;
 mod java;
@@ -172,7 +173,9 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     let (mut operations, mut schemas) =
         project.build_contracts(&identity, &config.backend.contract_roots)?;
     if operations.is_empty() {
-        bail!("no @ServiceContract Facade operations found");
+        bail!(
+            "no gateway operations found: first parameter must come from com.zhuanzhuan.arch.zgateway.support"
+        );
     }
 
     reporter.phase(50, "分析枚举与注释");

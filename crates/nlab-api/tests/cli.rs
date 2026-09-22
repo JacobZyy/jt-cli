@@ -211,7 +211,7 @@ fn init_and_generate_case(vite: bool) {
     write(
         &upstream,
         "contract/src/main/java/p/contract/checkapp/ITestFacade.java",
-        "@ServiceContract public interface ITestFacade {}\n",
+        "@ServiceContract public interface ITestFacade { String initial(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user); }\n",
     );
     git(&upstream, &["add", "."]);
     git(&upstream, &["commit", "-m", "initial"]);
@@ -224,7 +224,7 @@ fn init_and_generate_case(vite: bool) {
     write(
         &upstream,
         "contract/src/main/java/p/contract/checkapp/ITestFacade.java",
-        "@ServiceContract public interface ITestFacade { String feature(); }\n",
+        "@ServiceContract public interface ITestFacade { String feature(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user); }\n",
     );
     git(&upstream, &["commit", "-am", "feature"]);
     git(&upstream, &["push", "-u", "origin", "feature"]);

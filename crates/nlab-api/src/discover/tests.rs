@@ -33,10 +33,15 @@ fn add_source(
     db.execute("INSERT INTO nodes (id,kind,name,qualified_name,file_path,start_line,signature) VALUES (?1,?2,?3,?4,?5,1,'')",
         rusqlite::params![id, if interface { "interface" } else { "class" }, owner, qualified, path]).unwrap();
     for (line, source) in source.lines().enumerate() {
-        if source.contains("void run()") {
+        if source.contains("void run(") {
             let method = format!("{id}:run");
-            db.execute("INSERT INTO nodes (id,kind,name,qualified_name,file_path,start_line,signature) VALUES (?1,'method','run',?2,?3,?4,'void ()')",
-                rusqlite::params![method, format!("{qualified}::run"), path, (line + 1) as i64]).unwrap();
+            let signature = if source.contains("EmployeeUser user") {
+                "void (com.zhuanzhuan.arch.zgateway.support.EmployeeUser user)"
+            } else {
+                "void ()"
+            };
+            db.execute("INSERT INTO nodes (id,kind,name,qualified_name,file_path,start_line,signature) VALUES (?1,'method','run',?2,?3,?4,?5)",
+                rusqlite::params![method, format!("{qualified}::run"), path, (line + 1) as i64, signature]).unwrap();
             db.execute(
                 "INSERT INTO edges(source,target,kind) VALUES (?1,?2,'contains')",
                 [&id, &method],
@@ -93,7 +98,7 @@ fn fixture(unified: bool) -> (tempfile::TempDir, DiscoverArgs) {
         prefix,
         "Entry",
         true,
-        "package p;\npublic interface Entry {\nvoid run();\n}\n",
+        "package p;\n@ServiceContract public interface Entry {\nvoid run(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user);\n}\n",
     );
     add_source(
         &a,
@@ -101,7 +106,7 @@ fn fixture(unified: bool) -> (tempfile::TempDir, DiscoverArgs) {
         prefix,
         "EntryImpl",
         false,
-        "package p;\nimport p.Remote;\npublic class EntryImpl implements Entry {\nRemote remote;\nvoid run() { remote.run(); }\nvoid unused() { ignored.run(); }\n}\n",
+        "package p;\nimport p.Remote;\npublic class EntryImpl implements Entry {\nRemote remote;\nvoid run(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user) { remote.run(); }\nvoid unused() { ignored.run(); }\n}\n",
     );
     db.execute(
         "INSERT INTO edges(source,target,kind) VALUES (?1,?2,'implements')",
