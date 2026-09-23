@@ -162,7 +162,12 @@ fn parse_pairs(text: &str, kind: ValueKind) -> Vec<CodedValue> {
     if values.len() >= 2 || kind == ValueKind::String {
         return values;
     }
-    parse_inline_numbers(&source)
+    let inline = parse_inline_numbers(&source);
+    if inline.len() >= 2 {
+        inline
+    } else {
+        parse_spaced_number_line(&source)
+    }
 }
 
 fn has_explicit_string_mapping_signal(source: &str, starts: &[(&str, usize, usize)]) -> bool {
@@ -351,6 +356,22 @@ fn parse_inline_numbers(text: &str) -> Vec<CodedValue> {
     }
     values = values_from_starts(&list, &spaced, ValueKind::Number);
     values
+}
+
+fn parse_spaced_number_line(text: &str) -> Vec<CodedValue> {
+    let lines = nonempty_lines(text);
+    let [header, body] = lines.as_slice() else {
+        return Vec::new();
+    };
+    let header = header.trim_end_matches([':', '：']).trim_end();
+    if !NUMBER_HEADER.is_match(&format!("{header}:")) {
+        return Vec::new();
+    }
+    let starts = item_starts(&INLINE_SPACE_ITEM, body);
+    if starts.len() < 2 || starts[0].1 != 0 {
+        return Vec::new();
+    }
+    values_from_starts(body, &starts, ValueKind::Number)
 }
 
 fn trailing_note(value: &str) -> Option<usize> {
@@ -641,6 +662,12 @@ mod tests {
                 (json!(5), "已核销"),
                 (json!(6), "已核销"),
             ],
+        );
+        assert_values(
+            "checkStatus",
+            "Integer",
+            "查验状态\n10 待上传 21 待修改",
+            vec![(json!(10), "待上传"), (json!(21), "待修改")],
         );
         assert_values(
             "groupedMarkdownState",

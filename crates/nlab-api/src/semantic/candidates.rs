@@ -1,6 +1,73 @@
 use super::*;
 use crate::model::{EnumCandidateStatus, EnumCandidateVerification, Field};
 
+pub(super) fn associate_comment_values(
+    field: &Field,
+    source_path: &str,
+    domains: &[Domain],
+    patch: &mut SemanticPatch,
+) {
+    let Some(declared) = &field.declared_values else {
+        return;
+    };
+    if patch.enum_fqn.is_some()
+        || field.linked_enum.is_some()
+        || field
+            .description
+            .as_deref()
+            .is_some_and(|description| !see_enum_references(description).is_empty())
+    {
+        return;
+    }
+    let mut observed = BTreeSet::new();
+    for domain in domains {
+        if !domain.unknown.is_empty()
+            || !domain.external.is_empty()
+            || !domain.closure_gaps.is_empty()
+            || domain.transformed
+            || domain.enum_fqn.is_some()
+        {
+            return;
+        }
+        for literal in &domain.literals {
+            if literal == "null" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<WireValue>(literal) else {
+                return;
+            };
+            observed.insert(serde_json::to_string(&value).expect("serializable literal"));
+        }
+    }
+    if observed.is_empty() {
+        return;
+    }
+    let documented = declared
+        .values
+        .iter()
+        .map(|item| serde_json::to_string(&item.value).expect("serializable enum value"))
+        .collect::<BTreeSet<_>>();
+    if documented.len() != declared.values.len() {
+        return;
+    }
+    if !observed.is_subset(&documented) {
+        patch.enum_candidate = Some(EnumCandidateVerification {
+            status: EnumCandidateStatus::Conflict,
+            reason: "operation writes a value missing from the documented field values".to_owned(),
+        });
+        return;
+    }
+    patch.status = ProvenanceStatus::Closed;
+    patch.enum_associated = true;
+    patch.enum_source = Some(source_path.to_owned());
+    patch.values = declared.values.clone();
+    patch.warning = None;
+    patch.enum_candidate = Some(EnumCandidateVerification {
+        status: EnumCandidateStatus::Verified,
+        reason: "all resolved writes to this field are covered by the documented values".to_owned(),
+    });
+}
+
 impl SemanticAnalyzer<'_> {
     pub(super) fn verify_enum_candidate(
         &self,
@@ -29,7 +96,7 @@ impl SemanticAnalyzer<'_> {
         let Some(values) = patch.associated_values() else {
             return decision(
                 EnumCandidateStatus::Unverified,
-                "documentation has no verified primary enum association in this operation; the original scalar type is retained",
+                "documentation has no verified value association in this operation; the original scalar type is retained",
             );
         };
         let documented =
@@ -52,11 +119,11 @@ impl SemanticAnalyzer<'_> {
             );
         }
         if let Some(declared) = &field.declared_values
-            && !same_values(&declared.values, values)
+            && !contains_all_values(&declared.values, values)
         {
             return decision(
                 EnumCandidateStatus::Conflict,
-                "documented values differ from the complete source enum declaration; the generated enum uses source members, without claiming every member occurs in this response",
+                "documented values omit a source enum member; the generated enum uses the complete source declaration",
             );
         }
         decision(
@@ -66,12 +133,12 @@ impl SemanticAnalyzer<'_> {
     }
 }
 
-fn same_values(left: &[CodedValue], right: &[CodedValue]) -> bool {
+fn contains_all_values(left: &[CodedValue], right: &[CodedValue]) -> bool {
     let keys = |values: &[CodedValue]| {
         values
             .iter()
             .map(|item| serde_json::to_string(&item.value).expect("serializable enum value"))
             .collect::<BTreeSet<_>>()
     };
-    keys(left) == keys(right)
+    keys(right).is_subset(&keys(left))
 }

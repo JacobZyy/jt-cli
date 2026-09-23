@@ -1,6 +1,7 @@
 mod candidates;
 mod copy_origin;
 mod cross_repository;
+mod database;
 mod discovery;
 mod lookup;
 mod primary;
@@ -79,6 +80,7 @@ pub struct SemanticAnalyzer<'a> {
     request_domains: HashMap<(String, String), Domain>,
     field_domain_cache: HashMap<(String, String, String), Domain>,
     lookup_forwarder_cache: HashMap<(String, usize), Option<Domain>>,
+    mapper_cache: HashMap<String, Option<database::MapperInfo>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -94,6 +96,7 @@ impl<'a> SemanticAnalyzer<'a> {
             request_domains: HashMap::new(),
             field_domain_cache: HashMap::new(),
             lookup_forwarder_cache: HashMap::new(),
+            mapper_cache: HashMap::new(),
         }
     }
 
@@ -121,6 +124,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         .fields
                         .iter()
                         .find(|field| field.name == patch.target.field_name)
+                    && patch.enum_candidate.is_none()
                 {
                     patch.enum_candidate = self.verify_enum_candidate(schema, field, patch);
                 }
@@ -497,13 +501,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 } else {
                     format!("{prefix}.{}", field.name)
                 };
-                patches.push(self.field_patch(
-                    operation,
-                    class,
-                    &field.name,
-                    field_path,
-                    reachable,
-                )?);
+                patches.push(self.field_patch(operation, class, field, field_path, reachable)?);
             }
         }
         patches.sort_by(|left, right| left.target.cmp(&right.target));
@@ -515,11 +513,12 @@ impl<'a> SemanticAnalyzer<'a> {
         &mut self,
         operation: &Operation,
         class: &GraphNode,
-        field_name: &str,
+        field: &super::model::Field,
         field_path: String,
         reachable: &Reachability,
     ) -> Result<SemanticPatch> {
         let graph = self.project.graph();
+        let field_name = &field.name;
         let setter_name = format!("set{}", uppercase_first(field_name));
         let setter = graph
             .contained(&class.id, "method")
@@ -542,10 +541,12 @@ impl<'a> SemanticAnalyzer<'a> {
             .filter(|edge| reachable.nodes.contains(&edge.source))
             .cloned()
             .collect::<Vec<_>>();
-        let known_sites = write_edges
-            .iter()
-            .map(|edge| (edge.source.clone(), edge.line))
-            .collect::<BTreeSet<_>>();
+        let mut known_sites = BTreeMap::new();
+        for edge in &write_edges {
+            *known_sites
+                .entry((edge.source.clone(), edge.line))
+                .or_insert(0usize) += 1;
+        }
         for edge in write_edges {
             let writer = graph
                 .nodes
@@ -606,28 +607,35 @@ impl<'a> SemanticAnalyzer<'a> {
                 "no operation-reachable write site",
             ));
         }
-        Ok(classify_patch(target, domains))
+        let mut patch = classify_patch(target, domains.clone());
+        candidates::associate_comment_values(field, &class.file_path, &domains, &mut patch);
+        Ok(patch)
     }
 
     fn unindexed_setter_calls(
         &mut self,
         reachable: &Reachability,
         setter: &GraphNode,
-        known_sites: &BTreeSet<(String, usize)>,
+        known_sites: &BTreeMap<(String, usize), usize>,
     ) -> Result<Vec<String>> {
         let mut gaps = BTreeSet::new();
+        let mut seen = BTreeMap::<(String, usize), usize>::new();
         for method_id in &reachable.nodes {
             let Some(method) = self.project.graph().nodes.get(method_id) else {
                 continue;
             };
             for invocation in self.method_invocations(method)? {
-                if invocation.name == setter.name
-                    && !known_sites.contains(&(method.id.clone(), invocation.line))
-                {
-                    let targets = self.resolve_invocation(method, &invocation)?;
-                    if !targets.is_empty() && !targets.contains(&setter.id) {
-                        continue;
-                    }
+                if invocation.name != setter.name {
+                    continue;
+                }
+                let targets = self.resolve_invocation(method, &invocation)?;
+                if !targets.is_empty() && !targets.contains(&setter.id) {
+                    continue;
+                }
+                let site = (method.id.clone(), invocation.line);
+                let count = seen.entry(site.clone()).or_default();
+                *count += 1;
+                if *count > known_sites.get(&site).copied().unwrap_or(0) {
                     gaps.insert(format!(
                         "unindexed setter call:{}:{}:{}",
                         method.file_path, invocation.line, invocation.column
@@ -2314,11 +2322,37 @@ mod tests {
     fn comment_candidates_require_independent_code_evidence_per_direction() {
         use crate::model::EnumCandidateStatus;
         let checked = "int code = req.getCode(); Kind kind = Kind.decode(code); Objects.requireNonNull(kind); Payload result = new Payload(); result.setCode(9); return result;";
-        for (comment, expected) in [
-            ("1=Ready; 2=Done", EnumCandidateStatus::Verified),
-            ("1=Ready; 9=Outdated", EnumCandidateStatus::Conflict),
-            ("@see p.Other", EnumCandidateStatus::Conflict),
-            ("@see missing.Kind", EnumCandidateStatus::Unverified),
+        for (comment, request_status, response_status, enum_count) in [
+            (
+                "1=Ready; 2=Done",
+                EnumCandidateStatus::Verified,
+                EnumCandidateStatus::Conflict,
+                1,
+            ),
+            (
+                "1=Ready; 9=Outdated",
+                EnumCandidateStatus::Conflict,
+                EnumCandidateStatus::Verified,
+                2,
+            ),
+            (
+                "1=Ready; 2=Done; 9=Extra",
+                EnumCandidateStatus::Verified,
+                EnumCandidateStatus::Verified,
+                2,
+            ),
+            (
+                "@see p.Other",
+                EnumCandidateStatus::Conflict,
+                EnumCandidateStatus::Unverified,
+                1,
+            ),
+            (
+                "@see missing.Kind",
+                EnumCandidateStatus::Unverified,
+                EnumCandidateStatus::Unverified,
+                1,
+            ),
         ] {
             let ir = request_fixture_with_comment(checked, "null", Some(comment));
             let request = ir.operations[0]
@@ -2333,22 +2367,21 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 request.enum_candidate.as_ref().unwrap().status,
-                expected,
+                request_status,
                 "{comment}"
             );
             assert!(request.associated_values().is_some());
             assert_eq!(
                 response.enum_candidate.as_ref().unwrap().status,
-                EnumCandidateStatus::Unverified
+                response_status
             );
-            assert!(response.associated_values().is_none());
+            assert_eq!(
+                response.associated_values().is_some(),
+                response_status == EnumCandidateStatus::Verified
+            );
             let generated =
                 crate::typescript::generate(&ir, &crate::typescript::tests::config()).unwrap();
-            assert_eq!(
-                generated.enum_files.len(),
-                1,
-                "untrusted comments must not add enum files"
-            );
+            assert_eq!(generated.enum_files.len(), enum_count, "{comment}");
             assert!(
                 crate::semantic_diagnostics(&ir)
                     .iter()
@@ -2372,6 +2405,98 @@ mod tests {
                 .unwrap()
                 .enum_files
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn comment_fallback_covers_writes_but_never_uses_incomplete_values() {
+        use crate::model::EnumCandidateStatus;
+
+        for (body, comment, status, associated) in [
+            (
+                "Payload result = new Payload(); result.setCode(10); return result;",
+                "状态：10-待上传 19-备用 90-取消",
+                EnumCandidateStatus::Verified,
+                true,
+            ),
+            (
+                "Payload result = new Payload(); result.setCode(20); return result;",
+                "状态：10-待上传 19-备用 90-取消",
+                EnumCandidateStatus::Conflict,
+                false,
+            ),
+            (
+                "Payload result = new Payload(); result.setCode(req.getCode()); return result;",
+                "状态：10-待上传 19-备用 90-取消",
+                EnumCandidateStatus::Unverified,
+                false,
+            ),
+            (
+                "Payload result = new Payload(); result.setCode(10); result.setCode(20); return result;",
+                "状态：10-待上传 19-备用 90-取消",
+                EnumCandidateStatus::Unverified,
+                false,
+            ),
+        ] {
+            let ir = request_fixture_with_comment(body, "null", Some(comment));
+            let response = ir.operations[0]
+                .semantic_patches
+                .iter()
+                .find(|patch| patch.target.source == FieldSource::Response)
+                .unwrap();
+            assert_eq!(response.enum_candidate.as_ref().unwrap().status, status);
+            assert_eq!(response.associated_values().is_some(), associated);
+            let generated =
+                crate::typescript::generate(&ir, &crate::typescript::tests::config()).unwrap();
+            if associated {
+                let enum_source = generated
+                    .enum_files
+                    .iter()
+                    .map(|path| &generated.files[path])
+                    .find(|source| source.contains("来源：字段注释/注解"))
+                    .expect("verified field comment generates an enum");
+                assert!(
+                    enum_source.contains("10")
+                        && enum_source.contains("19")
+                        && enum_source.contains("90")
+                );
+            } else {
+                assert!(generated.enum_files.is_empty());
+            }
+        }
+
+        let description = "枚举值：\"10\"-待上传 \"19\"-备用 \"90\"-取消";
+        let field = crate::model::Field {
+            name: "statusDesc".to_owned(),
+            java_type: parse_java_type("String").unwrap(),
+            optional: false,
+            description: Some(description.to_owned()),
+            declared_values: crate::coded_values::parse(
+                "statusDesc",
+                Some(description),
+                None,
+                &parse_java_type("String").unwrap(),
+            ),
+            linked_enum: None,
+        };
+        assert!(field.declared_values.is_some());
+        let target = FieldTarget {
+            source: FieldSource::Response,
+            operation_key: "query".to_owned(),
+            schema_fqn: "p.Payload".to_owned(),
+            field_path: "statusDesc".to_owned(),
+            field_name: "statusDesc".to_owned(),
+        };
+        let domains = vec![Domain {
+            literals: BTreeSet::from(["\"-\"".to_owned()]),
+            ..Domain::default()
+        }];
+        let mut patch = classify_patch(target, domains.clone());
+        candidates::associate_comment_values(&field, "Payload.java", &domains, &mut patch);
+        assert!(patch.associated_values().is_none());
+        assert_eq!(
+            patch.enum_candidate.unwrap().status,
+            EnumCandidateStatus::Conflict
         );
     }
 
