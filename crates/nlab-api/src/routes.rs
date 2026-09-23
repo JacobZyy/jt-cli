@@ -440,16 +440,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn gateway_query_returns_only_routes_with_http_paths() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let zzcli = temp.path().join("zzcli");
-        fs::write(
-            &zzcli,
-            "#!/bin/sh\nprintf '%s\\n' '{\"respCode\":0,\"respData\":[{\"httpMethod\":\"post\",\"httpPath\":\"/api/query\",\"httpToScfFilterConfig\":{\"interfaceName\":\"p.IFacade\",\"methodSignature\":\"query(QueryReq)\"}},{\"httpMethod\":\"POST\",\"httpPath\":\"\",\"httpToScfFilterConfig\":{\"interfaceName\":\"p.IFacade\",\"methodSignature\":\"internal()\"}}]}'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&zzcli, fs::Permissions::from_mode(0o755)).unwrap();
+        let zzcli = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zzcli-routes.sh");
         let routes = query_routes(&zzcli, GatewayEnvironment::Testserver, "demo").unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].method_name, "query");
