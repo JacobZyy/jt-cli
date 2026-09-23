@@ -137,11 +137,11 @@ pub(crate) fn snapshot_legacy(project: &Path) -> Result<Option<tempfile::TempDir
     Ok(Some(snapshot))
 }
 
-pub(crate) fn automatic(project: &Path, legacy: &Path, source_root: &Path) -> Result<Value> {
+pub(crate) fn automatic(project: &Path, legacy: &Path) -> Result<Value> {
     run_inner(MigrateArgs {
         project: project.to_owned(),
         legacy: legacy.to_owned(),
-        source_root: Some(source_root.to_owned()),
+        source_root: Some(project.to_owned()),
         apply: true,
     })
 }
@@ -340,7 +340,7 @@ fn inferred_type_names(
     old_type_files: &[String],
     new_type_files: &[String],
 ) -> Result<BTreeMap<String, String>> {
-    let mut inferred = schema_type_names(old_openapi, new_openapi);
+    let mut candidates = schema_type_candidates(old_openapi, new_openapi);
     for replacement in interfaces
         .iter()
         .filter(|replacement| replacement.status != ReplacementStatus::Removed)
@@ -350,12 +350,18 @@ fn inferred_type_names(
         let old_types = function_types(&old_source, &replacement.old_export);
         let new_types = function_types(&new_source, &replacement.new_export);
         if let (Some(old), Some(new)) = (old_types.request, new_types.request) {
-            inferred.entry(old).or_insert(new);
+            candidates.entry(old).or_default().insert(new);
         }
         if let (Some(old), Some(new)) = (old_types.response, new_types.response) {
-            inferred.entry(old).or_insert(new);
+            candidates.entry(old).or_default().insert(new);
         }
     }
+    let mut inferred = candidates
+        .into_iter()
+        .filter_map(|(old, mut names)| {
+            (names.len() == 1).then(|| (old, names.pop_first().expect("unique replacement")))
+        })
+        .collect::<BTreeMap<_, _>>();
     inferred.extend(enum_type_names(
         old_root,
         old_type_files,
@@ -578,12 +584,18 @@ fn insert_name_word(words: &mut BTreeSet<String>, value: &str) {
     }
 }
 
-fn schema_type_names(old: &Value, new: &Value) -> BTreeMap<String, String> {
-    let mut inferred = BTreeMap::new();
+fn schema_type_candidates(old: &Value, new: &Value) -> BTreeMap<String, BTreeSet<String>> {
+    let mut inferred = BTreeMap::<String, BTreeSet<String>>::new();
     let new_schemas = new["components"]["schemas"]
         .as_object()
         .cloned()
         .unwrap_or_default();
+    let mut new_by_fqn = BTreeMap::<&str, Vec<&str>>::new();
+    for (name, schema) in &new_schemas {
+        if let Some(fqn) = schema["x-nlab-schema-fqn"].as_str() {
+            new_by_fqn.entry(fqn).or_default().push(name);
+        }
+    }
     let new_base_by_simple = new_schemas
         .iter()
         .filter_map(|(name, schema)| {
@@ -597,6 +609,15 @@ fn schema_type_names(old: &Value, new: &Value) -> BTreeMap<String, String> {
         .into_iter()
         .flatten()
     {
+        if let Some(fqn) = schema["x-nlab-schema-fqn"].as_str()
+            && let Some(names) = new_by_fqn.get(fqn)
+            && let [name] = names.as_slice()
+        {
+            inferred
+                .entry(old_name.clone())
+                .or_default()
+                .insert((*name).to_owned());
+        }
         let Some(java_type) = schema["x-nlab-java-type"].as_str() else {
             continue;
         };
@@ -608,7 +629,10 @@ fn schema_type_names(old: &Value, new: &Value) -> BTreeMap<String, String> {
             .find(|part| !part.is_empty())
             .unwrap_or(java_type);
         if let Some(new_name) = new_base_by_simple.get(simple) {
-            inferred.insert(old_name.clone(), new_name.clone());
+            inferred
+                .entry(old_name.clone())
+                .or_default()
+                .insert(new_name.clone());
         }
     }
 
@@ -660,13 +684,16 @@ fn collect_schema_pairs(
     new_schema: &Value,
     old_document: &Value,
     new_document: &Value,
-    inferred: &mut BTreeMap<String, String>,
+    inferred: &mut BTreeMap<String, BTreeSet<String>>,
     visiting: &mut BTreeSet<(String, String)>,
 ) {
     let old_name = reference_name(old_schema);
     let new_name = reference_name(new_schema);
     if let (Some(old_name), Some(new_name)) = (&old_name, &new_name) {
-        inferred.entry(old_name.clone()).or_insert(new_name.clone());
+        inferred
+            .entry(old_name.clone())
+            .or_default()
+            .insert(new_name.clone());
         if !visiting.insert((old_name.clone(), new_name.clone())) {
             return;
         }
@@ -696,15 +723,18 @@ fn collect_schema_pairs(
             }
         }
     }
-    if let (Some(old_items), Some(new_items)) = (old_schema.get("items"), new_schema.get("items")) {
-        collect_schema_pairs(
-            old_items,
-            new_items,
-            old_document,
-            new_document,
-            inferred,
-            visiting,
-        );
+    for keyword in ["items", "additionalProperties"] {
+        if let (Some(old_item), Some(new_item)) = (old_schema.get(keyword), new_schema.get(keyword))
+        {
+            collect_schema_pairs(
+                old_item,
+                new_item,
+                old_document,
+                new_document,
+                inferred,
+                visiting,
+            );
+        }
     }
 }
 
@@ -1313,6 +1343,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn schema_migration_reuses_unique_java_types_without_guessing_between_domains() {
+        let response = |name: &str| {
+            serde_json::json!({"responses": {"200": {"content": {
+                "application/json": {"schema": {"type": "object", "additionalProperties": {"$ref": format!("#/components/schemas/{name}")}}}
+            }}}})
+        };
+        let old = serde_json::json!({
+            "components": {"schemas": {
+                "Detail": {"x-nlab-schema-fqn": "p.Detail"},
+                "QueryDetail": {"x-nlab-schema-fqn": "p.Detail"},
+                "BizButton": {"x-nlab-schema-fqn": "p.BizButton"},
+                "OldRecycleButton": {"x-nlab-schema-fqn": "p.BizButton"}
+            }},
+            "x-nlab-contracts": {
+                "rawRecycle": response("BizButton"), "rawWorkOrder": response("BizButton"),
+                "recycle": response("OldRecycleButton")
+            }
+        });
+        let new = serde_json::json!({
+            "components": {"schemas": {
+                "Detail": {"x-nlab-schema-fqn": "p.Detail"},
+                "RecycleButton": {"x-nlab-schema-fqn": "p.BizButton"},
+                "WorkOrderButton": {"x-nlab-schema-fqn": "p.BizButton"}
+            }},
+            "x-nlab-contracts": {
+                "rawRecycle": response("RecycleButton"), "rawWorkOrder": response("WorkOrderButton"),
+                "recycle": response("RecycleButton")
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let inferred =
+            inferred_type_names(&old, &new, root.path(), root.path(), &[], &[], &[]).unwrap();
+        assert_eq!(inferred["Detail"], "Detail");
+        assert_eq!(inferred["QueryDetail"], "Detail");
+        assert_eq!(inferred["OldRecycleButton"], "RecycleButton");
+        assert!(!inferred.contains_key("BizButton"));
+    }
+
+    #[test]
     fn enum_targets_preserve_legacy_response_identity_and_separate_requests() {
         let document = serde_json::json!({"x-nlab-contracts": {"query": {"x-nlab-semantic-patches": [
             {"target": {"operationKey": "Facade#query", "schemaFqn": "p.DTO", "fieldPath": "code"},
@@ -1477,6 +1546,12 @@ mod tests {
         let source_root = root.path().join("src");
         fs::create_dir_all(source_root.join("service")).unwrap();
         fs::create_dir_all(source_root.join("page")).unwrap();
+        fs::create_dir_all(root.path().join("tests")).unwrap();
+        fs::write(
+            root.path().join("tests/view.ts"),
+            "import type { OldType } from '@/types/old'\n",
+        )
+        .unwrap();
         fs::write(
             source_root.join("service/index.ts"),
             "export { first, second } from './old'\n",
@@ -1536,7 +1611,7 @@ mod tests {
         let mut unresolved = Vec::new();
 
         let changed = migrate_relative_imports(SourceMigration {
-            source_root: &source_root,
+            source_root: root.path(),
             project_root: root.path(),
             interfaces: &interfaces,
             types: &types,
@@ -1549,8 +1624,12 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(changed.len(), 4);
+        assert_eq!(changed.len(), 5);
         assert!(unresolved.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.path().join("tests/view.ts")).unwrap(),
+            "import type { NewType as OldType } from '@/types/new'\n"
+        );
         assert_eq!(
             fs::read_to_string(source_root.join("service/index.ts")).unwrap(),
             "export { first } from './a'\nexport { second } from './b'\n"

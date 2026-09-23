@@ -21,20 +21,27 @@ pub struct OpenApiArtifact {
 
 pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifact> {
     let names = schema_names(&ir.schemas);
-    let requests = request_schemas(ir);
-    let aliases_by_operation = operation_aliases(ir, &names, &requests);
+    let plan = schema_plan(ir);
+    let aliases_by_operation = &plan.aliases;
+    let empty_aliases = HashMap::new();
     let mut components = Map::new();
-    for (fqn, schema) in &ir.schemas {
+    for variant in &plan.variants {
+        let operation = variant.operation.map(|index| &ir.operations[index]);
+        let aliases = operation
+            .and_then(|operation| {
+                aliases_by_operation.get(&variant.source.operation_key(operation))
+            })
+            .unwrap_or(&empty_aliases);
         components.insert(
-            names[fqn].clone(),
+            variant.name.clone(),
             schema_object(
-                schema,
+                &ir.schemas[&variant.fqn],
                 &names,
-                None,
-                FieldSource::Response,
-                &HashMap::new(),
+                operation,
+                variant.source,
+                aliases,
                 &BTreeMap::new(),
-                requests.contains(fqn),
+                variant.optional_fields,
             ),
         );
     }
@@ -42,32 +49,6 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifa
     let mut paths = Map::new();
     let mut contracts = Map::new();
     for operation in &ir.operations {
-        for source in [FieldSource::Request, FieldSource::Response] {
-            let aliases = aliases_by_operation
-                .get(&source.operation_key(operation))
-                .cloned()
-                .unwrap_or_default();
-            let mut alias_entries = aliases.iter().collect::<Vec<_>>();
-            alias_entries.sort_by(|left, right| left.0.cmp(right.0));
-            for (fqn, alias) in alias_entries {
-                components.insert(
-                    alias.clone(),
-                    schema_object(
-                        &ir.schemas[fqn],
-                        &names,
-                        Some(operation),
-                        source,
-                        &aliases,
-                        &BTreeMap::new(),
-                        source == FieldSource::Request
-                            && operation
-                                .request
-                                .as_ref()
-                                .is_some_and(|request| request.name == *fqn),
-                    ),
-                );
-            }
-        }
         let aliases = aliases_by_operation
             .get(&operation.key)
             .cloned()
@@ -588,63 +569,258 @@ fn semantic_patch(patch: &SemanticPatch) -> Value {
     Value::Object(value)
 }
 
-fn operation_aliases(
-    ir: &ContractIr,
-    names: &BTreeMap<String, String>,
-    requests: &BTreeSet<String>,
-) -> HashMap<String, HashMap<String, String>> {
-    let mut seeds = BTreeMap::new();
-    let mut reachable_by_operation = HashMap::new();
-    for operation in &ir.operations {
+pub(crate) struct SchemaVariant {
+    pub fqn: String,
+    pub name: String,
+    pub operation: Option<usize>,
+    pub source: FieldSource,
+    pub optional_fields: bool,
+    pub usages: BTreeSet<usize>,
+}
+
+pub(crate) struct SchemaPlan {
+    pub variants: Vec<SchemaVariant>,
+    pub aliases: HashMap<String, HashMap<String, String>>,
+}
+
+struct SchemaUse {
+    fqn: String,
+    operation: Option<usize>,
+    source: FieldSource,
+    optional_fields: bool,
+    context: String,
+}
+
+pub(crate) fn enum_identity(patch: &SemanticPatch) -> String {
+    format!(
+        "{}{}#{}",
+        if patch.enum_fqn.is_none() {
+            "comment:"
+        } else {
+            ""
+        },
+        patch
+            .enum_fqn
+            .as_deref()
+            .unwrap_or(&patch.target.schema_fqn),
+        patch
+            .accessor
+            .as_deref()
+            .unwrap_or(&patch.target.field_name)
+    )
+}
+
+pub(crate) fn schema_plan(ir: &ContractIr) -> SchemaPlan {
+    let names = schema_names(&ir.schemas);
+    let requests = request_schemas(ir);
+    // Original schemas let shared consumers keep a general type when domains differ.
+    let mut uses = ir
+        .schemas
+        .keys()
+        .map(|fqn| SchemaUse {
+            fqn: fqn.clone(),
+            operation: None,
+            source: FieldSource::Response,
+            optional_fields: requests.contains(fqn),
+            context: String::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut operations = ir.operations.iter().enumerate().collect::<Vec<_>>();
+    operations.sort_by_key(|(_, operation)| &operation.key);
+    for (index, operation) in operations {
         for source in [FieldSource::Request, FieldSource::Response] {
             let Some(root) = source.root(operation) else {
                 continue;
             };
-            let reachable = reachable_schemas(root, &ir.schemas);
-            let preserves_requiredness =
-                source == FieldSource::Response && !reachable.is_disjoint(requests);
-            if !preserves_requiredness
-                && !operation.semantic_patches.iter().any(|patch| {
-                    patch.target.source == source
-                        && (patch.associated_values().is_some() || patch.has_enum_null_branch())
+            for fqn in reachable_schemas(root, &ir.schemas) {
+                uses.push(SchemaUse {
+                    optional_fields: source == FieldSource::Request
+                        && root.name.replace("::", ".") == fqn,
+                    fqn,
+                    operation: Some(index),
+                    source,
+                    context: source.operation_key(operation),
+                });
+            }
+        }
+    }
+    let original_groups = ir
+        .schemas
+        .keys()
+        .enumerate()
+        .map(|(i, fqn)| (fqn, i))
+        .collect::<BTreeMap<_, _>>();
+    let mut groups = uses
+        .iter()
+        .map(|usage| original_groups[&usage.fqn])
+        .collect::<Vec<_>>();
+    // ponytail: whole-graph refinement; use a worklist if large contract graphs make this slow.
+    // Including referenced groups propagates nested differences and handles recursive schemas.
+    loop {
+        let mut aliases = HashMap::<String, HashMap<String, String>>::new();
+        for (usage, group) in uses.iter().zip(&groups) {
+            aliases
+                .entry(usage.context.clone())
+                .or_default()
+                .insert(usage.fqn.clone(), group.to_string());
+        }
+        let mut signatures = BTreeMap::new();
+        let next =
+            uses.iter()
+                .zip(&groups)
+                .map(|(usage, group)| {
+                    let schema = &ir.schemas[&usage.fqn];
+                    let mut shape = schema_object(
+                        schema,
+                        &names,
+                        usage.operation.map(|index| &ir.operations[index]),
+                        usage.source,
+                        &aliases[&usage.context],
+                        &BTreeMap::new(),
+                        usage.optional_fields,
+                    );
+                    // OpenAPI references omit generic arguments; TypeScript keeps them.
+                    let mut references = Vec::new();
+                    for field in &schema.fields {
+                        let patch =
+                            usage
+                                .operation
+                                .and_then(|index| {
+                                    ir.operations[index].semantic_patches.iter().rev().find(
+                                        |patch| {
+                                            patch.target.schema_fqn == schema.fqn
+                                                && patch.target.source == usage.source
+                                                && patch.target.field_name == field.name
+                                        },
+                                    )
+                                })
+                                .filter(|patch| patch.associated_values().is_some());
+                        if let Some(patch) = patch {
+                            // Evidence paths do not change the emitted enum type.
+                            shape["properties"][&field.name]["x-nlab-enum-association"] =
+                                json!(enum_identity(patch));
+                        } else {
+                            referenced_groups(
+                                &field.java_type,
+                                &aliases[&usage.context],
+                                &mut references,
+                            );
+                        }
+                    }
+                    let next_id = signatures.len();
+                    *signatures
+                        .entry((*group, shape.to_string(), references))
+                        .or_insert(next_id)
                 })
+                .collect::<Vec<_>>();
+        if next == groups {
+            break;
+        }
+        groups = next;
+    }
+
+    let mut members = BTreeMap::<usize, Vec<&SchemaUse>>::new();
+    let mut used_groups = BTreeMap::<String, BTreeSet<usize>>::new();
+    for (usage, group) in uses.iter().zip(&groups) {
+        members.entry(*group).or_default().push(usage);
+        if usage.operation.is_some() {
+            used_groups
+                .entry(usage.fqn.clone())
+                .or_default()
+                .insert(*group);
+        }
+    }
+    // Shared consumers need a general type across differing domains, including its dependencies.
+    let shared = used_groups
+        .iter()
+        .filter(|(_, schema_groups)| schema_groups.len() > 1)
+        .flat_map(|(fqn, _)| {
+            reachable_schemas(
+                &TypeRef {
+                    name: fqn.clone(),
+                    arguments: Vec::new(),
+                    array_depth: 0,
+                },
+                &ir.schemas,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for fqn in shared {
+        used_groups
+            .entry(fqn.clone())
+            .or_default()
+            .insert(groups[original_groups[&fqn]]);
+    }
+    let mut group_names = BTreeMap::new();
+    let mut seeds = BTreeMap::new();
+    for (fqn, schema_groups) in &used_groups {
+        for group in schema_groups {
+            if schema_groups.len() == 1
+                || members[group].iter().any(|usage| usage.operation.is_none())
             {
+                group_names.insert(*group, names[fqn].clone());
                 continue;
             }
-            let key = source.operation_key(operation);
-            for fqn in &reachable {
-                let mut seed = vec![
-                    without_interface_prefix(&operation.facade_name).to_owned(),
-                    operation.method_name.clone(),
-                ];
-                if source == FieldSource::Request {
-                    seed.push("Request".to_owned());
-                }
-                seed.push(ir.schemas[fqn].name.clone());
-                seeds.insert(alias_symbol(&key, fqn), seed);
+            let usage = members[group][0];
+            let operation = &ir.operations[usage.operation.expect("used schema")];
+            let mut seed = vec![
+                without_interface_prefix(&operation.facade_name).to_owned(),
+                operation.method_name.clone(),
+            ];
+            if usage.source == FieldSource::Request {
+                seed.push("Request".to_owned());
             }
-            reachable_by_operation.insert(key, reachable);
+            seed.push(ir.schemas[fqn].name.clone());
+            seeds.insert(group.to_string(), seed);
         }
     }
     let reserved = names.values().cloned().collect::<BTreeSet<_>>();
     let alias_names = shortest_unique_names_avoiding(&seeds, &reserved);
-    reachable_by_operation
-        .into_iter()
-        .map(|(operation_key, reachable)| {
-            let aliases = reachable
-                .into_iter()
-                .map(|fqn| {
-                    let name = alias_names[&alias_symbol(&operation_key, &fqn)].clone();
-                    (fqn, name)
-                })
-                .collect();
-            (operation_key, aliases)
-        })
-        .collect()
+    for (group, name) in alias_names {
+        group_names.insert(group.parse::<usize>().expect("schema group"), name);
+    }
+    let mut aliases = HashMap::<String, HashMap<String, String>>::new();
+    for (usage, group) in uses
+        .iter()
+        .zip(&groups)
+        .filter(|(usage, _)| usage.operation.is_some())
+    {
+        aliases
+            .entry(usage.context.clone())
+            .or_default()
+            .insert(usage.fqn.clone(), group_names[group].clone());
+    }
+    let mut variants = Vec::new();
+    for (group, name) in group_names {
+        let usage = members[&group]
+            .iter()
+            .find(|usage| usage.operation.is_some())
+            .unwrap_or(&members[&group][0]);
+        let usages = if usage.operation.is_some() {
+            members[&group].clone()
+        } else {
+            uses.iter().filter(|other| other.fqn == usage.fqn).collect()
+        };
+        variants.push(SchemaVariant {
+            fqn: usage.fqn.clone(),
+            name,
+            operation: usage.operation,
+            source: usage.source,
+            optional_fields: usage.optional_fields,
+            usages: usages.iter().filter_map(|usage| usage.operation).collect(),
+        });
+    }
+    variants.sort_by(|left, right| left.name.cmp(&right.name));
+    SchemaPlan { variants, aliases }
 }
 
-fn alias_symbol(operation_key: &str, fqn: &str) -> String {
-    format!("{operation_key}:{fqn}")
+fn referenced_groups(value: &TypeRef, aliases: &HashMap<String, String>, groups: &mut Vec<String>) {
+    if let Some(group) = aliases.get(&value.name.replace("::", ".")) {
+        groups.push(group.clone());
+    }
+    for argument in &value.arguments {
+        referenced_groups(argument, aliases, groups);
+    }
 }
 
 pub(crate) fn request_schemas(ir: &ContractIr) -> BTreeSet<String> {

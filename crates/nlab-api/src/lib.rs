@@ -257,11 +257,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
 
     reporter.phase(85, "迁移业务引用");
     let migration = if let Some(legacy) = &legacy {
-        migrate::automatic(
-            &output_dir,
-            legacy.path(),
-            &output_dir.join(&config.frontend.source_root),
-        )?
+        migrate::automatic(&output_dir, legacy.path())?
     } else {
         json!({
             "status": "skipped",
