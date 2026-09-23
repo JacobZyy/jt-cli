@@ -217,7 +217,9 @@ while IFS= read -r member; do
     nlab-backend-bridge/ | \
     nlab-backend-bridge/SKILL.md | \
     nlab-backend-bridge/agents/ | \
-    nlab-backend-bridge/agents/openai.yaml) ;;
+    nlab-backend-bridge/agents/openai.yaml | \
+    nlab-backend-bridge/references/ | \
+    nlab-backend-bridge/references/mock-generation.md) ;;
     *)
       printf '%s\n' "unexpected Skill archive member: $member" >&2
       exit 1
