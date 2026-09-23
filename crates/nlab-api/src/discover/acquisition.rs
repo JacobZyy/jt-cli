@@ -15,6 +15,7 @@ pub(super) struct Acquisition {
 pub(super) fn scan(args: DiscoverArgs, deadline: Instant) -> Result<DiscoveryRun> {
     scan_with(
         args,
+        None,
         |path| repo::sync_index(path, deadline),
         |service, branch, existing, root| {
             let mut existed = existing.is_some();
@@ -60,6 +61,7 @@ pub(super) fn scan(args: DiscoverArgs, deadline: Instant) -> Result<DiscoveryRun
 
 pub(super) fn scan_with(
     args: DiscoverArgs,
+    routes: Option<&[HttpRouteKey]>,
     mut sync: impl FnMut(&Path) -> Result<()>,
     mut acquire: impl FnMut(&str, &str, Option<&Path>, &Path) -> Acquisition,
 ) -> Result<DiscoveryRun> {
@@ -73,6 +75,7 @@ pub(super) fn scan_with(
     let previous = config.discovery.unwrap_or_default();
     let mut synchronized = BTreeMap::new();
     let mut acquisitions = BTreeMap::new();
+    let mut routes = routes.map(|routes| routes.to_vec());
     loop {
         let mut paths = fs::read_dir(&root)?
             .map(|entry| entry.map(|entry| entry.path()))
@@ -99,7 +102,15 @@ pub(super) fn scan_with(
                     .map(|path| (service.clone(), path.clone()))
             })
             .collect();
-        let mut result = super::scan(args.clone(), &synchronized, &associations)?;
+        let mut result = super::scan(
+            args.clone(),
+            &synchronized,
+            &associations,
+            routes.as_deref(),
+        )?;
+        if routes.is_none() {
+            routes = Some(result.routes.clone());
+        }
         let mut services = BTreeMap::new();
         for call in &result.report.calls {
             if args.offline || call.depth >= args.max_depth || call.status == "ambiguous" {

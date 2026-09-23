@@ -1,7 +1,7 @@
 use super::*;
 use crate::graph::test_snapshot;
 use crate::model::{ContractIr, TargetIdentity};
-use crate::semantic::tests::{call, contains, node, write};
+use crate::semantic::tests::{call, contains, gateway_route, node, write};
 
 #[test]
 fn see_references_respect_imports_and_never_replace_code_evidence() {
@@ -569,7 +569,9 @@ fn remote_request_validation_and_copied_response_generate_without_false_narrowin
             codegraph_extraction_version: "test".to_owned(),
         };
         let roots = vec!["contract/src/main/java/p/contract".to_owned()];
-        let (mut operations, schemas) = project.build_contracts(&target, &roots).unwrap();
+        let (mut operations, schemas) = project
+            .build_contracts(&roots, &gateway_route("p.contract.IFacade", "query"))
+            .unwrap();
         SemanticAnalyzer::new(&project)
             .enrich(&mut operations, &schemas)
             .unwrap();

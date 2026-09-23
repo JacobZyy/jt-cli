@@ -44,9 +44,12 @@ pub struct InitArgs {
     /// Backend branch; default: currently checked-out branch
     #[arg(long)]
     branch: Option<String>,
-    /// Application name used in placeholder paths; default: backend directory name
+    /// Application name used for Gateway lookup; default: backend directory name
     #[arg(long)]
     app_name: Option<String>,
+    /// Backend interface directory, relative to the repository; repeat for multiple directories
+    #[arg(long = "contract-root", value_name = "path")]
+    contract_roots: Vec<PathBuf>,
     /// Generated implementation directory family; default: detect existing api/service layout
     #[arg(long, value_enum)]
     layout: Option<LayoutPreset>,
@@ -108,7 +111,11 @@ fn run_inner(args: InitArgs) -> Result<Value> {
         !args.offline,
     )?;
     let backend = prepared.target.clone();
-    let contract_roots = detect_contract_roots(&backend.root)?;
+    let contract_roots = if args.contract_roots.is_empty() {
+        detect_contract_roots(&backend.root)?
+    } else {
+        provided_contract_roots(&backend.root, &args.contract_roots)?
+    };
     let previous = (project.join(CONFIG_FILE).is_file()
         || project.join(LEGACY_CONFIG_FILE).is_file())
     .then(|| ProjectConfig::load(&project))
@@ -557,14 +564,8 @@ fn detect_contract_roots(repo: &Path) -> Result<Vec<String>> {
             continue;
         }
         let source = fs::read_to_string(entry.path())?;
-        if crate::gateway::methods(&source)
-            .with_context(|| {
-                format!(
-                    "identify gateway declarations in {}",
-                    entry.path().display()
-                )
-            })?
-            .is_empty()
+        if !crate::gateway::has_contract_methods(&source)
+            .with_context(|| format!("probe contract declarations in {}", entry.path().display()))?
         {
             continue;
         }
@@ -592,14 +593,37 @@ fn detect_contract_roots(repo: &Path) -> Result<Vec<String>> {
         }
     }
     if roots.is_empty() {
-        bail!(
-            "no @ServiceContract gateway declarations found; first parameter must come from com.zhuanzhuan.arch.zgateway.support"
-        );
+        bail!("no @ServiceContract interface directories found; pass --contract-root");
     }
     Ok(roots
         .into_values()
         .map(|root| root.to_string_lossy().replace('\\', "/"))
         .collect())
+}
+
+fn provided_contract_roots(repo: &Path, roots: &[PathBuf]) -> Result<Vec<String>> {
+    let repo = repo.canonicalize().context("resolve backend repository")?;
+    let mut selected = Vec::new();
+    for root in roots {
+        let path = repo
+            .join(root)
+            .canonicalize()
+            .with_context(|| format!("resolve contract root {}", root.display()))?;
+        if !path.starts_with(&repo) || !path.is_dir() {
+            bail!(
+                "contract root must be a directory inside the backend repository: {}",
+                root.display()
+            );
+        }
+        selected.push(
+            path.strip_prefix(&repo)?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    selected.sort();
+    selected.dedup();
+    Ok(selected)
 }
 
 fn patch_vite_aliases(source: &str, frontend: &FrontendConfig) -> Result<String> {
@@ -956,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_probe_uses_gateway_methods_in_actual_directories() {
+    fn contract_probe_uses_annotated_interface_directories() {
         let root = tempfile::tempdir().unwrap();
         for relative in [
             "contract/src/main/java/p/contract/checkapp/IGoodsFacade.java",
@@ -965,7 +989,11 @@ mod tests {
         ] {
             let path = root.path().join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "@ServiceContract public interface Entry { String query(com.zhuanzhuan.arch.zgateway.support.EmployeeUser user); }").unwrap();
+            fs::write(
+                path,
+                "@ServiceContract public interface Entry { String query(String request); }",
+            )
+            .unwrap();
         }
         assert_eq!(
             detect_contract_roots(root.path()).unwrap(),
@@ -974,6 +1002,13 @@ mod tests {
                 "other/src/main/java/q/rpc"
             ]
         );
+        assert_eq!(
+            provided_contract_roots(root.path(), &[PathBuf::from("other/src/main/java/q/rpc")])
+                .unwrap(),
+            ["other/src/main/java/q/rpc"]
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(provided_contract_roots(root.path(), &[outside.path().to_path_buf()]).is_err());
     }
 
     #[test]

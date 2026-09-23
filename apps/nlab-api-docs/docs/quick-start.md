@@ -13,7 +13,7 @@
 - 一个前端项目。
 - 一个包含 NLab Java Facade 的后端仓库 URL 或本地 checkout。
 
-ZGateway 需要公司网络或 VPN，但它不是核心类型生成的前置条件。
+首次识别接口需要查询 ZGateway；连接公司网络或 VPN。已有匹配的生成结果时，`--offline` 可复用其路由。
 
 ## 准备 CodeGraph
 
@@ -77,7 +77,8 @@ nlab-api init \
   --repo-url git@example.com:team/backend.git \
   --clone-dir /path/to/backend \
   --branch feature-branch \
-  --app-name service_name
+  --app-name service_name \
+  --contract-root contract/src/main/java
 ```
 
 已有本地 checkout 时：
@@ -97,7 +98,8 @@ nlab-api init \
 - `--repo-path`：本机已有后端 checkout；与 `--repo-url` 二选一。
 - `--clone-dir`：`--repo-url` 的可选本地目标目录。
 - `--branch`：团队默认后端分支；省略时使用 clone 或本地仓库当前分支。
-- `--app-name`：服务身份和 placeholder path 使用的名称；省略时使用后端目录名。
+- `--app-name`：网关查询使用的服务身份；省略时使用后端目录名。
+- `--contract-root`：后端提供的接口目录，相对仓库根目录；多个目录可重复传入。省略时尝试从 `@ServiceContract` 接口目录探测。
 - `--layout api|service`：强制输出目录族；省略时根据现有 `src/api` 或 `src/service` 检测。
 - `--timeout-seconds`：包含 clone 和更新的整体超时，默认 1200 秒。
 
@@ -128,7 +130,7 @@ nlab-api init \
 提交前先检查生成配置：
 
 - `backend.repository`、`branch`、`appName`。
-- 自动发现的 `contractRoots`。
+- 后端提供或自动探测的 `contractRoots`。
 - `frontend.request.module`、`export`、`responseMode`。
 - `frontend.layout` 和 aliases。
 - `gateway`、`migration`、`mock`、`afterGenerate`。
@@ -165,10 +167,10 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 1. 获取后端仓库锁；缺失时根据 repository URL clone。
 2. 拒绝后端 tracked 改动；不删除或覆盖 untracked 文件。
 3. 切换配置分支或本次 `--branch`，再执行 `git pull --ff-only`。
-4. `codegraph init` 或 `codegraph sync`。
-5. 解析 Facade operation、请求类型、响应类型和 DTO 图。
-6. 分析调用链与字段值来源。
-7. 尝试补全 ZGateway 路由。
+4. `codegraph init` 或 `codegraph sync`，读取 `contractRoots` 中的接口方法候选。
+5. 查询 ZGateway；只保留具有对应 HTTP 路径的方法。查询失败时停止生成。
+6. 从保留的方法出发，发现关联仓库并解析请求、响应和 DTO。
+7. 分析调用链、枚举与字段值来源。
 8. 生成 OpenAPI、API、types 和 enums。
 9. 执行配置的 `afterGenerate`。
 10. 执行可证明的 migration；按配置生成 Mock。
@@ -192,7 +194,7 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 成功状态：
 
 - `complete`：全部阶段完成，无诊断。
-- `complete-with-warnings`：核心产物完成；路由 placeholder、开放枚举或其他保守降级已记录。
+- `complete-with-warnings`：核心产物完成；开放枚举或其他保守降级已记录。
 
 进程退出码：
 
@@ -204,13 +206,13 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 
 常见诊断：
 
-- `GATEWAY_QUERY_FAILED`：内网查询失败，保留 placeholder。
-- `GATEWAY_ROUTE_NOT_FOUND`：指定 operation 没有查到真实路由。
+- 网关查询失败：命令返回非零；检查网络和 `zzcli` 权限。
+- 网关未匹配：候选方法被舍弃；全部未匹配时命令返回非零。
 - `ENUM_KNOWN`：找到部分 enum 证据，值域保持开放。
 - `ENUM_EXTERNAL`：值来源终止于 RPC 或 Database。
 - `MIGRATION_REFERENCE_RETAINED`：迁移无法唯一决定，原引用保留。
 
-CI 应先以退出码判断成功，再按项目要求检查 diagnostics。`complete-with-warnings` 不是进程失败；需要真实路由或严格枚举的项目可以把对应 warning 作为自己的门禁。
+CI 应先以退出码判断成功，再按项目要求检查 diagnostics。`complete-with-warnings` 不是进程失败；需要严格枚举的项目可以把对应 warning 作为自己的门禁。
 
 生成失败时，先看：
 
@@ -218,7 +220,7 @@ CI 应先以退出码判断成功，再按项目要求检查 diagnostics。`comp
 .nlab/generate-report.json
 ```
 
-不要把所有 warning 当成失败。ZGateway 不可用、外部值来源或无法闭合的枚举会保留诊断，但不一定阻断核心产物。
+不要把所有 warning 当成失败。外部值来源或无法闭合的枚举会保留诊断，但不一定阻断核心产物。
 
 ## 更新
 
@@ -311,7 +313,7 @@ jt nlab-api generate \
 init 会记录默认目录；旧项目首次 generate 时自动补齐，不需要重新初始化。
 每次 generate 自动执行 Discover，不需要重复传目录或手动调用 discover。
 例如入口仓库为 `/path/to/backend-projects/service-a` 时，默认扫描同级仓库，缺失依赖也 clone 到 `/path/to/backend-projects`。
-`--offline` 跳过联网获取，仍执行本地跨仓库发现。
+`--offline` 跳过联网获取，使用与当前后端提交匹配的已生成路由，并执行本地跨仓库发现。
 
 CLI 将发现结果保存到共享配置 `.nlab/nlab-api.config.json` 的 `discovery.services`：
 
@@ -347,7 +349,7 @@ jt nlab-api discover --project /path/to/frontend --service-branch categoryr=feat
 索引本身不可用或仓库关联歧义仍退出 `2`，且不覆盖旧生成物。
 
 单独执行 discover 会更新发现配置并输出 JSON，不生成接口代码。两个入口遵守相同 runner 配置。
-默认从 `backend.contractRoots` 中所有接口方法开始。单独 discover 只分析某个文件时，可追加：
+默认从 `backend.contractRoots` 中匹配网关路径的接口方法开始。单独 discover 只分析某个文件时，可追加：
 
 ```bash
 --entry contract/src/main/java/example/IExampleFacade.java
@@ -363,7 +365,7 @@ Discover 自动执行 `codegraph init --yes` 或 `codegraph sync`，不再读取
 本地缺失的服务先通过 `zzcli sic get-cluster-info-by-app-name` 查集群，再通过
 `get-cluster-info-with-group` 获取 `beetleInfo.groupName/projectName`，组成公司 GitLab SSH 地址。
 CLI 自动 clone 目标分支到公共目录，初始化索引，再继续追踪新仓库的依赖；同名目录冲突不覆盖。
-`discover --offline` 和 `generate --offline` 跳过 SIC、clone 和 pull，但仍同步本地仓库索引。
+`discover --offline` 和 `generate --offline` 跳过 SIC、clone、pull 和网关查询，复用现有 `.nlab/contract-ir.json` 中与后端目标匹配的路由，并同步本地仓库索引。首次生成需要在线查询网关。
 
 结果以 JSON 输出到 stdout，可重定向到自己选择的报告文件。报告包含：
 
@@ -413,8 +415,7 @@ DTO 来源追踪支持返回对象、参数转发、结果包装和 holder 的 g
 不证明线上部署、Maven 版本一致性或动态服务绑定。缺失仓库地址仍需补全，尚未接入远程 Git 平台检索。
 
 在隔离 Worktree 中测试或只使用当前源码时，可给 init / generate 传 `--offline`。
-此模式不执行 Git clone、切分支或 pull；generate 仍同步本地索引并执行配置的生成后命令，跳过 Gateway 查询。
-分支参数必须匹配当前 checkout，生成物中的 placeholder 路由不能当作已验证的线上路由。
+此模式不执行 Git clone、切分支或 pull；generate 仍同步本地索引并执行配置的生成后命令。分支参数必须匹配当前 checkout，已有 IR 的路由也必须匹配当前后端提交。
 
 ## 常见问题
 
@@ -433,4 +434,4 @@ CLI 不会 stash、reset 或覆盖本地文件。先处理 tracked 修改、错�
 
 ### ZGateway 查询失败
 
-连接公司网络或 VPN 可补全真实路由。无法连接时，nlab-api 保留 placeholder 和 warning；不要手工猜测 path。
+连接公司网络或 VPN，检查 `zzcli` 权限后重试。网关查询失败会停止入口识别；不会把未验证的方法生成为 HTTP API。

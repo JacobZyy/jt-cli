@@ -13,6 +13,7 @@ use crate::config::{
 };
 use crate::graph::Snapshot;
 use crate::java::{JavaProject, parse_method_signature};
+use crate::routes::{self, HttpRouteKey};
 use crate::semantic::{RemoteCall, SemanticAnalyzer};
 use crate::{absolute_path, repo};
 
@@ -63,6 +64,7 @@ pub(crate) struct Report {
 pub(crate) struct DiscoveryRun {
     pub report: Report,
     pub graph: Snapshot,
+    pub routes: Vec<HttpRouteKey>,
 }
 
 #[derive(Debug)]
@@ -159,7 +161,26 @@ pub fn run(args: DiscoverArgs) -> u8 {
 
 #[cfg(test)]
 fn discover(args: DiscoverArgs) -> Result<Report> {
-    Ok(scan(args, &BTreeMap::new(), &BTreeMap::new())?.report)
+    Ok(scan(
+        args,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        Some(&entry_routes()),
+    )?
+    .report)
+}
+
+#[cfg(test)]
+fn entry_routes() -> Vec<HttpRouteKey> {
+    vec![HttpRouteKey {
+        interface_name: "p.Entry".to_owned(),
+        method_name: "run".to_owned(),
+        signature: None,
+        method: "POST".to_owned(),
+        path: "/entry/run".to_owned(),
+        host: None,
+        source: crate::model::RouteSource::Zgateway,
+    }]
 }
 
 fn save_branches(project: &Path, branches: &[String]) -> Result<()> {
@@ -345,6 +366,7 @@ fn scan(
     args: DiscoverArgs,
     synchronized: &BTreeMap<PathBuf, Result<(), String>>,
     associations: &BTreeMap<String, PathBuf>,
+    routes: Option<&[HttpRouteKey]>,
 ) -> Result<DiscoveryRun> {
     let project_path = absolute_path(&args.project)?.canonicalize()?;
     let config = ProjectConfig::load(&project_path)?;
@@ -419,9 +441,7 @@ fn scan(
             Ok(entry.strip_prefix(&backend)?.to_path_buf())
         })
         .transpose()?;
-    let mut entry_ids = Vec::new();
-    let mut entries = Vec::new();
-    let project = JavaProject::load(&backend, graph)?;
+    let mut candidates = Vec::new();
     for node in graph.nodes.values().filter(|node| node.kind == "interface") {
         let selected = match &entry {
             Some(entry) => Path::new(&node.file_path) == entry,
@@ -432,28 +452,58 @@ fn scan(
                 .any(|root| Path::new(&node.file_path).starts_with(root)),
         };
         if selected {
-            let mut methods = Vec::new();
             for method in graph.contained(&node.id, "method") {
-                if project.is_gateway_method(node, method)? {
-                    methods.push(method.id.clone());
-                }
-            }
-            if !methods.is_empty() {
-                entries.push(node.qualified_name.replace("::", "."));
-                entry_ids.extend(methods);
+                candidates.push((node, method));
             }
         }
     }
+    if candidates.is_empty() {
+        bail!("no interface methods found in selected entry/contractRoots");
+    }
+    let routes = match routes {
+        Some(routes) => routes.to_vec(),
+        None => routes::routes_for_run(
+            &project_path,
+            &config.backend.app_name,
+            repositories[initial]
+                .info
+                .branch
+                .as_deref()
+                .unwrap_or(&config.backend.branch),
+            repositories[initial].info.commit.as_deref(),
+            args.offline,
+            config.gateway.enabled,
+        )?,
+    };
+    let mut overloads = BTreeMap::new();
+    for (node, method) in &candidates {
+        *overloads
+            .entry((node.id.as_str(), method.name.as_str()))
+            .or_insert(0usize) += 1;
+    }
+    let mut entry_ids = Vec::new();
+    let mut entries = BTreeSet::new();
+    for (node, method) in candidates {
+        let facade_fqn = node.qualified_name.replace("::", ".");
+        if routes.iter().any(|route| {
+            route.matches_method(
+                &facade_fqn,
+                &method.name,
+                &method.signature,
+                overloads[&(node.id.as_str(), method.name.as_str())] > 1,
+            )
+        }) {
+            entries.insert(facade_fqn);
+            entry_ids.push(method.id.clone());
+        }
+    }
     if entry_ids.is_empty() {
-        bail!(
-            "no gateway methods found in selected entry/contractRoots; first parameter must come from com.zhuanzhuan.arch.zgateway.support"
-        );
+        bail!("no configured gateway routes matched selected entry/contractRoots");
     }
     entry_ids.sort();
-    entries.sort();
     let mut report = Report {
         version: 1, project: project_path, repositories_root: root,
-        configured_branch: config.backend.branch.clone(), entries, repositories: Vec::new(),
+        configured_branch: config.backend.branch.clone(), entries: entries.into_iter().collect(), repositories: Vec::new(),
         calls: Vec::new(), visited_methods: 0, unresolved_local_calls: 0,
         blocking_services: Vec::new(),
         unavailable_services: Vec::new(),
@@ -662,7 +712,11 @@ fn scan(
         .into_iter()
         .map(|repository| repository.info)
         .collect();
-    Ok(DiscoveryRun { report, graph })
+    Ok(DiscoveryRun {
+        report,
+        graph,
+        routes,
+    })
 }
 
 fn target_methods(graph: &Snapshot, call: &RemoteCall) -> Vec<String> {

@@ -170,6 +170,7 @@ fn default_discovery_follows_sibling_repositories_without_configuration() {
     let mut synced = Vec::new();
     let result = acquisition::scan_with(
         args.clone(),
+        Some(&entry_routes()),
         |path| {
             synced.push(path.to_owned());
             Ok(())
@@ -193,6 +194,19 @@ fn default_discovery_follows_sibling_repositories_without_configuration() {
             .services["b"]
             .status,
         "resolved"
+    );
+}
+
+#[test]
+fn discovery_drops_unconfigured_interface_methods() {
+    let (_temp, args) = fixture(false);
+    let error = scan(args, &BTreeMap::new(), &BTreeMap::new(), Some(&[]))
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("no configured gateway routes matched")
     );
 }
 
@@ -358,7 +372,13 @@ fn preflight_blocks_before_overwriting_existing_generated_files() {
     let (temp, args) = fixture(false);
     fs::remove_dir_all(temp.path().join("b/.codegraph")).unwrap();
     write(&args.project, ".nlab/contract-ir.json", "existing contract");
-    let result = scan(args.clone(), &BTreeMap::new(), &BTreeMap::new()).unwrap();
+    let result = scan(
+        args.clone(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        Some(&entry_routes()),
+    )
+    .unwrap();
     let error = finish_preflight(&args.project, result).err().unwrap();
     assert!(error.downcast_ref::<Blocked>().is_some());
     assert_eq!(
@@ -387,6 +407,7 @@ fn acquisition_retries_legacy_waivers_and_keeps_requested_branch() {
         let mut attempts = Vec::new();
         let result = acquisition::scan_with(
             args.clone(),
+            Some(&entry_routes()),
             |_| Ok(()),
             |service, branch, existing, _| {
                 attempts.push((service.to_owned(), branch.to_owned()));
@@ -431,6 +452,7 @@ fn acquisition_retries_legacy_waivers_and_keeps_requested_branch() {
     args.offline = true;
     acquisition::scan_with(
         args,
+        Some(&entry_routes()),
         |_| Ok(()),
         |_, _, _, _| panic!("offline must not acquire"),
     )
@@ -447,6 +469,7 @@ fn acquisition_syncs_new_repository_and_failed_updates_never_use_stale_index() {
     let mut synced = Vec::new();
     let result = acquisition::scan_with(
         args.clone(),
+        Some(&entry_routes()),
         |path| {
             synced.push(path.to_owned());
             Ok(())
@@ -475,6 +498,7 @@ fn acquisition_syncs_new_repository_and_failed_updates_never_use_stale_index() {
     assert_eq!(result.report.calls[0].status, "source-matched");
     let result = acquisition::scan_with(
         args.clone(),
+        Some(&entry_routes()),
         |_| Ok(()),
         |_, branch, path, _| acquisition::Acquisition {
             repository: None,
@@ -512,6 +536,7 @@ fn sic_association_resolves_repositories_without_scf_application_xml() {
     );
     let result = acquisition::scan_with(
         args,
+        Some(&entry_routes()),
         |_| Ok(()),
         |service, branch, _, root| {
             assert_eq!(service, "b");

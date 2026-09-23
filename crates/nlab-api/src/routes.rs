@@ -107,10 +107,6 @@ fn run_inner(args: RoutesArgs) -> Result<Value> {
     }))
 }
 
-pub(crate) fn apply_best_effort(ir: &mut ContractIr, zzcli: &Path) -> RouteSummary {
-    apply_best_effort_with_environment(ir, zzcli, GatewayEnvironment::Testserver)
-}
-
 fn apply_best_effort_with_environment(
     ir: &mut ContractIr,
     zzcli: &Path,
@@ -133,10 +129,11 @@ fn apply_best_effort_with_environment(
     };
     let mut by_operation = BTreeMap::new();
     for route in routes {
-        let Some(operation) = ir.operations.iter().find(|operation| {
-            operation.facade_name == route.interface_name
-                && operation.method_name == route.method_name
-        }) else {
+        let Some(operation) = ir
+            .operations
+            .iter()
+            .find(|operation| route.matches(&operation.facade_fqn, &operation.method_name))
+        else {
             continue;
         };
         by_operation.insert(operation.key.clone(), route);
@@ -165,13 +162,135 @@ fn apply_best_effort_with_environment(
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct HttpRouteKey {
-    interface_name: String,
-    method_name: String,
-    method: String,
-    path: String,
-    host: Option<String>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HttpRouteKey {
+    pub interface_name: String,
+    pub method_name: String,
+    pub signature: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub host: Option<String>,
+    pub source: RouteSource,
+}
+
+impl HttpRouteKey {
+    pub(crate) fn matches(&self, interface_name: &str, method_name: &str) -> bool {
+        self.method_name == method_name
+            && (self.interface_name == interface_name
+                || (!self.interface_name.contains('.')
+                    && interface_name.rsplit('.').next() == Some(self.interface_name.as_str())))
+    }
+
+    pub(crate) fn matches_method(
+        &self,
+        interface_name: &str,
+        method_name: &str,
+        signature: &str,
+        overloaded: bool,
+    ) -> bool {
+        if !self.matches(interface_name, method_name) {
+            return false;
+        }
+        if !overloaded {
+            return true;
+        }
+        let Some(expected) = self.signature.as_deref().and_then(route_parameters) else {
+            return false;
+        };
+        let Some((_, actual)) = crate::java::parse_method_signature(signature) else {
+            return false;
+        };
+        expected.len() == actual.len()
+            && expected
+                .iter()
+                .zip(actual.iter())
+                .all(|(expected, actual)| same_type(expected, actual))
+    }
+}
+
+fn route_parameters(signature: &str) -> Option<Vec<crate::model::TypeRef>> {
+    let (_, parameters) = signature.split_once('(')?;
+    let (parameters, _) = parameters.split_once(')')?;
+    if parameters.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    crate::java::split_top_level(parameters, ',')
+        .into_iter()
+        .map(|parameter| crate::java::parse_java_type(parameter.trim()))
+        .collect()
+}
+
+fn same_type(expected: &crate::model::TypeRef, actual: &crate::model::TypeRef) -> bool {
+    expected.simple_name() == actual.simple_name()
+        && expected.array_depth == actual.array_depth
+        && expected.arguments.len() == actual.arguments.len()
+        && expected
+            .arguments
+            .iter()
+            .zip(&actual.arguments)
+            .all(|(expected, actual)| same_type(expected, actual))
+}
+
+pub(crate) fn routes_for_run(
+    project: &Path,
+    app_name: &str,
+    branch: &str,
+    commit: Option<&str>,
+    offline: bool,
+    enabled: bool,
+) -> Result<Vec<HttpRouteKey>> {
+    if offline {
+        let path = project.join(".nlab/contract-ir.json");
+        let ir = serde_json::from_str::<ContractIr>(
+            &fs::read_to_string(&path)
+                .with_context(|| format!("offline gateway routes require {}", path.display()))?,
+        )
+        .context("decode cached contract IR")?;
+        if ir.target.app_name != app_name
+            || ir.target.branch != branch
+            || commit.is_some_and(|commit| ir.target.commit != commit)
+        {
+            bail!("cached gateway routes do not match the current backend target");
+        }
+        return Ok(ir
+            .operations
+            .into_iter()
+            .filter(|operation| {
+                matches!(
+                    operation.route.status,
+                    RouteStatus::Resolved | RouteStatus::Cached
+                )
+            })
+            .map(|operation| {
+                let signature = crate::java::parse_method_signature(&operation.signature).map(
+                    |(_, parameters)| {
+                        format!(
+                            "{}({})",
+                            operation.method_name,
+                            parameters
+                                .iter()
+                                .map(crate::model::TypeRef::render_java)
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    },
+                );
+                HttpRouteKey {
+                    interface_name: operation.facade_fqn,
+                    method_name: operation.method_name,
+                    signature,
+                    method: operation.route.method,
+                    path: operation.route.path,
+                    host: operation.route.host,
+                    source: RouteSource::Cache,
+                }
+            })
+            .collect());
+    }
+    if !enabled {
+        bail!("gateway lookup is required for interface identification");
+    }
+    query_routes(Path::new("zzcli"), GatewayEnvironment::Testserver, app_name)
 }
 
 fn query_routes(
@@ -233,9 +352,7 @@ fn normalize_route(route: Value) -> Option<HttpRouteKey> {
         .get("interfaceName")
         .and_then(Value::as_str)
         .unwrap_or(fallback_interface)
-        .rsplit('.')
-        .next()?
-        .to_owned();
+        .replace("::", ".");
     let signature = config
         .get("methodSignature")
         .and_then(Value::as_str)
@@ -244,15 +361,22 @@ fn normalize_route(route: Value) -> Option<HttpRouteKey> {
     if interface_name.is_empty() || method_name.is_empty() {
         return None;
     }
+    let method = route.get("httpMethod")?.as_str()?.trim();
+    let path = route.get("httpPath")?.as_str()?.trim();
+    if method.is_empty() || path.is_empty() {
+        return None;
+    }
     Some(HttpRouteKey {
         interface_name,
         method_name: method_name.to_owned(),
-        method: route.get("httpMethod")?.as_str()?.to_ascii_uppercase(),
-        path: route.get("httpPath")?.as_str()?.to_owned(),
+        signature: Some(signature.to_owned()),
+        method: method.to_ascii_uppercase(),
+        path: path.to_owned(),
         host: route
             .get("httpHost")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        source: RouteSource::Zgateway,
     })
 }
 
@@ -293,9 +417,43 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(route.interface_name, "IFacade");
+        assert_eq!(route.interface_name, "p.IFacade");
         assert_eq!(route.method_name, "query");
         assert_eq!(route.path, "/api/demo/query");
+        assert!(route.matches("p.IFacade", "query"));
+        assert!(!route.matches("other.IFacade", "query"));
+        assert!(route.matches_method("p.IFacade", "query", "String (QueryReq request)", true));
+        assert!(!route.matches_method("p.IFacade", "query", "String (String request)", true));
+        assert!(
+            normalize_route(serde_json::json!({
+                "httpMethod": "POST",
+                "httpPath": "",
+                "httpToScfFilterConfig": {
+                    "interfaceName": "p.IFacade",
+                    "methodSignature": "query(QueryReq)"
+                }
+            }))
+            .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gateway_query_returns_only_routes_with_http_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let zzcli = temp.path().join("zzcli");
+        fs::write(
+            &zzcli,
+            "#!/bin/sh\nprintf '%s\\n' '{\"respCode\":0,\"respData\":[{\"httpMethod\":\"post\",\"httpPath\":\"/api/query\",\"httpToScfFilterConfig\":{\"interfaceName\":\"p.IFacade\",\"methodSignature\":\"query(QueryReq)\"}},{\"httpMethod\":\"POST\",\"httpPath\":\"\",\"httpToScfFilterConfig\":{\"interfaceName\":\"p.IFacade\",\"methodSignature\":\"internal()\"}}]}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&zzcli, fs::Permissions::from_mode(0o755)).unwrap();
+        let routes = query_routes(&zzcli, GatewayEnvironment::Testserver, "demo").unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].method_name, "query");
+        assert_eq!(routes[0].path, "/api/query");
     }
 
     #[test]

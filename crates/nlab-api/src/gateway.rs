@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Context, Result, bail};
 use tree_sitter::{Node, Parser};
 
@@ -8,55 +6,20 @@ use crate::model::TypeRef;
 
 pub(crate) const CONTEXT_PACKAGE: &str = "com.zhuanzhuan.arch.zgateway.support";
 
-pub(crate) fn method_key(owner: &str, name: &str, parameters: &[TypeRef]) -> String {
-    format!(
-        "{owner}#{name}({})",
-        parameters
-            .iter()
-            .map(TypeRef::render_java)
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-/// Read declarations, not imports/comments mentioning a convention. No SDK source is needed
-/// for an explicit import or a fully qualified context type.
-pub(crate) fn methods(source: &str) -> Result<BTreeSet<String>> {
-    if !source.contains("ServiceContract") || !source.contains(CONTEXT_PACKAGE) {
-        return Ok(BTreeSet::new());
+/// Probe directories for interface declarations. HTTP eligibility comes from Gateway routes.
+pub(crate) fn has_contract_methods(source: &str) -> Result<bool> {
+    if !source.contains("ServiceContract") {
+        return Ok(false);
     }
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_java::LANGUAGE.into())?;
     let tree = parser
         .parse(source, None)
-        .context("parse gateway declarations")?;
+        .context("parse contract declarations")?;
     if tree.root_node().has_error() {
-        bail!("invalid Java source while identifying gateway methods");
+        bail!("invalid Java source while probing contract directories");
     }
     let declarations = children(tree.root_node());
-    let imports = declarations
-        .iter()
-        .filter(|node| node.kind() == "import_declaration")
-        .map(|node| {
-            text(source, *node)
-                .trim_start_matches("import")
-                .trim()
-                .trim_end_matches(';')
-                .trim()
-        })
-        .filter(|name| !name.starts_with("static "))
-        .collect::<Vec<_>>();
-    let package = declarations
-        .iter()
-        .find(|node| node.kind() == "package_declaration")
-        .map(|node| {
-            text(source, *node)
-                .trim_start_matches("package")
-                .trim()
-                .trim_end_matches(';')
-                .trim()
-        });
-    let mut result = BTreeSet::new();
     for interface in declarations
         .iter()
         .filter(|node| node.kind() == "interface_declaration")
@@ -71,65 +34,17 @@ pub(crate) fn methods(source: &str) -> Result<BTreeSet<String>> {
         if !service_contract {
             continue;
         }
-        let owner = text(
-            source,
-            interface
-                .child_by_field_name("name")
-                .context("interface name missing")?,
-        );
         let body = interface
             .child_by_field_name("body")
             .context("interface body missing")?;
-        for method in children(body)
+        if children(body)
             .into_iter()
-            .filter(|node| node.kind() == "method_declaration")
+            .any(|node| node.kind() == "method_declaration")
         {
-            let name = text(
-                source,
-                method
-                    .child_by_field_name("name")
-                    .context("method name missing")?,
-            );
-            let parameters = method
-                .child_by_field_name("parameters")
-                .context("method parameters missing")?;
-            let parameters = parameter_types(source, parameters)
-                .with_context(|| format!("parse gateway parameters: {owner}#{name}"))?;
-            let Some(first) = parameters.first() else {
-                continue;
-            };
-            let response = method
-                .child_by_field_name("type")
-                .and_then(|node| parse_java_type(text(source, node)))
-                .with_context(|| format!("parse gateway return type: {owner}#{name}"))?;
-            if has_legacy_type(&response) || parameters.iter().any(has_legacy_type) {
-                continue;
-            }
-            let imported = imports
-                .iter()
-                .find(|import| import.rsplit('.').next() == Some(first.name.as_str()));
-            let qualified = imported.copied().unwrap_or(&first.name);
-            let context = if qualified.contains('.') {
-                qualified
-                    .rsplit_once('.')
-                    .is_some_and(|(package, _)| package == CONTEXT_PACKAGE)
-            } else if package == Some(CONTEXT_PACKAGE) {
-                true
-            } else {
-                if imports.contains(&format!("{CONTEXT_PACKAGE}.*").as_str()) {
-                    bail!(
-                        "cannot resolve first parameter {} of {owner}#{name} from wildcard imports; use an explicit context type import",
-                        first.name
-                    );
-                }
-                false
-            };
-            if context && first.array_depth == 0 {
-                result.insert(method_key(owner, name, &parameters));
-            }
+            return Ok(true);
         }
     }
-    Ok(result)
+    Ok(false)
 }
 
 pub(crate) fn parameter_types(source: &str, parameters: Node<'_>) -> Option<Vec<TypeRef>> {
@@ -148,10 +63,6 @@ pub(crate) fn parameter_types(source: &str, parameters: Node<'_>) -> Option<Vec<
             parse_java_type(text(source, parameter.child_by_field_name("type")?))
         })
         .collect()
-}
-
-fn has_legacy_type(value: &TypeRef) -> bool {
-    value.simple_name().starts_with("ZZOpen") || value.arguments.iter().any(has_legacy_type)
 }
 
 fn children_of_kind<'a>(node: Node<'a>, kind: &str) -> Vec<Node<'a>> {
@@ -175,38 +86,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identifies_each_method_by_first_parameter_package_not_names() {
+    fn probes_annotated_interfaces_without_a_parameter_heuristic() {
         let source = r#"
 package business;
-import com.zhuanzhuan.arch.zgateway.support.AnyContext;
-import another.EmployeeUser;
 @ServiceContract interface OrdersRemote {
-    ApiResult<String> selected(@Valid final AnyContext context, String keyword);
-    String empty(AnyContext context);
-    String qualified(com.zhuanzhuan.arch.zgateway.support.OtherContext context);
-    String internal(String keyword);
-    String wrongOrder(String keyword, AnyContext context);
-    String sameName(EmployeeUser context);
-    String wrongPackage(com.zhuanzhuan.arch.zgateway.supported.AnyContext context);
-    ZZOpenScfBaseResult<String> legacy(AnyContext context);
-    String legacyRequest(AnyContext context, List<ZZOpenRequest> request);
-    String overloaded(AnyContext context);
-    String overloaded(String keyword);
+    String selected(String keyword);
 }
-interface Internal { String ignored(AnyContext context); }
-// @ServiceContract interface Comment { String ignored(AnyContext context); }
+interface Internal { String ignored(String keyword); }
+// @ServiceContract interface Comment { String ignored(String keyword); }
 "#;
-        assert_eq!(
-            methods(source).unwrap(),
-            BTreeSet::from([
-                "OrdersRemote#selected(AnyContext,String)".to_owned(),
-                "OrdersRemote#empty(AnyContext)".to_owned(),
-                "OrdersRemote#qualified(com.zhuanzhuan.arch.zgateway.support.OtherContext)"
-                    .to_owned(),
-                "OrdersRemote#overloaded(AnyContext)".to_owned(),
-            ])
-        );
-        assert!(methods("import com.zhuanzhuan.arch.zgateway.support.*; @ServiceContract interface Remote { String read(EmployeeUser user); }")
-            .unwrap_err().to_string().contains("explicit context type import"));
+        assert!(has_contract_methods(source).unwrap());
+        assert!(!has_contract_methods("interface Internal { String ignored(); }").unwrap());
     }
 }
