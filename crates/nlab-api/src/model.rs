@@ -263,11 +263,11 @@ fn is_false(value: &bool) -> bool {
 
 impl SemanticPatch {
     pub fn has_enum_null_branch(&self) -> bool {
-        self.nullable && self.enum_fqn.is_some()
+        self.nullable && (self.enum_fqn.is_some() || self.associated_values().is_some())
     }
 
     pub fn associated_values(&self) -> Option<&[CodedValue]> {
-        if !self.primary_enum_value {
+        if !self.primary_enum_value && !self.enum_associated {
             return None;
         }
         if self.status == ProvenanceStatus::Closed && !self.values.is_empty() {

@@ -34,7 +34,7 @@ enum Command {
     #[command(
         name = "generate",
         about = "Generate frontend APIs with automatic cross-repository discovery",
-        after_long_help = "Only code-verified enum primary values generate enum definitions. Unverified comment candidates and auxiliary properties remain scalar."
+        after_long_help = "Code-backed primary enums and response-field comments covering every resolved write generate enum definitions. Unverified comments and auxiliary properties remain scalar."
     )]
     Generate(nlab_api::GenerateArgs),
     #[command(

@@ -316,7 +316,12 @@ fn enum_symbol(identity: &str) -> String {
 
 fn enum_identity(patch: &SemanticPatch) -> String {
     format!(
-        "{}#{}",
+        "{}{}#{}",
+        if patch.enum_fqn.is_none() {
+            "comment:"
+        } else {
+            ""
+        },
         patch
             .enum_fqn
             .as_deref()

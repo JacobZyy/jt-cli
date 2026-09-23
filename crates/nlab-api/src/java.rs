@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use tree_sitter::{Node, Parser};
@@ -18,6 +18,7 @@ const RESULT_WRAPPERS: &[&str] = &[
     "Future",
 ];
 pub struct JavaProject<'a> {
+    root: PathBuf,
     graph: &'a Snapshot,
     sources: BTreeMap<String, String>,
     packages: HashMap<String, String>,
@@ -60,6 +61,7 @@ impl<'a> JavaProject<'a> {
             .filter_map(|(name, ids)| (ids.len() == 1).then(|| (name, ids[0].clone())))
             .collect();
         Ok(Self {
+            root: repo.to_path_buf(),
             graph,
             sources,
             packages,
@@ -128,6 +130,10 @@ impl<'a> JavaProject<'a> {
 
     pub fn graph(&self) -> &Snapshot {
         self.graph
+    }
+
+    pub(crate) fn source_path(&self, path: &str) -> PathBuf {
+        self.graph.source_path(&self.root, path)
     }
 
     /// Resolve an explicit import even when its dependency source is not indexed locally.

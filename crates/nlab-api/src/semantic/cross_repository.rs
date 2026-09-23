@@ -345,6 +345,11 @@ impl SemanticAnalyzer<'_> {
         if visiting.len() >= 32 || !visiting.insert(visit_key.clone()) {
             return Ok(None);
         }
+        if let Some(domain) = self.database_field_domain(&class, &field_name)? {
+            visiting.remove(&visit_key);
+            self.field_domain_cache.insert(cache_key, domain.clone());
+            return Ok(Some(domain));
+        }
         let mut domain = Domain::default();
         let setter_name = format!("set{}", uppercase_first(&field_name));
         let setters = self

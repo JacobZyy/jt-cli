@@ -398,8 +398,9 @@ stale repository indexes. Ambiguous associations or independent index failures s
 Resolved repository indexes are combined with separate node/file identities. Enum extraction follows
 cross-repository requests and DTO copies. A verified same-value enum lookup or traceable DTO copy
 can associate an HTTP field with a complete enum projection without proving database write invariants.
-Such patches retain `known` status and `knownValues`; generation requires both a verified association
-and `primaryEnumValue: true`. Explicit null branches remain nullable. Conflicting projections,
+Such patches retain `known` status and `knownValues`; code-backed enum generation also requires
+`primaryEnumValue: true`. Response-field comments may generate enums when their values cover every
+resolved write and no write is unknown. Explicit null branches remain nullable. Conflicting projections,
 unresolved writes, transformed values, and unrelated objects stay open and do not create orphan enum
 files. `enumCandidate` records whether a comment candidate is verified, conflicting, unverified, or
 ignored; actual code evidence takes precedence. No AI calls are used. `init`, `discover`, and `generate` accept `--offline` to use the current checkout without Git
