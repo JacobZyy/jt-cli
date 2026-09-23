@@ -275,14 +275,14 @@ pnpm --filter @workspace/nlab-api-docs dev
 Initialize one frontend project from its real build, TypeScript, request, response-envelope, output,
 and backend RPC contract layout:
 
-Gateway entry methods are declared on `@ServiceContract` interfaces and take a first parameter
-whose type belongs to `com.zhuanzhuan.arch.zgateway.support`. Interface names need not end in
-`Facade`. Init, discovery entry selection, and generation use the same method-level rule.
-The context is excluded from the frontend request; the optional second parameter is the business
-request. Multiple business parameters are reported rather than silently selecting one. Types
-containing `ZZOpen` are excluded as legacy gateway contracts. A missing gateway route still produces
-a Pending operation. Use explicit context imports or fully qualified types; ambiguous wildcard
-imports are reported instead of guessing their package.
+The backend supplies interface directories through `backend.contractRoots` (or repeated
+`--contract-root` during init). nlab-api reads interface methods from those directories, then
+queries ZGateway before cross-repository and enum analysis. Only methods with a matching HTTP
+route enter generated contracts; an unmatched method is dropped. Gateway lookup failure stops
+generation instead of producing a pending API. The first parameter's package no longer decides
+HTTP eligibility. When a method has a `com.zhuanzhuan.arch.zgateway.support` context parameter,
+the context is excluded from the frontend request. At most one business parameter is supported.
+Offline generation requires matching routes in an existing `.nlab/contract-ir.json`.
 
 ```bash
 jt nlab-api config --runner jt --project /path/to/frontend
@@ -353,7 +353,8 @@ missing, rejects tracked changes, switches to the configured or one-run `--branc
 fast-forwards it from origin. It then runs `codegraph init` or `codegraph sync` once, reads the resulting
 SQLite index in read-only mode, parses Java with Tree-sitter, and builds one deterministic contract IR.
 Rust generates Draft OpenAPI 3.1, TypeScript DTO files, separate enum files, and API clients that reuse
-the detected request adapter. The same command then queries testserver ZGateway on a best-effort basis,
+the detected request adapter. Before building the IR, it queries testserver ZGateway and keeps only
+interface methods with matching HTTP routes. It then
 migrates business imports from the fixed previous `.nlab` snapshot, optionally generates Mock files
 when `mock.enabled` is true, promotes the stable OpenAPI snapshot, and writes one final report.
 By default it does not invoke Bun, Node.js, Orval, Python, frontend typecheck, tests, builds, or lint;
@@ -402,7 +403,8 @@ and `primaryEnumValue: true`. Explicit null branches remain nullable. Conflictin
 unresolved writes, transformed values, and unrelated objects stay open and do not create orphan enum
 files. `enumCandidate` records whether a comment candidate is verified, conflicting, unverified, or
 ignored; actual code evidence takes precedence. No AI calls are used. `init`, `discover`, and `generate` accept `--offline` to use the current checkout without Git
-network operations; offline discovery skips SIC queries and cloning; offline generation also skips Gateway queries. See
+network operations; offline discovery skips SIC queries and cloning; offline generation reuses Gateway
+routes from an existing `.nlab/contract-ir.json` matching the current backend commit. See
 [repository discovery](apps/nlab-api-docs/docs/quick-start.md#跨仓库准备情况检查) for scope and limitations.
 
 The top-level `EnumIrisable` boolean in `.nlab/nlab-api.config.json` controls TypeScript enum syntax.
@@ -443,8 +445,8 @@ use of the same backend checkout, non-generated frontend files, symlink path esc
 incomplete CodeGraph state, branch movement, ambiguous RPC operation identities, and incomplete schema
 references stop the run. A legacy bridge manifest marked
 `service-paths` permits its owned generated files to be replaced during the first Facade-layout
-generation. Missing enums, external value sources, Gateway errors, missing routes, removed unused
-operations, and Mock being disabled do not stop generation; they remain in
+generation. Gateway errors always stop generation; unmatched routes stop it when no methods remain. Missing enums,
+external value sources, removed unused operations, and Mock being disabled do not stop generation; they remain in
 `.nlab/generate-report.json`. stdout contains one final JSON result. stderr contains only stage and
 percentage progress events outside a TTY; a TTY shows one progress bar. The overall deadline defaults
 to 1200 seconds.

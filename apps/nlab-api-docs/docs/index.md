@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: Gateway RPC contracts
-    details: 按 RPC 方法首参是否来自 com.zhuanzhuan.arch.zgateway.support 包识别入口，不依赖 Facade 后缀；未配置网关的接口保留 Pending。
+    details: 从后端接口目录读取方法，先用 ZGateway 路由确认 HTTP 路径；未匹配的方法不进入生成流程。
   - title: One Contract IR
     details: 同一份契约中间表示并行生成 OpenAPI、API、types 与 enums，避免多段 codegen 反复猜测语义。
   - title: Conservative semantics

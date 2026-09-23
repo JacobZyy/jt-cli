@@ -1845,7 +1845,20 @@ mod tests {
     use super::*;
     use crate::graph::{GraphEdge, GraphNode, test_snapshot};
     use crate::model::TargetIdentity;
+    use crate::routes::HttpRouteKey;
     use std::fs;
+
+    pub(super) fn gateway_route(interface_name: &str, method_name: &str) -> Vec<HttpRouteKey> {
+        vec![HttpRouteKey {
+            interface_name: interface_name.to_owned(),
+            method_name: method_name.to_owned(),
+            signature: None,
+            method: "POST".to_owned(),
+            path: "/api/query".to_owned(),
+            host: None,
+            source: crate::model::RouteSource::Zgateway,
+        }]
+    }
 
     #[test]
     fn literal_constants_preserve_enum_membership_checks() {
@@ -2282,7 +2295,10 @@ mod tests {
             codegraph_extraction_version: "test".into(),
         };
         let (mut operations, schemas) = project
-            .build_contracts(&target, &["contract/src/main/java/p/contract".into()])
+            .build_contracts(
+                &["contract/src/main/java/p/contract".into()],
+                &gateway_route("p.contract.IFacade", "query"),
+            )
             .unwrap();
         SemanticAnalyzer::new(&project)
             .enrich(&mut operations, &schemas)
@@ -2717,15 +2733,11 @@ mod tests {
             ],
         );
         let project = JavaProject::load(repo.path(), &graph).unwrap();
-        let identity = TargetIdentity {
-            app_name: "demo".to_owned(),
-            branch: "feature".to_owned(),
-            commit: "deadbeef".to_owned(),
-            codegraph_version: "test".to_owned(),
-            codegraph_extraction_version: "test".to_owned(),
-        };
         let (mut operations, schemas) = project
-            .build_contracts(&identity, &["contract/src/main/java/p".to_owned()])
+            .build_contracts(
+                &["contract/src/main/java/p".to_owned()],
+                &gateway_route("p.contract.IFacade", "query"),
+            )
             .unwrap();
         SemanticAnalyzer::new(&project)
             .enrich(&mut operations, &schemas)
@@ -2761,7 +2773,10 @@ mod tests {
         );
         let project = JavaProject::load(repo.path(), &no_implementation).unwrap();
         let (mut operations, schemas) = project
-            .build_contracts(&identity, &["contract/src/main/java/p".to_owned()])
+            .build_contracts(
+                &["contract/src/main/java/p".to_owned()],
+                &gateway_route("p.contract.IFacade", "query"),
+            )
             .unwrap();
         SemanticAnalyzer::new(&project)
             .enrich(&mut operations, &schemas)

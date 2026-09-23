@@ -9,7 +9,7 @@ nlab-api 解决的不是“把 Java 类型翻译成 TypeScript”这一件小事
 - 接口属于哪个 Facade operation。
 - 嵌套 DTO、泛型、继承与内部类的准确身份。
 - 字段在当前 operation 下可能出现的 wire value。
-- API 实际路由；内网不可用时的明确占位状态。
+- 网关确认的 API 实际路由。
 - 生成文件的所有权、迁移关系与失败报告。
 
 只生成一个 OpenAPI 文件，再交给多段工具继续推导，会逐步丢失这些信息。nlab-api 因此把契约抽取、语义补全和前端产物生成放进同一条确定性流程。
@@ -118,11 +118,11 @@ nlab-api 先构建一份 operation-scoped Contract IR，再从它并行生成：
 
 这不是 `Rust -> OpenAPI -> Orval -> TypeScript` 流水线。OpenAPI、API、types 和 enums 是同一份 IR 的兄弟产物，不互相反推。
 
-## 外部能力只能是可降级阶段
+## 网关路径决定接口入口
 
-ZGateway 依赖公司网络。查询失败时，核心契约仍然有效。nlab-api 保留确定性 placeholder path，并在报告中标记路由状态，不伪造真实路径，也不阻断类型生成。
+后端提供接口目录，nlab-api 先列出目录中的方法，再用 ZGateway 路由筛选。没有对应 HTTP 路径的方法不进入契约和后续枚举分析；查询失败时停止生成。首次生成因此需要可用的网关查询，离线运行只能复用与当前后端提交匹配的既有路由。
 
-相同原则适用于：
+其他阶段仍保持明确边界：
 
 - Mock 默认关闭。
 - migration 只迁移唯一、可证明的引用。

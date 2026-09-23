@@ -30,7 +30,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use java::JavaProject;
-use model::{ContractIr, GenerateResult, ProvenanceStatus, RouteStatus, TargetIdentity};
+use model::{ContractIr, GenerateResult, ProvenanceStatus, TargetIdentity};
 use output::OutputLock;
 use semantic::SemanticAnalyzer;
 
@@ -147,11 +147,12 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     let repositories_root =
         discover::resolve_root(&output_dir, args.repositories_root.as_deref(), &target.root)?;
     discover::save_root(&output_dir, &repositories_root)?;
-    reporter.phase(10, "Discover 关联仓库并同步 CodeGraph");
+    reporter.phase(10, "读取接口目录、查询 Gateway 并 Discover 关联仓库");
     ensure_before_deadline(deadline)?;
     let discover::DiscoveryRun {
         graph,
         report: discovery_report,
+        routes,
     } = discover::prepare(&output_dir, &repositories_root, args.offline, deadline)?;
     ensure_before_deadline(deadline)?;
     let legacy = if config.migration.enabled {
@@ -171,11 +172,9 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         codegraph_extraction_version: graph.extraction_version.clone(),
     };
     let (mut operations, mut schemas) =
-        project.build_contracts(&identity, &config.backend.contract_roots)?;
+        project.build_contracts(&config.backend.contract_roots, &routes)?;
     if operations.is_empty() {
-        bail!(
-            "no gateway operations found: first parameter must come from com.zhuanzhuan.arch.zgateway.support"
-        );
+        bail!("no configured gateway routes matched interfaces in contractRoots");
     }
 
     reporter.phase(50, "分析枚举与注释");
@@ -183,7 +182,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     let mut semantic = SemanticAnalyzer::new(&project);
     semantic.enrich_linked_enums(&mut schemas)?;
     semantic.enrich(&mut operations, &schemas)?;
-    let mut ir = ContractIr {
+    let ir = ContractIr {
         target: identity,
         operations,
         schemas,
@@ -193,37 +192,6 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         "level": "warning", "stage": "discovery", "code": "UNAVAILABLE_SERVICE",
         "service": service, "message": "Source unavailable in this run; related field domains remain open. Discovery retries on the next online run."
     })));
-
-    reporter.phase(60, "补全 Gateway 路由");
-    let route_summary = if config.gateway.enabled && !args.offline {
-        routes::apply_best_effort(&mut ir, Path::new("zzcli"))
-    } else {
-        routes::RouteSummary {
-            replaced: 0,
-            placeholders: ir.operations.len(),
-            missing: Vec::new(),
-            warning: None,
-        }
-    };
-    if let Some(warning) = &route_summary.warning {
-        diagnostics.push(json!({
-            "level": "warning",
-            "stage": "routes",
-            "code": "GATEWAY_QUERY_FAILED",
-            "message": warning,
-            "fallback": "placeholder"
-        }));
-    } else {
-        diagnostics.extend(route_summary.missing.iter().map(|operation_key| {
-            json!({
-                "level": "warning",
-                "stage": "routes",
-                "code": "GATEWAY_ROUTE_NOT_FOUND",
-                "operationKey": operation_key,
-                "fallback": "placeholder"
-            })
-        }));
-    }
 
     reporter.phase(70, "生成前端代码");
     ensure_before_deadline(deadline)?;
@@ -347,11 +315,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         .flat_map(|operation| &operation.semantic_patches)
         .filter(|patch| patch.status == ProvenanceStatus::Closed)
         .count();
-    let placeholders = ir
-        .operations
-        .iter()
-        .filter(|operation| operation.route.status == RouteStatus::Placeholder)
-        .count();
+    let placeholders = 0;
     let associated_enum_patches = ir
         .operations
         .iter()
@@ -383,9 +347,9 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
                 "hooks": after_generate,
             },
             "routes": {
-                "status": if route_summary.warning.is_some() || route_summary.placeholders > 0 { "partial" } else { "complete" },
-                "replaced": route_summary.replaced,
-                "placeholder": route_summary.placeholders,
+                "status": "complete",
+                "replaced": ir.operations.len(),
+                "placeholder": placeholders,
             },
             "migration": migration,
             "mock": mock_result.as_ref().map_or_else(
@@ -415,7 +379,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
         contracts: ir.operations.len(),
         paths: openapi.paths,
         schemas: openapi.schemas,
-        routes_replaced: route_summary.replaced,
+        routes_replaced: ir.operations.len(),
         placeholders,
         semantic_patches,
         closed_enum_patches,
