@@ -7,8 +7,10 @@ use tree_sitter::{Node, Parser};
 
 use super::coded_values;
 use super::graph::{GraphNode, Snapshot};
-use super::model::{Field, HttpRoute, Operation, RouteStatus, Schema, TypeRef};
-use super::routes::HttpRouteKey;
+use super::model::{
+    Field, HttpRoute, InputLocation, Operation, RequestArgument, RouteStatus, Schema, TypeRef,
+};
+use super::routes::{BindingSource, HttpRouteKey};
 
 const RESULT_WRAPPERS: &[&str] = &[
     "ApiResult",
@@ -233,41 +235,127 @@ impl<'a> JavaProject<'a> {
     ) -> Result<Operation> {
         let (mut response, parameters) = parse_method_signature(&method.signature)
             .with_context(|| format!("parse operation signature: {}", method.qualified_name))?;
+        let names = parameter_names(&method.signature)
+            .filter(|names| names.len() == parameters.len())
+            .with_context(|| {
+                format!("parse operation parameter names: {}", method.qualified_name)
+            })?;
         self.qualify_type(&method.file_path, &facade.qualified_name, &mut response);
         let response = unwrap_result(response);
-        let business = if parameters
-            .first()
-            .map(|first| {
-                self.is_context_parameter(&method.file_path, &facade.qualified_name, first)
-            })
-            .transpose()?
-            .unwrap_or(false)
-        {
-            &parameters[1..]
-        } else {
-            &parameters[..]
-        };
-        let mut request = match business {
-            [] => None,
-            [request] => Some(request.clone()),
-            _ => bail!(
-                "gateway operation has multiple business parameters: {}",
-                method.qualified_name
-            ),
-        };
-        if let Some(request) = &mut request {
-            self.qualify_type(&method.file_path, &facade.qualified_name, request);
+        let mut bindings = BTreeMap::new();
+        for binding in route.request_bindings.iter().flatten() {
+            if binding.index >= parameters.len() {
+                bail!(
+                    "gateway mapping argument {} exceeds contract arity: {}",
+                    binding.index,
+                    method.qualified_name
+                );
+            }
+            if bindings.insert(binding.index, &binding.source).is_some() {
+                bail!(
+                    "duplicate gateway mapping for argument {}: {}",
+                    binding.index,
+                    method.qualified_name
+                );
+            }
         }
+        let mut request_arguments = Vec::new();
+        for (index, (parameter, java_name)) in parameters.iter().zip(names).enumerate() {
+            let source = bindings.get(&index).copied();
+            if matches!(source, Some(BindingSource::Context))
+                || (source.is_none()
+                    && self.is_context_parameter(
+                        &method.file_path,
+                        &facade.qualified_name,
+                        parameter,
+                    )?)
+            {
+                continue;
+            }
+            let (location, name) = match source {
+                Some(BindingSource::Input(location, name)) => (*location, name.clone()),
+                Some(BindingSource::Unsupported(source)) => {
+                    bail!(
+                        "unsupported gateway mapping {source} for argument {index}: {}",
+                        method.qualified_name
+                    )
+                }
+                Some(BindingSource::Context) => unreachable!(),
+                None if route.request_bindings.is_some() => {
+                    bail!(
+                        "gateway mapping missing for argument {index}: {}",
+                        method.qualified_name
+                    )
+                }
+                None => (
+                    if route.method.eq_ignore_ascii_case("GET") {
+                        InputLocation::Query
+                    } else {
+                        InputLocation::Body
+                    },
+                    None,
+                ),
+            };
+            let mut java_type = parameter.clone();
+            self.qualify_type(&method.file_path, &facade.qualified_name, &mut java_type);
+            request_arguments.push(RequestArgument {
+                index,
+                java_name,
+                name,
+                java_type,
+                location,
+            });
+        }
+        if request_arguments.len() > 1 {
+            for argument in &mut request_arguments {
+                if argument.name.is_none() && route.request_bindings.is_none() {
+                    argument.name = Some(argument.java_name.clone());
+                }
+                if argument.name.is_none() {
+                    bail!(
+                        "gateway mapping lacks field name for argument {}: {}",
+                        argument.index,
+                        method.qualified_name
+                    );
+                }
+            }
+        } else if let Some(argument) = request_arguments.first_mut()
+            && argument.name.is_none()
+            && route.request_bindings.is_none()
+            && argument.location == InputLocation::Query
+            && self
+                .root_schema(
+                    &method.file_path,
+                    &facade.qualified_name,
+                    &argument.java_type,
+                )
+                .is_none()
+        {
+            argument.name = Some(argument.java_name.clone());
+        }
+        let mut field_names = HashSet::new();
+        for argument in &request_arguments {
+            if let Some(name) = &argument.name
+                && !field_names.insert(name)
+            {
+                bail!(
+                    "duplicate frontend request field {name}: {}",
+                    method.qualified_name
+                );
+            }
+        }
+        let request =
+            (request_arguments.len() == 1).then(|| request_arguments[0].java_type.clone());
         let request_schema = request
             .as_ref()
             .and_then(|value| self.root_schema(&method.file_path, &facade.qualified_name, value));
         let response_schema =
             self.root_schema(&method.file_path, &facade.qualified_name, &response);
-        if let Some(request) = &request {
+        for argument in &request_arguments {
             self.collect_type_schemas(
                 &method.file_path,
                 &facade.qualified_name,
-                request,
+                &argument.java_type,
                 schemas,
                 &mut HashSet::new(),
             )?;
@@ -294,6 +382,7 @@ impl<'a> JavaProject<'a> {
                 .filter(|value| !value.trim().is_empty()),
             contract_source: method.file_path.clone(),
             request,
+            request_arguments,
             response,
             request_schema,
             response_schema,
@@ -725,6 +814,15 @@ pub(crate) fn parse_method_signature(signature: &str) -> Option<(TypeRef, Vec<Ty
     Some((response, parameters))
 }
 
+fn parameter_names(signature: &str) -> Option<Vec<String>> {
+    let open = signature.find('(')?;
+    let close = signature.rfind(')')?;
+    split_top_level(&signature[open + 1..close], ',')
+        .into_iter()
+        .map(|parameter| parameter.split_whitespace().last().map(str::to_owned))
+        .collect()
+}
+
 fn unwrap_result(mut value: TypeRef) -> TypeRef {
     while RESULT_WRAPPERS.contains(&value.simple_name()) && value.arguments.len() == 1 {
         value = value.arguments.remove(0);
@@ -856,7 +954,7 @@ mod tests {
         use crate::graph::{GraphEdge, test_snapshot};
         let repo = tempfile::tempdir().unwrap();
         fs::create_dir(repo.path().join("rpc")).unwrap();
-        fs::write(repo.path().join("rpc/OrdersRemote.java"), "package p;\nimport com.zhuanzhuan.arch.zgateway.support.CustomContext;\n@ServiceContract interface OrdersRemote {\nPayload save(@Valid final CustomContext context, Payload request);\nString count(CustomContext context);\nInternal noContext(Internal request);\nString overloaded(String request);\nString overloaded(Internal request);\nString unmapped();\n}\n").unwrap();
+        fs::write(repo.path().join("rpc/OrdersRemote.java"), "package p;\nimport com.zhuanzhuan.arch.zgateway.support.CustomContext;\n@ServiceContract interface OrdersRemote {\nPayload save(@Valid final CustomContext context, Payload request);\nString count(CustomContext context);\nInternal noContext(Internal request);\nString overloaded(String request);\nString overloaded(Internal request);\nString brandModelSearch(CustomContext context, Integer cateId, Integer brandId, Integer cateType);\nString getCommonEnum(String type);\nString unmapped();\n}\n").unwrap();
         fs::write(
             repo.path().join("Payload.java"),
             "package p;\nclass Payload { String value; }",
@@ -915,6 +1013,22 @@ mod tests {
                     "p::OrdersRemote::noContext",
                     "rpc/OrdersRemote.java",
                     "Internal (Internal request)",
+                ),
+                node(
+                    "brand-search",
+                    "method",
+                    "brandModelSearch",
+                    "p::OrdersRemote::brandModelSearch",
+                    "rpc/OrdersRemote.java",
+                    "String (CustomContext context, Integer cateId, Integer brandId, Integer cateType)",
+                ),
+                node(
+                    "common-enum",
+                    "method",
+                    "getCommonEnum",
+                    "p::OrdersRemote::getCommonEnum",
+                    "rpc/OrdersRemote.java",
+                    "String (String type)",
                 ),
                 node(
                     "unmapped",
@@ -977,6 +1091,8 @@ mod tests {
                 ("interface", "save"),
                 ("interface", "count"),
                 ("interface", "no-context"),
+                ("interface", "brand-search"),
+                ("interface", "common-enum"),
                 ("interface", "unmapped"),
                 ("interface", "overloaded-string"),
                 ("interface", "overloaded-internal"),
@@ -1004,6 +1120,7 @@ mod tests {
                 path: format!("/api/{method}"),
                 host: None,
                 source: crate::model::RouteSource::Zgateway,
+                request_bindings: None,
             })
             .to_vec();
         routes.push(HttpRouteKey {
@@ -1014,6 +1131,7 @@ mod tests {
             path: "/api/overloaded".to_owned(),
             host: None,
             source: crate::model::RouteSource::Zgateway,
+            request_bindings: None,
         });
         let (operations, schemas) = project.build_contracts(&["rpc".into()], &routes).unwrap();
         assert_eq!(
@@ -1035,6 +1153,95 @@ mod tests {
             operations
                 .iter()
                 .all(|operation| operation.route.status == RouteStatus::Resolved)
+        );
+        routes.push(HttpRouteKey {
+            interface_name: "p.OrdersRemote".into(),
+            method_name: "brandModelSearch".into(),
+            signature: None,
+            method: "GET".into(),
+            path: "/api/brandModelSearch".into(),
+            host: None,
+            source: crate::model::RouteSource::Zgateway,
+            request_bindings: Some(vec![
+                crate::routes::RequestBinding {
+                    index: 0,
+                    source: BindingSource::Context,
+                },
+                crate::routes::RequestBinding {
+                    index: 1,
+                    source: BindingSource::Input(InputLocation::Query, Some("cateId".into())),
+                },
+                crate::routes::RequestBinding {
+                    index: 2,
+                    source: BindingSource::Input(InputLocation::Query, Some("brandId".into())),
+                },
+                crate::routes::RequestBinding {
+                    index: 3,
+                    source: BindingSource::Input(InputLocation::Query, Some("cateType".into())),
+                },
+            ]),
+        });
+        routes.push(HttpRouteKey {
+            interface_name: "p.OrdersRemote".into(),
+            method_name: "getCommonEnum".into(),
+            signature: None,
+            method: "GET".into(),
+            path: "/api/commenums".into(),
+            host: None,
+            source: crate::model::RouteSource::Zgateway,
+            request_bindings: Some(vec![crate::routes::RequestBinding {
+                index: 0,
+                source: BindingSource::Input(InputLocation::Query, Some("code".into())),
+            }]),
+        });
+        let (operations, _) = project.build_contracts(&["rpc".into()], &routes).unwrap();
+        let search = operations
+            .iter()
+            .find(|operation| operation.method_name == "brandModelSearch")
+            .unwrap();
+        assert!(search.request.is_none());
+        assert_eq!(
+            search
+                .request_arguments
+                .iter()
+                .map(|argument| argument.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("cateId"), Some("brandId"), Some("cateType")]
+        );
+        assert_eq!(
+            search
+                .request_arguments
+                .iter()
+                .map(|argument| argument.index)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        let enumeration = operations
+            .iter()
+            .find(|operation| operation.method_name == "getCommonEnum")
+            .unwrap();
+        assert_eq!(enumeration.request_arguments[0].java_name, "type");
+        assert_eq!(
+            enumeration.request_arguments[0].name.as_deref(),
+            Some("code")
+        );
+        routes
+            .iter_mut()
+            .find(|route| route.method_name == "brandModelSearch")
+            .unwrap()
+            .request_bindings
+            .as_mut()
+            .unwrap()
+            .push(crate::routes::RequestBinding {
+                index: 4,
+                source: BindingSource::Input(InputLocation::Query, Some("extra".into())),
+            });
+        assert!(
+            project
+                .build_contracts(&["rpc".into()], &routes)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds contract arity")
         );
     }
 

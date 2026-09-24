@@ -7,7 +7,7 @@ use clap::Args;
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::naming::upper_camel;
 
@@ -662,6 +662,18 @@ fn schema_type_candidates(old: &Value, new: &Value) -> BTreeMap<String, BTreeSet
                     );
                 }
             }
+            if let (Some(old_query), Some(new_query)) =
+                (query_schema(old_operation), query_schema(new_operation))
+            {
+                collect_schema_pairs(
+                    &old_query,
+                    &new_query,
+                    old,
+                    new,
+                    &mut inferred,
+                    &mut visiting,
+                );
+            }
         }
     }
     inferred
@@ -669,6 +681,21 @@ fn schema_type_candidates(old: &Value, new: &Value) -> BTreeMap<String, BTreeSet
 
 fn request_schema(operation: &Value) -> Option<&Value> {
     operation.pointer("/requestBody/content/application~1json/schema")
+}
+
+fn query_schema(operation: &Value) -> Option<Value> {
+    let properties = operation["parameters"]
+        .as_array()?
+        .iter()
+        .filter(|parameter| parameter["in"] == "query")
+        .filter_map(|parameter| {
+            Some((
+                parameter["name"].as_str()?.to_owned(),
+                parameter.get("schema")?.clone(),
+            ))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    (!properties.is_empty()).then(|| json!({"type": "object", "properties": properties}))
 }
 
 fn response_schema(operation: &Value) -> Option<&Value> {

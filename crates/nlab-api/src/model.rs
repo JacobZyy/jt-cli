@@ -31,6 +31,8 @@ pub struct Operation {
     pub description: Option<String>,
     pub contract_source: String,
     pub request: Option<TypeRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_arguments: Vec<RequestArgument>,
     pub response: TypeRef,
     pub request_schema: Option<String>,
     pub response_schema: Option<String>,
@@ -38,6 +40,23 @@ pub struct Operation {
     pub route: HttpRoute,
     pub semantic_patches: Vec<SemanticPatch>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestArgument {
+    pub index: usize,
+    pub java_name: String,
+    pub name: Option<String>,
+    pub java_type: TypeRef,
+    pub location: InputLocation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputLocation {
+    Query,
+    Body,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -302,10 +321,15 @@ pub enum FieldSource {
 }
 
 impl FieldSource {
-    pub fn root(self, operation: &Operation) -> Option<&TypeRef> {
+    pub fn roots(self, operation: &Operation) -> Vec<&TypeRef> {
         match self {
-            Self::Request => operation.request.as_ref(),
-            Self::Response => Some(&operation.response),
+            Self::Request if !operation.request_arguments.is_empty() => operation
+                .request_arguments
+                .iter()
+                .map(|argument| &argument.java_type)
+                .collect(),
+            Self::Request => operation.request.iter().collect(),
+            Self::Response => vec![&operation.response],
         }
     }
 

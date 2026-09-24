@@ -886,6 +886,7 @@ mod tests {
             description: None,
             contract_source: "Writer.java".to_owned(),
             request: None,
+            request_arguments: Vec::new(),
             response: TypeRef {
                 name: "p.DTO".to_owned(),
                 arguments: Vec::new(),

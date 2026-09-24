@@ -121,6 +121,7 @@ mod tests {
             description: None,
             contract_source: source.to_owned(),
             request: None,
+            request_arguments: Vec::new(),
             response: TypeRef {
                 name: "void".to_owned(),
                 arguments: vec![],

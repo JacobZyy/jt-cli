@@ -176,6 +176,11 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 10. 执行可证明的 migration；按配置生成 Mock。
 11. 原子提升产物并写入报告。
 
+ZGateway 路由决定 HTTP 方法与路径。其 `requestMappingConfigs` 按 `$.argsN` 对应 Java 第 N 个参数：
+`$.request.singleValueQueryParams.<name>` 生成 query 字段，`$.bizContext.jsonRequestBody.<name>`
+生成 body 字段；完整 query/body 映射保留 DTO 结构，`$.bizContext` 上下文不要求前端传入。
+没有映射配置时才回退到 Java 参数名。业务参数数量不限；无法识别的映射会明确报错，避免生成错误请求。
+
 核心产物：
 
 ```text

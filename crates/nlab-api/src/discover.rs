@@ -180,6 +180,7 @@ fn entry_routes() -> Vec<HttpRouteKey> {
         path: "/entry/run".to_owned(),
         host: None,
         source: crate::model::RouteSource::Zgateway,
+        request_bindings: None,
     }]
 }
 
