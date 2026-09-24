@@ -6,7 +6,8 @@ use anyhow::{Context, Result, bail};
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, nearest_usage_directory, type_output_path};
 use super::model::{
-    CodedValue, ContractIr, FieldSource, Operation, Schema, SemanticPatch, TypeRef, WireValue,
+    CodedValue, ContractIr, FieldSource, InputLocation, Operation, Schema, SemanticPatch, TypeRef,
+    WireValue,
 };
 use super::naming::{
     fqn_seed, lower_camel, shortest_unique_names_avoiding, upper_camel, without_enum_suffix,
@@ -510,20 +511,50 @@ fn render_api_file(
         let request_aliases = operation_aliases
             .get(&FieldSource::Request.operation_key(operation))
             .unwrap_or(&empty_aliases);
-        let request = operation.request.as_ref().map(|request| {
-            let mut request_imports = BTreeMap::<String, BTreeSet<String>>::new();
+        let request = if operation.request_arguments.is_empty() {
+            operation.request.as_ref().map(|request| {
+                let type_name = type_expression(
+                    request,
+                    &current,
+                    base_targets,
+                    request_aliases,
+                    &mut imports,
+                    config,
+                );
+                (lower_camel(request.simple_name()), type_name)
+            })
+        } else if let [argument] = operation.request_arguments.as_slice()
+            && argument.name.is_none()
+        {
             let type_name = type_expression(
-                request,
+                &argument.java_type,
                 &current,
                 base_targets,
                 request_aliases,
-                &mut request_imports,
+                &mut imports,
                 config,
             );
-            merge_imports(&mut imports, request_imports);
-            let parameter = lower_camel(request.simple_name());
-            (parameter, type_name)
-        });
+            Some((lower_camel(argument.java_type.simple_name()), type_name))
+        } else {
+            let fields = operation
+                .request_arguments
+                .iter()
+                .map(|argument| {
+                    let name = argument.name.as_deref().expect("named request argument");
+                    let kind = type_expression(
+                        &argument.java_type,
+                        &current,
+                        base_targets,
+                        request_aliases,
+                        &mut imports,
+                        config,
+                    );
+                    format!("{}?: {kind}", safe_property(name))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            Some(("request".to_owned(), format!("{{ {fields} }}")))
+        };
         if let Some(description) = &operation.description {
             bodies.push_str(&render_doc(description, ""));
         }
@@ -541,15 +572,54 @@ fn render_api_file(
                 )
             },
         );
-        let payload = request.as_ref().map_or_else(String::new, |(parameter, _)| {
-            if operation.route.method.eq_ignore_ascii_case("GET") {
-                format!("\n      params: {parameter},")
-            } else {
-                format!(
-                    "\n      headers: {{ 'Content-Type': 'application/json' }},\n      data: {parameter},"
-                )
+        let payload = if operation.request_arguments.is_empty() {
+            request.as_ref().map_or_else(String::new, |(parameter, _)| {
+                if operation.route.method.eq_ignore_ascii_case("GET") {
+                    format!("\n      params: {parameter},")
+                } else {
+                    format!("\n      headers: {{ 'Content-Type': 'application/json' }},\n      data: {parameter},")
+                }
+            })
+        } else {
+            let arguments = &operation.request_arguments;
+            let direct = arguments.len() == 1 && arguments[0].name.is_none();
+            let parameter = &request.as_ref().expect("request argument").0;
+            let mut payload = String::new();
+            for (location, property) in [
+                (InputLocation::Query, "params"),
+                (InputLocation::Body, "data"),
+            ] {
+                let selected = arguments
+                    .iter()
+                    .filter(|argument| argument.location == location)
+                    .collect::<Vec<_>>();
+                if selected.is_empty() {
+                    continue;
+                }
+                if location == InputLocation::Body {
+                    payload.push_str("\n      headers: { 'Content-Type': 'application/json' },");
+                }
+                let value = if direct || selected.len() == arguments.len() {
+                    parameter.clone()
+                } else {
+                    let fields = selected
+                        .iter()
+                        .map(|argument| {
+                            let name = argument.name.as_deref().expect("named request argument");
+                            format!(
+                                "{}: {parameter}?.[{}]",
+                                safe_property(name),
+                                ts_string(name)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{{ {fields} }}")
+                };
+                payload.push_str(&format!("\n      {property}: {value},"));
             }
-        });
+            payload
+        };
         bodies.push_str(&format!(
             "export function {export_name}(\n  {parameters},\n): Promise<{}> {{\n  return {}<{}>(\n    {{\n      url: API_URLS.{export_name},\n      method: {},{payload}\n    }},\n    options,\n  );\n}}\n\n",
             response,
@@ -702,15 +772,6 @@ fn render_imports(imports: BTreeMap<String, BTreeSet<String>>) -> String {
             )
         })
         .collect()
-}
-
-fn merge_imports(
-    target: &mut BTreeMap<String, BTreeSet<String>>,
-    source: BTreeMap<String, BTreeSet<String>>,
-) {
-    for (path, names) in source {
-        target.entry(path).or_default().extend(names);
-    }
 }
 
 fn render_doc(value: &str, indent: &str) -> String {
@@ -887,6 +948,134 @@ pub(crate) mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn gateway_mapped_arguments_generate_named_query_requests() {
+        use serde_json::{Value, json};
+
+        let kind = |name: &str| json!({"name": name, "arguments": [], "arrayDepth": 0});
+        let operation = |method: &str, path: &str, request: Value, arguments: Value| {
+            json!({
+                "key": format!("IAdminCommonFacade#{method}"),
+                "facadeName": "IAdminCommonFacade",
+                "facadeFqn": "p.contract.IAdminCommonFacade",
+                "methodName": method,
+                "signature": "String ()",
+                "description": null,
+                "contractSource": "contract/src/main/java/p/contract/IAdminCommonFacade.java",
+                "request": request,
+                "requestArguments": arguments,
+                "response": kind("String"),
+                "requestSchema": null,
+                "responseSchema": null,
+                "service": null,
+                "route": {"status": "resolved", "source": "zgateway", "method": "GET", "path": path, "host": null},
+                "semanticPatches": [],
+                "warnings": []
+            })
+        };
+        let argument = |index: usize, java_name: &str, name: &str, ty: &str| {
+            json!({
+                "index": index, "javaName": java_name, "name": name,
+                "javaType": kind(ty), "location": "query"
+            })
+        };
+        let ir: ContractIr = serde_json::from_value(json!({
+            "target": {"appName": "app", "branch": "feature", "commit": "abc", "codegraphVersion": "1", "codegraphExtractionVersion": "1"},
+            "operations": [
+                operation("brandModelSearch", "/api/brandModelSearch", Value::Null, json!([
+                    argument(0, "cateId", "cateId", "Integer"),
+                    argument(1, "brandId", "brandId", "Integer"),
+                    argument(2, "cateType", "cateType", "Integer")
+                ])),
+                operation("getCommonEnum", "/api/commenums", kind("String"), json!([
+                    argument(0, "type", "code", "String")
+                ]))
+            ],
+            "schemas": {}
+        })).unwrap();
+
+        let generated = generate(&ir, &config()).unwrap();
+        let api = generated
+            .files
+            .values()
+            .find(|source| source.contains("export function brandModelSearch("))
+            .unwrap();
+        assert!(api.contains("request?: { cateId?: number; brandId?: number; cateType?: number }"));
+        assert!(api.contains("export function getCommonEnum(\n  request?: { code?: string }"));
+        assert!(api.contains("params: request,"));
+        let openapi = super::super::openapi::generate(&ir, &config()).unwrap();
+        let document: Value = serde_json::from_str(&openapi.source).unwrap();
+        let search = &document["paths"]["/api/brandModelSearch"]["get"];
+        assert_eq!(
+            search["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|parameter| parameter["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["cateId", "brandId", "cateType"]
+        );
+        assert_eq!(search["parameters"][0]["schema"]["type"], "number");
+        assert!(search.get("requestBody").is_none());
+        assert_eq!(
+            document["paths"]["/api/commenums"]["get"]["parameters"][0]["name"],
+            "code"
+        );
+    }
+
+    #[test]
+    fn multiple_body_arguments_keep_nested_request_types() {
+        use serde_json::{Value, json};
+
+        let kind = |name: &str| json!({"name": name, "arguments": [], "arrayDepth": 0});
+        let ir: ContractIr = serde_json::from_value(json!({
+            "target": {"appName": "app", "branch": "feature", "commit": "abc", "codegraphVersion": "1", "codegraphExtractionVersion": "1"},
+            "operations": [{
+                "key": "IFacade#submit", "facadeName": "IFacade", "facadeFqn": "p.contract.IFacade",
+                "methodName": "submit", "signature": "String (Payload payload, Integer mode)",
+                "description": null,
+                "contractSource": "contract/src/main/java/p/contract/IFacade.java",
+                "request": null,
+                "requestArguments": [
+                    {"index": 0, "javaName": "payload", "name": "payload", "javaType": kind("p.Payload"), "location": "body"},
+                    {"index": 1, "javaName": "mode", "name": "mode", "javaType": kind("Integer"), "location": "body"}
+                ],
+                "response": kind("String"), "requestSchema": null, "responseSchema": null,
+                "service": null,
+                "route": {"status": "resolved", "source": "zgateway", "method": "POST", "path": "/submit", "host": null},
+                "semanticPatches": [], "warnings": []
+            }],
+            "schemas": {"p.Payload": {
+                "fqn": "p.Payload", "name": "Payload", "sourcePath": "Payload.java", "description": null,
+                "fields": [{"name": "value", "javaType": kind("String"), "optional": false, "description": null, "declaredValues": null}]
+            }}
+        })).unwrap();
+
+        let generated = generate(&ir, &config()).unwrap();
+        let api = generated
+            .files
+            .values()
+            .find(|source| source.contains("export function submit("))
+            .unwrap();
+        assert!(api.contains("request?: { payload?: Payload; mode?: number }"));
+        assert!(api.contains("data: request,"));
+        assert!(
+            generated
+                .files
+                .values()
+                .any(|source| source.contains("export interface Payload {\n  value?: string;"))
+        );
+        let openapi = super::super::openapi::generate(&ir, &config()).unwrap();
+        let document: Value = serde_json::from_str(&openapi.source).unwrap();
+        let request = &document["paths"]["/submit"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+        assert_eq!(
+            request["properties"]["payload"]["$ref"],
+            "#/components/schemas/Payload"
+        );
+        assert_eq!(request["properties"]["mode"]["type"], "number");
     }
 
     #[test]

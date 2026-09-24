@@ -1865,6 +1865,7 @@ mod tests {
             path: "/api/query".to_owned(),
             host: None,
             source: crate::model::RouteSource::Zgateway,
+            request_bindings: None,
         }]
     }
 

@@ -6,8 +6,8 @@ use serde_json::{Map, Value, json};
 use super::config::ProjectConfig;
 use super::layout::{api_output_path, join_path, type_output_path};
 use super::model::{
-    CodedValue, ContractIr, FieldSource, Operation, RouteSource, RouteStatus, Schema,
-    SemanticPatch, TypeRef, WireValue,
+    CodedValue, ContractIr, FieldSource, InputLocation, Operation, RouteSource, RouteStatus,
+    Schema, SemanticPatch, TypeRef, WireValue,
 };
 use super::naming::{
     fqn_seed, shortest_unique_names, shortest_unique_names_avoiding, without_interface_prefix,
@@ -257,23 +257,82 @@ fn operation_object(
             "x-nlab-request-type".to_owned(),
             json!(request.render_java()),
         );
+    }
+    let mut query = Vec::new();
+    let mut body = None;
+    if operation.request_arguments.is_empty() {
+        body = operation.request.as_ref().map(|request| {
+            operation_schema(
+                request,
+                schemas,
+                names,
+                operation,
+                FieldSource::Request,
+                request_aliases,
+                true,
+            )
+        });
+    } else {
+        let mut body_fields = Map::new();
+        for argument in &operation.request_arguments {
+            let schema = operation_schema(
+                &argument.java_type,
+                schemas,
+                names,
+                operation,
+                FieldSource::Request,
+                request_aliases,
+                true,
+            );
+            match (argument.location, argument.name.as_deref()) {
+                (InputLocation::Query, Some(name)) => {
+                    query.push(
+                        json!({"name": name, "in": "query", "required": false, "schema": schema}),
+                    );
+                }
+                (InputLocation::Query, None) => {
+                    if let Some(root) = schemas.get(&argument.java_type.name.replace("::", ".")) {
+                        let object = schema_object(
+                            root,
+                            names,
+                            Some(operation),
+                            FieldSource::Request,
+                            request_aliases,
+                            &root.bindings_for(&argument.java_type),
+                            true,
+                        );
+                        for (name, field) in object["properties"].as_object().into_iter().flatten()
+                        {
+                            query.push(json!({"name": name, "in": "query", "required": false, "schema": field}));
+                        }
+                    } else {
+                        query.push(json!({
+                            "name": argument.java_name, "in": "query", "required": false,
+                            "style": "form", "explode": true, "schema": schema,
+                        }));
+                    }
+                }
+                (InputLocation::Body, Some(name)) => {
+                    body_fields.insert(name.to_owned(), schema);
+                }
+                (InputLocation::Body, None) => body = Some(schema),
+            }
+        }
+        if !body_fields.is_empty() {
+            body = Some(json!({
+                "type": "object", "properties": body_fields, "additionalProperties": false,
+            }));
+        }
+    }
+    if !query.is_empty() {
+        value.insert("parameters".to_owned(), Value::Array(query));
+    }
+    if let Some(schema) = body {
         value.insert(
             "requestBody".to_owned(),
             json!({
                 "required": false,
-                "content": {
-                    "application/json": {
-                        "schema": operation_schema(
-                            request,
-                            schemas,
-                            names,
-                            operation,
-                            FieldSource::Request,
-                            request_aliases,
-                            true,
-                        )
-                    }
-                }
+                "content": {"application/json": {"schema": schema}}
             }),
         );
     }
@@ -629,18 +688,17 @@ pub(crate) fn schema_plan(ir: &ContractIr) -> SchemaPlan {
     operations.sort_by_key(|(_, operation)| &operation.key);
     for (index, operation) in operations {
         for source in [FieldSource::Request, FieldSource::Response] {
-            let Some(root) = source.root(operation) else {
-                continue;
-            };
-            for fqn in reachable_schemas(root, &ir.schemas) {
-                uses.push(SchemaUse {
-                    optional_fields: source == FieldSource::Request
-                        && root.name.replace("::", ".") == fqn,
-                    fqn,
-                    operation: Some(index),
-                    source,
-                    context: source.operation_key(operation),
-                });
+            for root in source.roots(operation) {
+                for fqn in reachable_schemas(root, &ir.schemas) {
+                    uses.push(SchemaUse {
+                        optional_fields: source == FieldSource::Request
+                            && root.name.replace("::", ".") == fqn,
+                        fqn,
+                        operation: Some(index),
+                        source,
+                        context: source.operation_key(operation),
+                    });
+                }
             }
         }
     }
@@ -826,7 +884,7 @@ fn referenced_groups(value: &TypeRef, aliases: &HashMap<String, String>, groups:
 pub(crate) fn request_schemas(ir: &ContractIr) -> BTreeSet<String> {
     ir.operations
         .iter()
-        .filter_map(|operation| operation.request.as_ref())
+        .flat_map(|operation| FieldSource::Request.roots(operation))
         .map(|request| request.name.replace("::", "."))
         .filter(|fqn| ir.schemas.contains_key(fqn))
         .collect()

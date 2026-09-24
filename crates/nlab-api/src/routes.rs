@@ -8,7 +8,7 @@ use clap::{Args, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::model::{ContractIr, HttpRoute, RouteSource, RouteStatus};
+use super::model::{ContractIr, HttpRoute, InputLocation, RouteSource, RouteStatus};
 use super::output::OutputLock;
 
 const ZGATEWAY_CONFIG: &str = include_str!("../assets/zgateway.zzcli.json");
@@ -171,6 +171,20 @@ pub(crate) struct HttpRouteKey {
     pub path: String,
     pub host: Option<String>,
     pub source: RouteSource,
+    pub request_bindings: Option<Vec<RequestBinding>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RequestBinding {
+    pub index: usize,
+    pub source: BindingSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BindingSource {
+    Input(InputLocation, Option<String>),
+    Context,
+    Unsupported(String),
 }
 
 impl HttpRouteKey {
@@ -283,6 +297,19 @@ pub(crate) fn routes_for_run(
                     path: operation.route.path,
                     host: operation.route.host,
                     source: RouteSource::Cache,
+                    request_bindings: (!operation.request_arguments.is_empty()).then(|| {
+                        operation
+                            .request_arguments
+                            .iter()
+                            .map(|argument| RequestBinding {
+                                index: argument.index,
+                                source: BindingSource::Input(
+                                    argument.location,
+                                    argument.name.clone(),
+                                ),
+                            })
+                            .collect()
+                    }),
                 }
             })
             .collect());
@@ -377,7 +404,52 @@ fn normalize_route(route: Value) -> Option<HttpRouteKey> {
             .and_then(Value::as_str)
             .map(str::to_owned),
         source: RouteSource::Zgateway,
+        request_bindings: config
+            .get("requestMappingConfigs")
+            .and_then(Value::as_array)
+            .map(|configs| configs.iter().filter_map(request_binding).collect()),
     })
+}
+
+fn request_binding(config: &Value) -> Option<RequestBinding> {
+    let index = config
+        .get("destPath")?
+        .as_str()?
+        .strip_prefix("$.args")?
+        .parse()
+        .ok()?;
+    let source = match config
+        .get("srcs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+    {
+        Some([source]) if source["srcType"] == "JSON_PATH" => {
+            let path = source["src"].as_str().unwrap_or_default();
+            if path == "$.request.singleValueQueryParams" {
+                BindingSource::Input(InputLocation::Query, None)
+            } else if let Some(name) = path.strip_prefix("$.request.singleValueQueryParams.") {
+                input_field(InputLocation::Query, name)
+            } else if path == "$.bizContext.jsonRequestBody" {
+                BindingSource::Input(InputLocation::Body, None)
+            } else if let Some(name) = path.strip_prefix("$.bizContext.jsonRequestBody.") {
+                input_field(InputLocation::Body, name)
+            } else if path.starts_with("$.bizContext.") {
+                BindingSource::Context
+            } else {
+                BindingSource::Unsupported(path.to_owned())
+            }
+        }
+        _ => BindingSource::Unsupported(config.to_string()),
+    };
+    Some(RequestBinding { index, source })
+}
+
+fn input_field(location: InputLocation, name: &str) -> BindingSource {
+    if name.is_empty() || name.contains(['.', '[', ']']) {
+        BindingSource::Unsupported(name.to_owned())
+    } else {
+        BindingSource::Input(location, Some(name.to_owned()))
+    }
 }
 
 fn extract_json(value: &str) -> Result<Value> {
@@ -434,6 +506,43 @@ mod tests {
                 }
             }))
             .is_none()
+        );
+    }
+
+    #[test]
+    fn gateway_request_mappings_keep_frontend_names_and_argument_positions() {
+        let route = normalize_route(serde_json::json!({
+            "httpMethod": "GET",
+            "httpPath": "/api/brandModelSearch",
+            "scfMethodPath": "/IAdminCommonFacade/brandModelSearch(EmployeeUser,Integer,Integer,Integer)",
+            "httpToScfFilterConfig": {"requestMappingConfigs": [
+                {"destPath": "$.args0", "srcs": [{"srcType": "JSON_PATH", "src": "$.bizContext.employeeUser"}]},
+                {"destPath": "$.args1", "srcs": [{"srcType": "JSON_PATH", "src": "$.request.singleValueQueryParams.cateId"}]},
+                {"destPath": "$.args2", "srcs": [{"srcType": "JSON_PATH", "src": "$.request.singleValueQueryParams.brandId"}]},
+                {"destPath": "$.args3", "srcs": [{"srcType": "JSON_PATH", "src": "$.request.singleValueQueryParams.cateType"}]}
+            ]}
+        }))
+        .unwrap();
+        assert_eq!(
+            route.request_bindings.unwrap(),
+            vec![
+                RequestBinding {
+                    index: 0,
+                    source: BindingSource::Context
+                },
+                RequestBinding {
+                    index: 1,
+                    source: BindingSource::Input(InputLocation::Query, Some("cateId".into()))
+                },
+                RequestBinding {
+                    index: 2,
+                    source: BindingSource::Input(InputLocation::Query, Some("brandId".into()))
+                },
+                RequestBinding {
+                    index: 3,
+                    source: BindingSource::Input(InputLocation::Query, Some("cateType".into()))
+                },
+            ]
         );
     }
 
