@@ -203,11 +203,7 @@ fn discovery_drops_unconfigured_interface_methods() {
     let error = scan(args, &BTreeMap::new(), &BTreeMap::new(), Some(&[]))
         .err()
         .unwrap();
-    assert!(
-        error
-            .to_string()
-            .contains("no configured gateway routes matched")
-    );
+    assert!(error.to_string().contains("no HTTP routes matched"));
 }
 
 #[test]

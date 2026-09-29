@@ -32,7 +32,7 @@ pub struct DiscoverArgs {
     /// Remember a dependency branch; unspecified services use master
     #[arg(long, value_name = "SERVICE=BRANCH")]
     service_branch: Vec<String>,
-    /// Interface file relative to the configured backend; defaults to contractRoots
+    /// Interface or Controller file relative to the configured backend; defaults to contractRoots
     #[arg(long)]
     entry: Option<PathBuf>,
     /// Skip SIC and Git network operations; still synchronize local repository indexes
@@ -443,7 +443,11 @@ fn scan(
         })
         .transpose()?;
     let mut candidates = Vec::new();
-    for node in graph.nodes.values().filter(|node| node.kind == "interface") {
+    for node in graph
+        .nodes
+        .values()
+        .filter(|node| matches!(node.kind.as_str(), "interface" | "class"))
+    {
         let selected = match &entry {
             Some(entry) => Path::new(&node.file_path) == entry,
             None => config
@@ -459,22 +463,31 @@ fn scan(
         }
     }
     if candidates.is_empty() {
-        bail!("no interface methods found in selected entry/contractRoots");
+        bail!("no contract methods found in selected entry/contractRoots");
     }
     let routes = match routes {
         Some(routes) => routes.to_vec(),
-        None => routes::routes_for_run(
-            &project_path,
-            &config.backend.app_name,
-            repositories[initial]
-                .info
-                .branch
-                .as_deref()
-                .unwrap_or(&config.backend.branch),
-            repositories[initial].info.commit.as_deref(),
-            args.offline,
-            config.gateway.enabled,
-        )?,
+        None => {
+            let mut routes = crate::controller::routes(&backend, graph, &candidates)?;
+            if candidates
+                .iter()
+                .any(|(owner, _)| owner.kind == "interface")
+            {
+                routes.extend(routes::routes_for_run(
+                    &project_path,
+                    &config.backend.app_name,
+                    repositories[initial]
+                        .info
+                        .branch
+                        .as_deref()
+                        .unwrap_or(&config.backend.branch),
+                    repositories[initial].info.commit.as_deref(),
+                    args.offline,
+                    config.gateway.enabled,
+                )?);
+            }
+            routes
+        }
     };
     let mut overloads = BTreeMap::new();
     for (node, method) in &candidates {
@@ -487,10 +500,9 @@ fn scan(
     for (node, method) in candidates {
         let facade_fqn = node.qualified_name.replace("::", ".");
         if routes.iter().any(|route| {
-            route.matches_method(
-                &facade_fqn,
-                &method.name,
-                &method.signature,
+            route.matches_contract(
+                node,
+                method,
                 overloads[&(node.id.as_str(), method.name.as_str())] > 1,
             )
         }) {
@@ -499,7 +511,7 @@ fn scan(
         }
     }
     if entry_ids.is_empty() {
-        bail!("no configured gateway routes matched selected entry/contractRoots");
+        bail!("no HTTP routes matched selected entry/contractRoots");
     }
     entry_ids.sort();
     let mut report = Report {

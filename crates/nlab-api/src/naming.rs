@@ -1,5 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) fn operation_name(operation: &crate::model::Operation) -> String {
+    let Some((_, parameters)) = operation.key.split_once('(') else {
+        return operation.method_name.clone();
+    };
+    let parameters = parameters.trim_end_matches(')');
+    if parameters.is_empty() {
+        return format!("{}WithoutArguments", operation.method_name);
+    }
+    format!("{}By{}", operation.method_name, upper_camel(parameters))
+}
+
 pub fn shortest_unique_names(seeds: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, String> {
     shortest_unique_names_avoiding(seeds, &BTreeSet::new())
 }

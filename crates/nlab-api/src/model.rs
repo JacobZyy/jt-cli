@@ -57,6 +57,7 @@ pub struct RequestArgument {
 pub enum InputLocation {
     Query,
     Body,
+    Form,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -92,6 +93,7 @@ pub enum RouteStatus {
 pub enum RouteSource {
     Placeholder,
     Zgateway,
+    Controller,
     Cache,
 }
 

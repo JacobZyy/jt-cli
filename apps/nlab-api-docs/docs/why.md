@@ -122,9 +122,11 @@ nlab-api 先构建一份 operation-scoped Contract IR，再从它并行生成：
 
 这不是 `Rust -> OpenAPI -> Orval -> TypeScript` 流水线。OpenAPI、API、types 和 enums 是同一份 IR 的兄弟产物，不互相反推。
 
-## 网关路径决定接口入口
+## 路由来源决定接口入口
 
 后端提供接口目录，nlab-api 先列出目录中的方法，再用 ZGateway 路由筛选。没有对应 HTTP 路径的方法不进入契约和后续枚举分析；查询失败时停止生成。首次生成因此需要可用的网关查询，离线运行只能复用与当前后端提交匹配的既有路由。
+
+Spring MVC Controller 使用同一入口流程，但路由与参数绑定来自类和方法的注解。来源层将这些信息转换为共同的 HTTP 路由和请求绑定；后续类型解析、Contract IR、枚举分析与生成不复制一套 Controller 实现。`contractRoots` 可指向 Controller 目录，初始化可以自动探测，无需额外模式开关。Controller 首次离线生成不依赖网关路由缓存。
 
 其他阶段仍保持明确边界：
 

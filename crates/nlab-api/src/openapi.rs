@@ -65,12 +65,24 @@ pub fn generate(ir: &ContractIr, config: &ProjectConfig) -> Result<OpenApiArtifa
             &request_aliases,
             config,
         )?;
-        let mut path_item = Map::new();
-        path_item.insert(
-            operation.route.method.to_ascii_lowercase(),
-            operation_value.clone(),
-        );
-        paths.insert(operation.route.path.clone(), Value::Object(path_item));
+        let path_item = paths
+            .entry(operation.route.path.clone())
+            .or_insert_with(|| json!({}));
+        if path_item
+            .as_object_mut()
+            .expect("path object")
+            .insert(
+                operation.route.method.to_ascii_lowercase(),
+                operation_value.clone(),
+            )
+            .is_some()
+        {
+            bail!(
+                "duplicate HTTP route: {} {}",
+                operation.route.method,
+                operation.route.path
+            );
+        }
         contracts.insert(operation.key.clone(), operation_value);
     }
 
@@ -128,10 +140,21 @@ pub fn validate(document: &Value, expected_operations: usize) -> Result<()> {
     let contracts = document["x-nlab-contracts"]
         .as_object()
         .context("OpenAPI x-nlab-contracts missing")?;
-    if paths.len() != expected_operations || contracts.len() != expected_operations {
+    let operations = paths
+        .values()
+        .filter_map(Value::as_object)
+        .flat_map(Map::keys)
+        .filter(|method| {
+            matches!(
+                method.as_str(),
+                "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace"
+            )
+        })
+        .count();
+    if operations != expected_operations || contracts.len() != expected_operations {
         bail!(
-            "OpenAPI operation count mismatch: paths={} contracts={} expected={expected_operations}",
-            paths.len(),
+            "OpenAPI operation count mismatch: operations={} contracts={} expected={expected_operations}",
+            operations,
             contracts.len()
         );
     }
@@ -166,7 +189,8 @@ fn operation_object(
         "operationId".to_owned(),
         Value::String(format!(
             "{}_{}",
-            operation.facade_name, operation.method_name
+            operation.facade_name,
+            crate::naming::operation_name(operation)
         )),
     );
     value.insert(
@@ -312,10 +336,10 @@ fn operation_object(
                         }));
                     }
                 }
-                (InputLocation::Body, Some(name)) => {
+                (InputLocation::Body | InputLocation::Form, Some(name)) => {
                     body_fields.insert(name.to_owned(), schema);
                 }
-                (InputLocation::Body, None) => body = Some(schema),
+                (InputLocation::Body | InputLocation::Form, None) => body = Some(schema),
             }
         }
         if !body_fields.is_empty() {
@@ -328,11 +352,20 @@ fn operation_object(
         value.insert("parameters".to_owned(), Value::Array(query));
     }
     if let Some(schema) = body {
+        let media_type = if operation
+            .request_arguments
+            .iter()
+            .any(|argument| argument.location == InputLocation::Form)
+        {
+            "multipart/form-data"
+        } else {
+            "application/json"
+        };
         value.insert(
             "requestBody".to_owned(),
             json!({
                 "required": false,
-                "content": {"application/json": {"schema": schema}}
+                "content": {media_type: {"schema": schema}}
             }),
         );
     }
@@ -533,6 +566,7 @@ fn type_schema(
         return json!({ "$ref": format!("#/components/schemas/{name}") });
     }
     match simple {
+        "MultipartFile" => json!({ "type": "string", "format": "binary" }),
         "String" | "CharSequence" | "char" | "Character" => json!({ "type": "string" }),
         "Long" | "long" | "BigInteger" => {
             json!({ "type": "string", "x-nlab-java-type": simple })
@@ -999,6 +1033,7 @@ fn route_source(source: RouteSource) -> &'static str {
     match source {
         RouteSource::Placeholder => "placeholder",
         RouteSource::Zgateway => "zgateway",
+        RouteSource::Controller => "controller",
         RouteSource::Cache => "cache",
     }
 }
