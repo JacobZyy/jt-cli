@@ -405,11 +405,13 @@ fn semantic_diagnostics(ir: &ContractIr) -> Vec<Value> {
                     matches!(
                         patch.status,
                         ProvenanceStatus::Known | ProvenanceStatus::External
-                    )
+                    ) || (patch.status == ProvenanceStatus::Unresolved
+                        && patch.evidence.iter().any(|item| item.starts_with("write:") || item.starts_with("copy-framework:")))
                 })
                 .map(|patch| {
                     json!({
-                    "level": "info",
+                    "level": if !patch.enum_associated && patch.enum_fqn.is_some()
+                        && patch.enum_candidate.as_ref().is_none_or(|candidate| candidate.status != model::EnumCandidateStatus::Ignored) { "warning" } else { "info" },
                         "stage": "generate",
                         "code": if patch.enum_associated { "ENUM_ASSOCIATED".to_owned() } else { format!("ENUM_{:?}", patch.status).to_ascii_uppercase() },
                         "enumAssociated": patch.enum_associated,

@@ -591,7 +591,29 @@ fn type_schema(
 }
 
 fn apply_enum(schema: &mut Value, values: &[CodedValue]) {
+    if let Some(items) = schema.get_mut("items") {
+        apply_enum(items, values);
+        return;
+    }
+    if let Some(items) = schema
+        .get_mut("additionalProperties")
+        .filter(|value| value.is_object())
+    {
+        apply_enum(items, values);
+        return;
+    }
     let object = schema.as_object_mut().expect("enum schema object");
+    if !object.contains_key("type") {
+        let kind = if values
+            .iter()
+            .all(|value| matches!(value.value, WireValue::String(_)))
+        {
+            "string"
+        } else {
+            "number"
+        };
+        object.insert("type".to_owned(), json!(kind));
+    }
     object.insert(
         "enum".to_owned(),
         Value::Array(values.iter().map(|item| wire_json(&item.value)).collect()),
@@ -693,7 +715,7 @@ struct SchemaUse {
 }
 
 pub(crate) fn enum_identity(patch: &SemanticPatch) -> String {
-    format!(
+    let base = format!(
         "{}{}#{}",
         if patch.enum_fqn.is_none() {
             "comment:"
@@ -708,7 +730,16 @@ pub(crate) fn enum_identity(patch: &SemanticPatch) -> String {
             .accessor
             .as_deref()
             .unwrap_or(&patch.target.field_name)
-    )
+    );
+    if patch.enum_fqn.is_some()
+        && let Some(values) = patch.associated_values()
+        && values.iter().any(|value| value.key.is_none())
+    {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(serde_json::to_vec(values).expect("enum values serialize"));
+        return format!("{base}#{digest:.12x}");
+    }
+    base
 }
 
 pub(crate) fn schema_plan(ir: &ContractIr) -> SchemaPlan {

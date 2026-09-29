@@ -195,16 +195,18 @@ impl<'a> JavaProject<'a> {
             return None;
         }
         let simple = type_ref.simple_name();
-        if let Some(import) = self.imports.get(file_path).and_then(|imports| {
-            imports
-                .iter()
-                .find(|value| value.rsplit('.').next() == Some(simple))
-        }) {
+        if !name.contains('.')
+            && let Some(import) = self.imports.get(file_path).and_then(|imports| {
+                imports
+                    .iter()
+                    .find(|value| value.rsplit('.').next() == Some(simple))
+            })
+        {
             return self.node_for_fqn(import);
         }
         let mut lexical = owner_fqn.replace("::", ".");
         loop {
-            let candidate = format!("{lexical}.{simple}");
+            let candidate = format!("{lexical}.{name}");
             if let Some(id) = self.type_by_fqn.get(&candidate) {
                 return self.graph.nodes.get(id);
             }
@@ -214,7 +216,7 @@ impl<'a> JavaProject<'a> {
             lexical = parent.to_owned();
         }
         if let Some(package) = self.packages.get(file_path) {
-            let candidate = format!("{package}.{simple}");
+            let candidate = format!("{package}.{name}");
             if let Some(id) = self.type_by_fqn.get(&candidate) {
                 return self.graph.nodes.get(id);
             }
@@ -225,7 +227,7 @@ impl<'a> JavaProject<'a> {
             .into_iter()
             .flatten()
             .filter_map(|import| import.strip_suffix(".*"))
-            .map(|package| format!("{package}.{simple}"))
+            .map(|package| format!("{package}.{name}"))
             .collect::<BTreeSet<_>>();
         let candidates = self
             .graph
@@ -238,6 +240,9 @@ impl<'a> JavaProject<'a> {
             .collect::<Vec<_>>();
         if !candidates.is_empty() {
             return (candidates.len() == 1).then(|| candidates[0]);
+        }
+        if name.contains('.') {
+            return None;
         }
         let candidates = self
             .graph

@@ -1,4 +1,5 @@
 mod candidates;
+mod constants;
 mod copy_origin;
 mod cross_repository;
 mod database;
@@ -6,6 +7,11 @@ mod discovery;
 mod lookup;
 mod primary;
 mod request;
+mod values;
+mod writes;
+
+#[cfg(test)]
+mod coverage_tests;
 
 pub(crate) use discovery::RemoteCall;
 
@@ -64,8 +70,9 @@ struct InvocationSite {
     column: usize,
 }
 
+#[derive(Clone)]
 struct ParsedFile {
-    source: String,
+    source: std::sync::Arc<str>,
     tree: Tree,
 }
 
@@ -81,6 +88,7 @@ pub struct SemanticAnalyzer<'a> {
     field_domain_cache: HashMap<(String, String, String), Domain>,
     lookup_forwarder_cache: HashMap<(String, usize), Option<Domain>>,
     mapper_cache: HashMap<String, Option<database::MapperInfo>>,
+    value_bindings: Vec<HashMap<(String, String), Domain>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -97,6 +105,7 @@ impl<'a> SemanticAnalyzer<'a> {
             field_domain_cache: HashMap::new(),
             lookup_forwarder_cache: HashMap::new(),
             mapper_cache: HashMap::new(),
+            value_bindings: Vec::new(),
         }
     }
 
@@ -493,7 +502,16 @@ impl<'a> SemanticAnalyzer<'a> {
                 continue;
             };
             for field in &schema.fields {
-                if !is_scalar(&field.java_type) {
+                if !is_scalar(value_type(&field.java_type))
+                    && self
+                        .project
+                        .resolve_type(
+                            &class.file_path,
+                            &class.qualified_name,
+                            value_type(&field.java_type),
+                        )
+                        .is_none_or(|node| node.kind != "enum")
+                {
                     continue;
                 }
                 let field_path = if prefix.is_empty() {
@@ -517,13 +535,7 @@ impl<'a> SemanticAnalyzer<'a> {
         field_path: String,
         reachable: &Reachability,
     ) -> Result<SemanticPatch> {
-        let graph = self.project.graph();
         let field_name = &field.name;
-        let setter_name = format!("set{}", uppercase_first(field_name));
-        let setter = graph
-            .contained(&class.id, "method")
-            .into_iter()
-            .find(|method| method.name == setter_name);
         let target = FieldTarget {
             source: FieldSource::Response,
             operation_key: operation.key.clone(),
@@ -531,76 +543,22 @@ impl<'a> SemanticAnalyzer<'a> {
             field_path,
             field_name: field_name.to_owned(),
         };
-        let Some(setter) = setter else {
-            return Ok(unresolved_patch(target, "setter not indexed"));
-        };
-
-        let mut domains = Vec::new();
-        let write_edges = graph
-            .incoming_calls(&setter.id)
-            .filter(|edge| reachable.nodes.contains(&edge.source))
+        if let Some(enum_node) = self
+            .project
+            .resolve_type(
+                &class.file_path,
+                &class.qualified_name,
+                value_type(&field.java_type),
+            )
+            .filter(|node| node.kind == "enum")
             .cloned()
-            .collect::<Vec<_>>();
-        let mut known_sites = BTreeMap::new();
-        for edge in &write_edges {
-            *known_sites
-                .entry((edge.source.clone(), edge.line))
-                .or_insert(0usize) += 1;
-        }
-        for edge in write_edges {
-            let writer = graph
-                .nodes
-                .get(&edge.source)
-                .context("CodeGraph writer disappeared")?;
-            let Some((expression, source, offset)) = self.setter_argument(&edge, &setter.name)?
-            else {
-                let mut domain = Domain::default();
-                domain.unknown.insert(format!(
-                    "unindexed setter argument at {}:{}:{}",
-                    writer.file_path, edge.line, edge.column
-                ));
-                domains.push(domain);
-                continue;
-            };
-            let mut domain = self.analyze_expression(
-                operation,
-                writer,
-                expression,
-                offset,
-                reachable,
-                &mut BTreeSet::new(),
-            )?;
-            push_unique(
-                &mut domain.evidence,
-                format!(
-                    "write:{}:{}:{}:{}",
-                    writer.file_path, edge.line, edge.column, source
-                ),
-            );
-            push_unique(
-                &mut domain.evidence,
-                format!("chain:{}", render_path(graph, reachable, &writer.id)),
-            );
-            domains.push(domain);
-        }
-        for gap in self.unindexed_setter_calls(reachable, setter, &known_sites)? {
-            let mut domain = Domain::default();
-            domain.unknown.insert(gap);
-            domains.push(domain);
-        }
-        for unresolved in reachable
-            .nodes
-            .iter()
-            .flat_map(|id| graph.unresolved(id))
-            .filter(|item| item.name == setter.name)
         {
-            let mut domain = Domain::default();
-            domain.unknown.insert(format!(
-                "unresolved setter call:{}:{}:{}",
-                unresolved.file_path, unresolved.line, unresolved.column
+            return Ok(classify_patch(
+                target,
+                vec![self.serialized_enum_domain(&enum_node)?],
             ));
-            domains.push(domain);
         }
+        let domains = self.field_write_domains(operation, class, field_name, reachable)?;
         if domains.is_empty() {
             return Ok(unresolved_patch(
                 target,
@@ -610,40 +568,6 @@ impl<'a> SemanticAnalyzer<'a> {
         let mut patch = classify_patch(target, domains.clone());
         candidates::associate_comment_values(field, &class.file_path, &domains, &mut patch);
         Ok(patch)
-    }
-
-    fn unindexed_setter_calls(
-        &mut self,
-        reachable: &Reachability,
-        setter: &GraphNode,
-        known_sites: &BTreeMap<(String, usize), usize>,
-    ) -> Result<Vec<String>> {
-        let mut gaps = BTreeSet::new();
-        let mut seen = BTreeMap::<(String, usize), usize>::new();
-        for method_id in &reachable.nodes {
-            let Some(method) = self.project.graph().nodes.get(method_id) else {
-                continue;
-            };
-            for invocation in self.method_invocations(method)? {
-                if invocation.name != setter.name {
-                    continue;
-                }
-                let targets = self.resolve_invocation(method, &invocation)?;
-                if !targets.is_empty() && !targets.contains(&setter.id) {
-                    continue;
-                }
-                let site = (method.id.clone(), invocation.line);
-                let count = seen.entry(site.clone()).or_default();
-                *count += 1;
-                if *count > known_sites.get(&site).copied().unwrap_or(0) {
-                    gaps.insert(format!(
-                        "unindexed setter call:{}:{}:{}",
-                        method.file_path, invocation.line, invocation.column
-                    ));
-                }
-            }
-        }
-        Ok(gaps.into_iter().collect())
     }
 
     fn setter_argument(
@@ -689,6 +613,32 @@ impl<'a> SemanticAnalyzer<'a> {
         reachable: &Reachability,
         visiting: &mut BTreeSet<(String, usize)>,
     ) -> Result<Domain> {
+        if let Expression::Identifier(name) = &expression
+            && let Some(domain) = self
+                .value_bindings
+                .iter()
+                .rev()
+                .find_map(|bindings| bindings.get(&(writer.id.clone(), name.clone())))
+                .cloned()
+        {
+            let parsed = self.parsed(&writer.file_path)?.clone();
+            if lookup::method_declaration(&parsed, writer).is_some_and(|declaration| {
+                descendants(declaration).into_iter().any(|node| {
+                    node.start_byte() < offset
+                        && ((node.kind() == "assignment_expression"
+                            && node
+                                .child_by_field_name("left")
+                                .is_some_and(|left| text_of(&parsed.source, left) == name))
+                            || (node.kind() == "update_expression"
+                                && named_children(node)
+                                    .iter()
+                                    .any(|child| text_of(&parsed.source, *child) == name)))
+                })
+            }) {
+                return Ok(values::unknown(format!("rewritten parameter:{name}")));
+            }
+            return Ok(domain);
+        }
         if let Some(domain) = self.request_expression_domain(
             operation,
             writer,
@@ -698,11 +648,11 @@ impl<'a> SemanticAnalyzer<'a> {
         )? {
             return Ok(domain);
         }
+        if let Some(domain) = self.enum_projection(writer, &expression, offset)? {
+            return Ok(domain);
+        }
         match expression {
             Expression::Getter { receiver, accessor } => {
-                if let Some(enum_node) = self.enum_for_receiver(writer, &receiver, offset)? {
-                    return self.enum_domain(&enum_node, &accessor);
-                }
                 if let Some(domain) =
                     self.lookup_field_domain(writer, &receiver, &accessor, offset)?
                 {
@@ -713,6 +663,20 @@ impl<'a> SemanticAnalyzer<'a> {
                 )? {
                     return Ok(domain);
                 }
+                if let Some(domain) = self.computed_domain(
+                    operation,
+                    writer,
+                    &if receiver.is_empty() {
+                        format!("{accessor}()")
+                    } else {
+                        format!("{receiver}.{accessor}()")
+                    },
+                    offset,
+                    reachable,
+                    visiting,
+                )? {
+                    return Ok(domain);
+                }
                 let mut domain = Domain::default();
                 domain
                     .unknown
@@ -720,6 +684,11 @@ impl<'a> SemanticAnalyzer<'a> {
                 Ok(domain)
             }
             Expression::Call { name, source } => {
+                if let Some(domain) =
+                    self.computed_domain(operation, writer, &source, offset, reachable, visiting)?
+                {
+                    return Ok(domain);
+                }
                 let external = self
                     .project
                     .graph()
@@ -765,6 +734,22 @@ impl<'a> SemanticAnalyzer<'a> {
                         .evidence
                         .push(format!("constant:{}:{value}", writer.file_path));
                     return Ok(domain);
+                }
+                if let Some(class) = self.expression_class(writer, &value, offset)?
+                    && class.kind == "enum"
+                {
+                    return self.serialized_enum_domain(&class);
+                }
+                if let Some(kind) = self
+                    .receiver_type(writer, &value, offset)?
+                    .and_then(|kind| parse_java_type(&kind))
+                    && let Some(class) = self
+                        .project
+                        .resolve_type(&writer.file_path, &writer.qualified_name, value_type(&kind))
+                        .filter(|node| node.kind == "enum")
+                        .cloned()
+                {
+                    return self.serialized_enum_domain(&class);
                 }
                 let mut domain = Domain::default();
                 domain.unknown.insert(value);
@@ -879,23 +864,9 @@ impl<'a> SemanticAnalyzer<'a> {
         receiver: &str,
         offset: usize,
     ) -> Result<Option<GraphNode>> {
-        let owner = writer
-            .qualified_name
-            .rsplit_once("::")
-            .map(|(owner, _)| owner)
-            .unwrap_or(&writer.qualified_name);
-        let receiver_root = receiver.split('.').next().unwrap_or(receiver);
-        let type_name = self
-            .receiver_type(writer, receiver_root, offset)?
-            .unwrap_or_else(|| receiver_root.to_owned());
-        let Some(type_ref) = parse_java_type(&type_name) else {
-            return Ok(None);
-        };
         Ok(self
-            .project
-            .resolve_type(&writer.file_path, owner, &type_ref)
-            .filter(|node| node.kind == "enum")
-            .cloned())
+            .expression_class(writer, receiver, offset)?
+            .filter(|node| node.kind == "enum"))
     }
 
     fn enum_domain(&mut self, enum_node: &GraphNode, accessor: &str) -> Result<Domain> {
@@ -909,64 +880,8 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn constant_literal(&mut self, method: &GraphNode, name: &str) -> Result<Option<String>> {
-        let (qualifier, name) = name
-            .rsplit_once('.')
-            .map_or((None, name), |(owner, name)| (Some(owner), name));
-        let owners = match qualifier {
-            None | Some("this") => self.lexical_owners(method),
-            Some(owner) => parse_java_type(owner)
-                .and_then(|kind| {
-                    self.project
-                        .resolve_type(&method.file_path, &method.qualified_name, &kind)
-                })
-                .into_iter()
-                .collect(),
-        };
-        let field = owners.into_iter().find_map(|owner| {
-            self.project
-                .graph()
-                .contained(&owner.id, "field")
-                .into_iter()
-                .chain(self.project.graph().contained(&owner.id, "constant"))
-                .find(|field| field.name == name)
-                .cloned()
-        });
-        let Some(field) = field else {
-            return Ok(None);
-        };
-        let parsed = self.parsed(&field.file_path)?;
-        let declaration = descendants(parsed.tree.root_node())
-            .into_iter()
-            .find(|node| {
-                node.kind() == "field_declaration"
-                    && node.start_position().row + 1 == field.start_line
-            });
-        let Some(declaration) = declaration else {
-            return Ok(None);
-        };
-        let modifiers = named_children(declaration)
-            .into_iter()
-            .find(|node| node.kind() == "modifiers")
-            .map(|node| {
-                text_of(&parsed.source, node)
-                    .split_whitespace()
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        if !modifiers.contains("static") || !modifiers.contains("final") {
-            return Ok(None);
-        }
-        let value = named_children(declaration)
-            .into_iter()
-            .filter(|node| node.kind() == "variable_declarator")
-            .find(|node| {
-                node.child_by_field_name("name")
-                    .is_some_and(|node| text_of(&parsed.source, node) == name)
-            })
-            .and_then(|node| node.child_by_field_name("value"))
-            .and_then(|node| wire_value(&parsed.source, node));
-        // Literal initializers only: do not evaluate methods or configuration lookups.
-        Ok(value.map(|value| serde_json::to_string(&value).expect("wire value is serializable")))
+        Ok(constants::value(self.project, method, name)?
+            .map(|value| serde_json::to_string(&value).expect("wire value is serializable")))
     }
 
     fn parsed(&mut self, file_path: &str) -> Result<&ParsedFile> {
@@ -977,8 +892,13 @@ impl<'a> SemanticAnalyzer<'a> {
             let tree = parser
                 .parse(&source, None)
                 .with_context(|| format!("parse Java source {file_path}"))?;
-            self.parsed_files
-                .insert(file_path.to_owned(), ParsedFile { source, tree });
+            self.parsed_files.insert(
+                file_path.to_owned(),
+                ParsedFile {
+                    source: source.into(),
+                    tree,
+                },
+            );
         }
         Ok(&self.parsed_files[file_path])
     }
@@ -1150,7 +1070,11 @@ fn expression_from_node(source: &str, node: Node<'_>) -> Expression {
                 .child_by_field_name("name")
                 .map(|name| text_of(source, name).to_owned())
                 .unwrap_or_default();
-            if getter_signal(&name).is_some() {
+            if getter_signal(&name).is_some()
+                && node
+                    .child_by_field_name("arguments")
+                    .is_some_and(|args| named_children(args).is_empty())
+            {
                 let receiver = node
                     .child_by_field_name("object")
                     .map(|object| text_of(source, object).trim().to_owned())
@@ -1164,6 +1088,9 @@ fn expression_from_node(source: &str, node: Node<'_>) -> Expression {
             }
         }
         "identifier" | "field_access" => Expression::Identifier(text),
+        "unary_expression" if serde_json::from_str::<WireValue>(&text).is_ok() => {
+            Expression::Literal(text)
+        }
         kind if kind.ends_with("_literal") || matches!(kind, "true" | "false" | "null_literal") => {
             Expression::Literal(text)
         }
@@ -1179,6 +1106,16 @@ fn expression_from_node(source: &str, node: Node<'_>) -> Expression {
                 Expression::Branch(branches)
             }
         }
+        "array_creation_expression" => node
+            .child_by_field_name("value")
+            .map(|value| expression_from_node(source, value))
+            .unwrap_or(Expression::Unknown(text)),
+        "array_initializer" => Expression::Branch(
+            named_children(node)
+                .into_iter()
+                .map(|value| expression_from_node(source, value))
+                .collect(),
+        ),
         "parenthesized_expression" | "cast_expression" => named_children(node)
             .last()
             .copied()
@@ -1213,6 +1150,30 @@ fn extract_enum_domain(
         .child_by_field_name("body")
         .context("enum body not found")?;
     let fields = primary::instance_fields(source, declaration);
+    if accessor == "name" {
+        let values = named_children(body)
+            .into_iter()
+            .filter(|node| node.kind() == "enum_constant")
+            .filter_map(|node| node.child_by_field_name("name"))
+            .map(|node| {
+                let name = text_of(source, node).to_owned();
+                CodedValue {
+                    value: WireValue::String(name.clone()),
+                    key: Some(name.clone()),
+                    label: name,
+                }
+            })
+            .collect::<Vec<_>>();
+        return Ok(Domain {
+            enum_fqn: Some(enum_node.qualified_name.replace("::", ".")),
+            enum_source: Some(enum_node.file_path.clone()),
+            accessor: Some("name".to_owned()),
+            complete: !values.is_empty(),
+            primary_enum_value: true,
+            values,
+            ..Domain::default()
+        });
+    }
     let Some(signal) = primary::accessor_field(source, declaration, accessor, &fields) else {
         return Ok(incomplete_enum_domain(
             enum_node,
@@ -1256,7 +1217,9 @@ fn extract_enum_domain(
             .unwrap_or_default();
         let value = primary::argument_index(source, declaration, &signal, &fields, arguments.len())
             .and_then(|index| arguments.get(index))
-            .and_then(|node| wire_value(source, *node));
+            .map(|node| constants::value(project, enum_node, text_of(source, *node)))
+            .transpose()?
+            .flatten();
         let label = label_index
             .and_then(|index| {
                 primary::argument_index(
@@ -1416,6 +1379,29 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
     for domain in &domains {
         merge_domain(&mut merged, domain.clone());
     }
+    if merged.complete && merged.primary_enum_value {
+        for literal in &merged.literals {
+            if literal == "null" {
+                continue;
+            }
+            match serde_json::from_str::<WireValue>(literal) {
+                Ok(value) => {
+                    if !merged.values.iter().any(|member| member.value == value) {
+                        merged.values.push(CodedValue {
+                            label: render_wire_value(&value),
+                            key: None,
+                            value,
+                        });
+                    }
+                }
+                Err(_) => {
+                    merged
+                        .unknown
+                        .insert(format!("non-scalar enum alternative:{literal}"));
+                }
+            }
+        }
+    }
     let identities = domains
         .iter()
         .filter_map(|domain| {
@@ -1427,12 +1413,10 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
         })
         .collect::<BTreeSet<_>>();
     let all_closed = domains.iter().all(|domain| {
-        domain.enum_fqn.is_some()
-            && domain.complete
+        ((domain.enum_fqn.is_some() && domain.complete) || !domain.literals.is_empty())
             && domain.external.is_empty()
             && domain.unknown.is_empty()
             && domain.closure_gaps.is_empty()
-            && domain.literals.is_empty()
             && !domain.transformed
     });
     let status = if all_closed && identities.len() == 1 {
@@ -1683,19 +1667,6 @@ fn split_top_level(value: &str) -> Vec<&str> {
     result
 }
 
-fn wire_value(source: &str, node: Node<'_>) -> Option<WireValue> {
-    string_literal(source, node)
-        .map(WireValue::String)
-        .or_else(|| {
-            text_of(source, node)
-                .trim()
-                .replace('_', "")
-                .parse::<i64>()
-                .ok()
-                .map(WireValue::Number)
-        })
-}
-
 fn string_literal(source: &str, node: Node<'_>) -> Option<String> {
     let value = text_of(source, node).trim();
     if !(value.starts_with('"') && value.ends_with('"')) {
@@ -1754,6 +1725,25 @@ fn is_scalar(type_ref: &TypeRef) -> bool {
             | "Instant"
             | "Timestamp"
     )
+}
+
+fn value_type(mut kind: &TypeRef) -> &TypeRef {
+    loop {
+        let argument = if is_collection(kind.simple_name()) {
+            kind.arguments.first()
+        } else if matches!(
+            kind.simple_name(),
+            "Map" | "HashMap" | "LinkedHashMap" | "TreeMap"
+        ) {
+            kind.arguments.last()
+        } else {
+            None
+        };
+        match argument {
+            Some(value) => kind = value,
+            None => return kind,
+        }
+    }
 }
 
 fn is_collection(name: &str) -> bool {
@@ -1870,7 +1860,7 @@ mod tests {
     }
 
     #[test]
-    fn literal_constants_preserve_enum_membership_checks() {
+    fn literal_constants_extend_enum_values_but_dynamic_constants_stay_unknown() {
         let repo = tempfile::tempdir().unwrap();
         let source = "package p;\nclass Writer {\n static final String DEFAULT_COLOR = \"gray\";\n static String mutable = \"gray\";\n static final String dynamic = loadColor();\n static final String outside = \"other\";\n void render() {}\n}\n";
         write(repo.path(), "Writer.java", source);
@@ -1929,7 +1919,7 @@ mod tests {
         for name in ["mutable", "dynamic", "missing"] {
             assert_eq!(analyzer.constant_literal(method, name).unwrap(), None);
         }
-        for (name, associated) in [("DEFAULT_COLOR", true), ("outside", false)] {
+        for (name, count) in [("DEFAULT_COLOR", 1), ("outside", 2)] {
             let domain = Domain {
                 enum_fqn: Some("p.Color".to_owned()),
                 accessor: Some("getColor".to_owned()),
@@ -1953,10 +1943,9 @@ mod tests {
                 field_path: "color".to_owned(),
                 field_name: "color".to_owned(),
             };
-            assert_eq!(
-                classify_patch(target, vec![domain]).enum_associated,
-                associated
-            );
+            let patch = classify_patch(target, vec![domain]);
+            assert!(patch.enum_associated);
+            assert_eq!(patch.associated_values().unwrap().len(), count);
         }
     }
 
@@ -2435,7 +2424,7 @@ mod tests {
             (
                 "Payload result = new Payload(); result.setCode(10); result.setCode(20); return result;",
                 "状态：10-待上传 19-备用 90-取消",
-                EnumCandidateStatus::Unverified,
+                EnumCandidateStatus::Conflict,
                 false,
             ),
         ] {
