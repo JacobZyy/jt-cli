@@ -511,6 +511,10 @@ fn render_api_file(
         let request_aliases = operation_aliases
             .get(&FieldSource::Request.operation_key(operation))
             .unwrap_or(&empty_aliases);
+        let required = operation
+            .request_arguments
+            .iter()
+            .any(|argument| argument.location == InputLocation::Path);
         let request = if operation.request_arguments.is_empty() {
             operation.request.as_ref().map(|request| {
                 let type_name = type_expression(
@@ -549,7 +553,12 @@ fn render_api_file(
                         &mut imports,
                         config,
                     );
-                    format!("{}?: {kind}", safe_property(name))
+                    let optional = if argument.location == InputLocation::Path {
+                        ""
+                    } else {
+                        "?"
+                    };
+                    format!("{}{optional}: {kind}", safe_property(name))
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
@@ -566,13 +575,36 @@ fn render_api_file(
                 )
             },
             |(parameter, type_name)| {
+                let optional = if required { "" } else { "?" };
                 format!(
-                    "{parameter}?: {type_name},\n  options?: SecondParameter<typeof {}<{}>>",
+                    "{parameter}{optional}: {type_name},\n  options?: SecondParameter<typeof {}<{}>>",
                     config.frontend.request.export, response
                 )
             },
         );
         let mut preparation = String::new();
+        let mut url = format!("API_URLS.{export_name}");
+        for argument in operation
+            .request_arguments
+            .iter()
+            .filter(|argument| argument.location == InputLocation::Path)
+        {
+            let name = argument
+                .name
+                .as_deref()
+                .context("path argument name missing")?;
+            let parameter = &request.as_ref().context("path request missing")?.0;
+            preparation.push_str(&format!(
+                "  if ({parameter}?.[{}] == null) throw new Error({});\n",
+                ts_string(name),
+                ts_string(&format!("Missing path variable: {name}")),
+            ));
+            url.push_str(&format!(
+                ".replaceAll({}, encodeURIComponent(String({parameter}[{}])))",
+                ts_string(&format!("{{{name}}}")),
+                ts_string(name),
+            ));
+        }
         let payload = if operation.request_arguments.is_empty() {
             request.as_ref().map_or_else(String::new, |(parameter, _)| {
                 if operation.route.method.eq_ignore_ascii_case("GET") {
@@ -662,7 +694,7 @@ fn render_api_file(
             payload
         };
         bodies.push_str(&format!(
-            "export function {export_name}(\n  {parameters},\n): Promise<{}> {{\n{preparation}  return {}<{}>(\n    {{\n      url: API_URLS.{export_name},\n      method: {},{payload}\n    }},\n    options,\n  );\n}}\n\n",
+            "export function {export_name}(\n  {parameters},\n): Promise<{}> {{\n{preparation}  return {}<{}>(\n    {{\n      url: {url},\n      method: {},{payload}\n    }},\n    options,\n  );\n}}\n\n",
             response,
             config.frontend.request.export,
             response,

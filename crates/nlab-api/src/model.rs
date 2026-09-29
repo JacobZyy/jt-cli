@@ -55,6 +55,7 @@ pub struct RequestArgument {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputLocation {
+    Path,
     Query,
     Body,
     Form,

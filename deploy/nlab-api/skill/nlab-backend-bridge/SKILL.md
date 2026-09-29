@@ -129,7 +129,9 @@ CLI 先列出 `contractRoots` 中的接口方法，再查询 ZGateway。只有�
 
 Controller 仓库沿用同一配置和命令。CLI 从 Spring MVC Controller 注解读取路由与参数绑定，随后复用 Discover、契约、枚举及生成链路，不查询 ZGateway。首次 Controller 生成也可使用 `--offline`，不要求既有路由缓存；不支持的映射按 CLI 原始错误反馈，不由 Skill 猜测路径或参数。
 
-明确的 `consumes = "multipart/form-data"` 或已导入的 Spring `MediaType.MULTIPART_FORM_DATA_VALUE` 沿用已有表单参数生成。DTO 聚合上传、同一方法的双映射注解、`{module}/{cmd}` 动态 SCF 转发保持不支持；不接入旧网关或推测运行时业务契约。
+普通 `{taskId}` 路径模板与 `@PathVariable`、同类字面量 `static final String` 路径常量由 CLI 解析。路径参数在客户端中必填、编码后替换 URL，缺失或不匹配的绑定按原始错误反馈，不由 Skill 手工拼接或修改生成文件。
+
+明确的 `consumes = "multipart/form-data"` 或已导入的 Spring `MediaType.MULTIPART_FORM_DATA_VALUE` 沿用已有表单参数生成。DTO 聚合上传、同一方法的双映射注解仍不支持；路径模板支持不代表可以推测 `{module}/{cmd}` 动态 SCF 转发背后的业务契约，不接入旧网关。
 
 跨仓库发现默认开启，新项目和未配置 discovery 的旧项目都适用。直接执行上述 generate，CLI 自动确定并保存公共目录，每次在写入生成物之前执行 Discover；不需要 Skill 额外开启或重复扫描。
 只有用户指定公共目录时才附加 `--repositories-root <path>`，使用前从 `generate --help` 确认参数存在。Facade 的 `generate --offline` 跳过网关查询，必须已有 `.nlab/contract-ir.json`，其中路由须匹配当前后端的 appName、分支和提交；Facade 首次生成需要在线查询网关。

@@ -232,7 +232,7 @@ fn database_value_lookup_exports_known_members_without_closing_the_field() {
 }
 
 #[test]
-fn explicit_imports_and_duplicate_full_names_never_select_a_different_repository() {
+fn imports_and_duplicate_full_names_never_select_a_different_repository() {
     let primary = tempfile::tempdir().unwrap();
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
@@ -241,19 +241,27 @@ fn explicit_imports_and_duplicate_full_names_never_select_a_different_repository
         "Caller.java",
         "package p;\nimport wrong.Code;\nclass Caller {}\n",
     );
+    write(
+        primary.path(),
+        "Other.java",
+        "package other;\nenum Code { B; }\n",
+    );
     let mut graph = test_snapshot(
-        vec![node(
-            "caller",
-            "class",
-            "Caller",
-            "p::Caller",
-            "Caller.java",
-            3,
-            "",
-        )],
+        vec![
+            node(
+                "caller",
+                "class",
+                "Caller",
+                "p::Caller",
+                "Caller.java",
+                3,
+                "",
+            ),
+            node("other", "enum", "Code", "other::Code", "Other.java", 2, ""),
+        ],
         vec![],
     );
-    for root in [first.path(), second.path()] {
+    for (index, root) in [first.path(), second.path()].into_iter().enumerate() {
         write(root, "Code.java", "package dep;\nenum Code { A; }\n");
         graph
             .include_repository(
@@ -272,15 +280,30 @@ fn explicit_imports_and_duplicate_full_names_never_select_a_different_repository
                 ),
             )
             .unwrap();
-        let project = JavaProject::load(primary.path(), &graph).unwrap();
-        assert!(
-            project
-                .resolve_type("Caller.java", "p.Caller", &parse_java_type("Code").unwrap())
-                .is_none()
-        );
-        assert!(
-            linked_enum_nodes(&project, "Caller.java", "p.Caller", "{@link wrong.Code}").is_empty()
-        );
+        for (imports, expected) in [
+            ("import wrong.Code;", None),
+            ("import dep.*;", (index == 0).then_some("dep.Code")),
+            ("import dep.*;\nimport other.*;", None),
+            ("import dep.*;\nimport other.Code;", Some("other.Code")),
+        ] {
+            write(
+                primary.path(),
+                "Caller.java",
+                &format!("package p;\n{imports}\nclass Caller {{}}\n"),
+            );
+            let project = JavaProject::load(primary.path(), &graph).unwrap();
+            assert_eq!(
+                project
+                    .resolve_type("Caller.java", "p.Caller", &parse_java_type("Code").unwrap())
+                    .map(|node| node.qualified_name.replace("::", ".")),
+                expected.map(str::to_owned),
+                "{imports}; duplicate repository: {index}"
+            );
+            assert!(
+                linked_enum_nodes(&project, "Caller.java", "p.Caller", "{@link wrong.Code}")
+                    .is_empty()
+            );
+        }
     }
     let project = JavaProject::load(primary.path(), &graph).unwrap();
     assert!(project.node_for_fqn("dep.Code").is_none());

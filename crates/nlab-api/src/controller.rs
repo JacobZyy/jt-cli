@@ -67,7 +67,14 @@ pub(crate) fn routes(
             else {
                 continue;
             };
-            let base = mapping(&source, class)?.unwrap_or_default();
+            let base = mapping(&source, class)
+                .with_context(|| {
+                    format!(
+                        "Controller mapping at {file}:{}",
+                        class.start_position().row + 1
+                    )
+                })?
+                .unwrap_or_default();
             let body = class
                 .child_by_field_name("body")
                 .context("Controller body missing")?;
@@ -142,6 +149,7 @@ pub(crate) fn routes(
                         ("", path) | (path, "") => format!("/{path}"),
                         (base, path) => format!("/{base}/{path}"),
                     };
+                    validate_path_bindings(&path, &bindings)?;
                     Ok(HttpRouteKey {
                         interface_name: owner.qualified_name.replace("::", "."),
                         method_name: method_name.to_owned(),
@@ -231,9 +239,6 @@ fn mapping(source: &str, declaration: Node<'_>) -> Result<Option<Mapping>> {
         .map(|value| string_value(source, value))
         .transpose()?
         .unwrap_or_default();
-    if path.contains(['{', '}', '*', '$', '#', '?']) {
-        bail!("dynamic Controller path is unsupported: {path}");
-    }
     let method = match spring_annotation(source, annotation) {
         Some("GetMapping") => Some("GET".to_owned()),
         Some("PostMapping") => Some("POST".to_owned()),
@@ -320,6 +325,22 @@ fn request_bindings(
                 })
                 .collect::<Vec<_>>();
             let source = match bindings.as_slice() {
+                [("PathVariable", annotation)] => {
+                    if !is_scalar(&kind)
+                        || kind.simple_name() == "MultipartFile"
+                        || kind.array_depth != 0
+                        || !kind.arguments.is_empty()
+                    {
+                        bail!("Controller path variable must be a scalar: {java_name}");
+                    }
+                    let name = attribute(source, *annotation, "name")
+                        .or_else(|| attribute(source, *annotation, "value"))
+                        .map(|value| string_value(source, value))
+                        .transpose()?
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| java_name.to_owned());
+                    BindingSource::Input(InputLocation::Path, Some(name))
+                }
                 [("RequestBody", _)] if !multipart => {
                     BindingSource::Input(InputLocation::Body, None)
                 }
@@ -393,6 +414,35 @@ fn request_bindings(
             Ok(RequestBinding { index, source })
         })
         .collect()
+}
+
+fn validate_path_bindings(path: &str, bindings: &[RequestBinding]) -> Result<()> {
+    let pattern = regex::Regex::new(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")?;
+    if pattern
+        .replace_all(path, "")
+        .contains(['{', '}', '*', '$', '#', '?'])
+    {
+        bail!("unsupported Controller path pattern: {path}");
+    }
+    let variables = pattern
+        .captures_iter(path)
+        .map(|capture| capture[1].to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    for binding in bindings {
+        if let BindingSource::Input(InputLocation::Path, Some(name)) = &binding.source {
+            if !names.insert(name.clone()) {
+                bail!("duplicate Controller path variable binding: {name}");
+            }
+            if !variables.contains(name) {
+                bail!("Controller @PathVariable {name} is absent from path {path}");
+            }
+        }
+    }
+    if let Some(name) = variables.difference(&names).next() {
+        bail!("Controller path variable {name} has no @PathVariable binding: {path}");
+    }
+    Ok(())
 }
 
 fn is_scalar(kind: &TypeRef) -> bool {
@@ -514,10 +564,44 @@ fn single_value(node: Node<'_>) -> Result<Node<'_>> {
 }
 
 fn string_value(source: &str, node: Node<'_>) -> Result<String> {
-    let node = single_value(node)?;
+    let mut node = single_value(node)?;
+    if node.kind() == "identifier"
+        && let Some(class) = std::iter::successors(node.parent(), |node| node.parent())
+            .find(|node| node.kind() == "class_declaration")
+        && let Some(body) = class.child_by_field_name("body")
+    {
+        let name = text(source, node);
+        let constant = children(body)
+            .into_iter()
+            .filter(|field| {
+                field.kind() == "field_declaration"
+                    && field
+                        .child_by_field_name("type")
+                        .is_some_and(|kind| text(source, kind) == "String")
+                    && children(*field).into_iter().any(|part| {
+                        part.kind() == "modifiers"
+                            && ["static", "final"].iter().all(|modifier| {
+                                text(source, part)
+                                    .split_whitespace()
+                                    .any(|word| word == *modifier)
+                            })
+                    })
+            })
+            .flat_map(children)
+            .find(|variable| {
+                variable.kind() == "variable_declarator"
+                    && variable
+                        .child_by_field_name("name")
+                        .is_some_and(|value| text(source, value) == name)
+            })
+            .and_then(|variable| variable.child_by_field_name("value"));
+        if let Some(value) = constant {
+            node = value;
+        }
+    }
     if node.kind() != "string_literal" {
         bail!(
-            "Controller mapping must use a literal string: {}",
+            "Controller mapping must use a literal string or a local static final String constant: {}",
             text(source, node)
         );
     }
@@ -549,6 +633,7 @@ import org.springframework.http.MediaType;
 @RestController
 @RequestMapping("/orders")
 class OrdersController {
+    private static final String DOWNLOAD_PATH = "/download";
     @GetMapping
     Result<String> delete(@RequestParam("q") String keyword) { return null; }
     @PostMapping
@@ -563,6 +648,12 @@ class OrdersController {
     Result<String> find(Long id) { return null; }
     @GetMapping("/byCode")
     Result<String> find(String code) { return null; }
+    @GetMapping("/detail/{taskId}")
+    Result<String> detail(@PathVariable Long taskId) { return null; }
+    @PostMapping("/{taskId}/versions/{version}")
+    Result<String> update(@PathVariable(name = "taskId") Long id, @PathVariable("version") String version, @RequestBody Payload payload, @RequestParam("q") String keyword) { return null; }
+    @GetMapping(DOWNLOAD_PATH)
+    Result<String> download(@RequestParam String taskId) { return null; }
     String internal() { return null; }
     // @PostMapping("/deleted") String deleted() { return null; }
 }
@@ -596,6 +687,12 @@ class Payload { String value; }
             ("mixed", "Payload payload, String keyword"),
             ("upload", "MultipartFile file, Integer count"),
             ("export", "Payload payload"),
+            ("detail", "Long taskId"),
+            (
+                "update",
+                "Long id, String version, Payload payload, String keyword",
+            ),
+            ("download", "String taskId"),
             ("internal", ""),
         ];
         nodes.extend(methods.iter().map(|(name, parameters)| {
@@ -635,7 +732,7 @@ class Payload { String value; }
         assert!(has_controller("import org.springframework.web.bind.annotation.RestController; @RestController class Web {}").unwrap());
         assert!(!has_controller("import org.springframework.web.bind.annotation.*; import local.RestController; @RestController class Internal {}").unwrap());
         let routes = routes(repo.path(), &graph, &candidates).unwrap();
-        assert_eq!(routes.len(), 7);
+        assert_eq!(routes.len(), 10);
         assert_eq!(
             routes
                 .iter()
@@ -648,7 +745,7 @@ class Payload { String value; }
         let (operations, schemas) = project
             .build_contracts(&["web".to_owned()], &routes)
             .unwrap();
-        assert_eq!(operations.len(), 7);
+        assert_eq!(operations.len(), 10);
         assert!(operations.iter().all(|operation| operation.route.source
             == RouteSource::Controller
             && operation.response.name == "String"));
@@ -681,6 +778,16 @@ class Payload { String value; }
         );
         assert!(document["paths"]["/orders"]["post"]["requestBody"].is_object());
         assert_eq!(
+            document["paths"]["/orders/detail/{taskId}"]["get"]["parameters"][0],
+            serde_json::json!({"name": "taskId", "in": "path", "required": true, "schema": {"type": "string", "x-nlab-java-type": "Long"}}),
+        );
+        assert!(document["paths"]["/orders/download"]["get"].is_object());
+        let update = &document["paths"]["/orders/{taskId}/versions/{version}"]["post"];
+        assert_eq!(update["parameters"][0]["in"], "path");
+        assert_eq!(update["parameters"][1]["in"], "path");
+        assert_eq!(update["parameters"][2]["in"], "query");
+        assert!(update["requestBody"].is_object());
+        assert_eq!(
             document["paths"]["/orders/upload"]["post"]["requestBody"]["content"]["multipart/form-data"]
                 ["schema"]["properties"]["file"]["format"],
             "binary"
@@ -696,14 +803,54 @@ class Payload { String value; }
         assert!(api.contains("data: form"));
         assert!(api.contains("data: request?.[\"payload\"]"));
         assert!(api.contains("params: { q: request?.[\"q\"] }"));
+        assert!(api.contains("function detail(\n  request: { taskId: string }"));
+        assert!(api.contains(
+            "request: { taskId: string; version: string; payload?: Payload; q?: string }"
+        ));
+        assert!(api.contains("url: API_URLS.detail.replaceAll(\"{taskId}\", encodeURIComponent(String(request[\"taskId\"])))"));
+        assert!(api.contains(
+            ".replaceAll(\"{version}\", encodeURIComponent(String(request[\"version\"])))"
+        ));
+        assert!(api.contains("throw new Error(\"Missing path variable: taskId\")"));
         fs::write(&path, source.replace("/mixed", "/{id}")).unwrap();
         assert!(
             format!(
                 "{:#}",
                 super::routes(repo.path(), &graph, &candidates).unwrap_err()
             )
-            .contains("dynamic Controller path")
+            .contains("path variable id has no @PathVariable binding")
         );
+        fs::write(
+            &path,
+            source.replace("static final String", "static String"),
+        )
+        .unwrap();
+        assert!(
+            format!(
+                "{:#}",
+                super::routes(repo.path(), &graph, &candidates).unwrap_err()
+            )
+            .contains("local static final String constant")
+        );
+    }
+
+    #[test]
+    fn path_templates_require_exact_bindings() {
+        let binding = |name: &str| RequestBinding {
+            index: 0,
+            source: BindingSource::Input(InputLocation::Path, Some(name.to_owned())),
+        };
+        assert!(validate_path_bindings("/parent/{id}/copy/{id}", &[binding("id")]).is_ok());
+        for (path, bindings) in [
+            ("/detail/{id}", vec![]),
+            ("/detail", vec![binding("id")]),
+            ("/detail/{id}", vec![binding("id"), binding("id")]),
+            ("/detail/{id:[0-9]+}", vec![binding("id")]),
+            ("/detail/**", vec![]),
+            ("/${base}/detail", vec![]),
+        ] {
+            assert!(validate_path_bindings(path, &bindings).is_err(), "{path}");
+        }
     }
 
     #[test]

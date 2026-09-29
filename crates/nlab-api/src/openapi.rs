@@ -282,7 +282,7 @@ fn operation_object(
             json!(request.render_java()),
         );
     }
-    let mut query = Vec::new();
+    let mut parameters = Vec::new();
     let mut body = None;
     if operation.request_arguments.is_empty() {
         body = operation.request.as_ref().map(|request| {
@@ -309,8 +309,16 @@ fn operation_object(
                 true,
             );
             match (argument.location, argument.name.as_deref()) {
+                (InputLocation::Path, Some(name)) => {
+                    parameters.push(
+                        json!({"name": name, "in": "path", "required": true, "schema": schema}),
+                    );
+                }
+                (InputLocation::Path, None) => {
+                    bail!("path argument requires a name: {}", operation.key);
+                }
                 (InputLocation::Query, Some(name)) => {
-                    query.push(
+                    parameters.push(
                         json!({"name": name, "in": "query", "required": false, "schema": schema}),
                     );
                 }
@@ -327,10 +335,10 @@ fn operation_object(
                         );
                         for (name, field) in object["properties"].as_object().into_iter().flatten()
                         {
-                            query.push(json!({"name": name, "in": "query", "required": false, "schema": field}));
+                            parameters.push(json!({"name": name, "in": "query", "required": false, "schema": field}));
                         }
                     } else {
-                        query.push(json!({
+                        parameters.push(json!({
                             "name": argument.java_name, "in": "query", "required": false,
                             "style": "form", "explode": true, "schema": schema,
                         }));
@@ -348,8 +356,8 @@ fn operation_object(
             }));
         }
     }
-    if !query.is_empty() {
-        value.insert("parameters".to_owned(), Value::Array(query));
+    if !parameters.is_empty() {
+        value.insert("parameters".to_owned(), Value::Array(parameters));
     }
     if let Some(schema) = body {
         let media_type = if operation

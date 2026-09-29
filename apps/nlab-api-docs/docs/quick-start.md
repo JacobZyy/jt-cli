@@ -194,6 +194,12 @@ ZGateway 路由决定 HTTP 方法与路径。其 `requestMappingConfigs` 按 `$.
 
 Controller 使用相同的 `init`、`generate` 命令和配置格式。`@RequestMapping` 的类路径与方法路径组合，支持 `@GetMapping`、`@PostMapping`、`@PutMapping`、`@PatchMapping`、`@DeleteMapping` 及单个显式 `RequestMethod`。未限制 HTTP 方法时，带 JSON 或 multipart 请求体选择 POST，其余选择 GET；这两种都是该映射允许的方法。
 
+路径可以使用字符串字面量，或同一 Controller 类中以字符串字面量初始化的 `static final String` 常量。
+普通 `{taskId}` 路径模板通过 `@PathVariable` 绑定，支持省略名称、`value` 和 `name`；类路径与方法路径组合后校验变量，缺失、重复或不匹配的绑定明确报错。
+路径参数在 OpenAPI 中为必填的 `in: path`，生成的 TypeScript 请求参数也必填；发送前检查缺值，使用 `encodeURIComponent` 编码并替换 URL，不混入 query、JSON body 或 multipart 表单。Java `Long` 沿用字符串类型，避免精度丢失。
+
+DTO 类型解析保留 `import package.*`，按导入包定位类型；跨仓库存在同名类时不会因此丢失已经明确导入的类型。多个通配导入命中不同类型，或同一全限定名存在多个来源时，仍保留歧义，不任取一个类型。
+
 `@RequestBody` 对应完整 JSON body；`@RequestParam` 和普通标量对应 query，普通对象对应展开的 query 字段。`MultipartFile` 参数生成 `Blob` 类型与 `FormData`，同一方法的请求参数放入 multipart 表单；浏览器负责 Content-Type boundary。Servlet 上下文不要求前端传入。路由来源在 IR 和 OpenAPI 中标记为 `controller`，DTO、枚举、跨仓库分析、生成和迁移仍复用既有链路。
 
 显式声明 `consumes = "multipart/form-data"`、已导入的 Spring `MediaType.MULTIPART_FORM_DATA_VALUE`
@@ -201,7 +207,7 @@ Controller 使用相同的 `init`、`generate` 命令和配置格式。`@Request
 
 同一 Java 方法名有多个已暴露的重载时，operation key 加入参数类型，客户端函数使用 `方法名By参数类型` 区分，例如 `paramsMaterialByLong`。非重载接口沿用方法名；遇到 JavaScript 保留字时加 `Api` 后缀，例如 `deleteApi`、`exportApi`。同一个 HTTP 路径可以同时包含 GET、POST 等不同操作；相同路径和 HTTP 方法重复时明确报错。
 
-当前支持直接声明在 Controller 类上的方法。动态路径、路径变量、自定义组合注解、同一方法的多个映射注解、多个路径或 HTTP 方法、上述 multipart 以外的附加映射条件、非 JSON 视图、未支持的参数绑定不生成猜测结果；已识别映射遇到不支持的内容会携带类、方法或源码位置报错。`{module}/{cmd}` 动态 SCF 转发不纳入普通 Controller 契约识别。multipart 对象聚合绑定需改用明确的字段参数。
+当前支持直接声明在 Controller 类上的方法。路径通配符、带正则的路径变量、运行时配置表达式、自定义组合注解、同一方法的多个映射注解、多个路径或 HTTP 方法、上述 multipart 以外的附加映射条件、非 JSON 视图、未支持的参数绑定不生成猜测结果；已识别映射遇到不支持的内容会携带类、方法或源码位置报错。路径模板支持只描述 Controller 声明的入口，不推测 `{module}/{cmd}` 反射转发背后的 SCF 业务契约。multipart 对象聚合绑定需改用明确的字段参数。
 
 核心产物：
 

@@ -95,6 +95,8 @@ nlab-api mock --project /path/to/frontend \
 */api/detail file://</Users/example/project/.nlab/mock/detail.json>
 ```
 
+Controller 的 `/detail/{taskId}` 等路径模板生成正则匹配规则，每个变量匹配一个 URL 路径段，允许查询参数；不会按带花括号的字面路径匹配，也不会匹配额外子路径。匹配语法使用 [Whistle 正则规则](https://wproxy.org/docs/rules/pattern.html#正则匹配)。
+
 文件采用真实绝对路径；尖括号固定文件目标，避免追加剩余请求路径。URL 中的旧 Mock Query 不再切换响应。
 
 ## 文件保护与验证
