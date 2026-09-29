@@ -173,6 +173,9 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 
 下次不传 `--branch` 时，CLI 自动切回团队配置分支。
 
+已有仓库只抓取部分分支时，CLI 显式获取目标分支再创建本地分支，不修改原有 fetch 配置。
+后续更新显式指定远端和分支，仍只允许 fast-forward；目标分支确实不存在或获取失败时保留 Git 原始诊断。
+
 `generate` 按顺序执行：
 
 1. 获取后端仓库锁；缺失时根据 repository URL clone。

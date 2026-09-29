@@ -290,21 +290,18 @@ fn switch_branch(root: &Path, branch: &str, deadline: Instant) -> Result<()> {
         return run_git(root, ["switch", branch], "switch backend branch", deadline);
     }
 
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let refspec = format!("refs/heads/{branch}:{remote_ref}");
     run_git(
         root,
-        ["fetch", "--no-tags", "origin"],
-        "fetch backend branches",
+        ["fetch", "--no-tags", "origin", &refspec],
+        &format!("fetch backend branch {branch}"),
         deadline,
     )?;
-    let remote = format!("origin/{branch}");
-    let remote_ref = format!("refs/remotes/{remote}");
-    if !ref_exists(root, &remote_ref)? {
-        bail!("backend branch not found on origin: {branch}");
-    }
     run_git(
         root,
-        ["switch", "--track", "-c", branch, &remote],
-        "create backend tracking branch",
+        ["switch", "--no-track", "-c", branch, &remote_ref],
+        "create backend branch",
         deadline,
     )
 }
@@ -593,6 +590,54 @@ mod tests {
             fs::read_to_string(backend.join("contract.java")).unwrap(),
             "main"
         );
+    }
+
+    #[test]
+    fn prepare_fetches_target_outside_single_branch_refspec() {
+        let (root, remote, upstream, backend) = repositories();
+        git(&upstream, &["push", "origin", "main:master"]);
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--single-branch",
+                "--branch",
+                "feature",
+                remote.to_str().unwrap(),
+                backend.to_str().unwrap(),
+            ],
+        );
+        let fetch = git_text(&backend, ["config", "--get-all", "remote.origin.fetch"]).unwrap();
+        assert!(!ref_exists(&backend, "refs/remotes/origin/master").unwrap());
+        let deadline = || Instant::now() + Duration::from_secs(10);
+        {
+            let prepared = prepare(&backend, None, Some("master"), deadline()).unwrap();
+            assert_eq!(prepared.target.branch, "master");
+            assert_eq!(
+                fs::read_to_string(backend.join("contract.java")).unwrap(),
+                "main"
+            );
+        }
+
+        fs::write(upstream.join("contract.java"), "updated master").unwrap();
+        git(&upstream, &["commit", "-am", "update master"]);
+        git(&upstream, &["push", "origin", "main:master"]);
+        let commit = git_text(&upstream, ["rev-parse", "HEAD"]).unwrap();
+        {
+            let prepared = prepare(&backend, None, Some("master"), deadline()).unwrap();
+            assert_eq!(prepared.target.commit, commit);
+            assert_eq!(
+                fs::read_to_string(backend.join("contract.java")).unwrap(),
+                "updated master"
+            );
+        }
+        assert_eq!(
+            git_text(&backend, ["config", "--get-all", "remote.origin.fetch"]).unwrap(),
+            fetch
+        );
+        assert!(prepare(&backend, None, Some("missing"), deadline()).is_err());
+        assert_eq!(current_branch(&backend).unwrap(), "master");
+        assert_eq!(git_text(&backend, ["rev-parse", "HEAD"]).unwrap(), commit);
     }
 
     #[test]
