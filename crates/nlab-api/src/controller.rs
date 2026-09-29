@@ -120,7 +120,8 @@ pub(crate) fn routes(
                     let [_] = methods.as_slice() else {
                         bail!("Controller method does not match one indexed declaration");
                     };
-                    let bindings = request_bindings(&source, parameters)?;
+                    let bindings =
+                        request_bindings(&source, parameters, mapping.multipart || base.multipart)?;
                     let has_body = bindings.iter().any(|binding| {
                         matches!(
                             binding.source,
@@ -184,6 +185,7 @@ pub(crate) fn routes(
 struct Mapping {
     path: String,
     method: Option<String>,
+    multipart: bool,
 }
 
 fn mapping(source: &str, declaration: Node<'_>) -> Result<Option<Mapping>> {
@@ -208,11 +210,22 @@ fn mapping(source: &str, declaration: Node<'_>) -> Result<Option<Mapping>> {
         [annotation] => *annotation,
         _ => bail!("multiple Controller mapping annotations are unsupported"),
     };
-    for name in ["params", "headers", "consumes", "produces"] {
+    for name in ["params", "headers", "produces"] {
         if attribute(source, annotation, name).is_some() {
             bail!("Controller mapping condition {name} is unsupported");
         }
     }
+    let multipart = if let Some(consumes) = attribute(source, annotation, "consumes") {
+        if !multipart_content_type(source, single_value(consumes)?) {
+            bail!(
+                "Controller mapping condition consumes is unsupported: {}",
+                text(source, consumes)
+            );
+        }
+        true
+    } else {
+        false
+    };
     let path = attribute(source, annotation, "path")
         .or_else(|| attribute(source, annotation, "value"))
         .map(|value| string_value(source, value))
@@ -241,23 +254,53 @@ fn mapping(source: &str, declaration: Node<'_>) -> Result<Option<Mapping>> {
             })
             .transpose()?,
     };
-    Ok(Some(Mapping { path, method }))
+    Ok(Some(Mapping {
+        path,
+        method,
+        multipart,
+    }))
 }
 
-fn request_bindings(source: &str, parameters: Node<'_>) -> Result<Vec<RequestBinding>> {
+fn multipart_content_type(source: &str, node: Node<'_>) -> bool {
+    match text(source, node) {
+        "\"multipart/form-data\""
+        | "org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE" => true,
+        "MediaType.MULTIPART_FORM_DATA_VALUE" => {
+            let mut root = node;
+            while let Some(parent) = root.parent() {
+                root = parent;
+            }
+            children(root).into_iter().any(|import| {
+                import.kind() == "import_declaration"
+                    && children(import).into_iter().any(|part| {
+                        part.kind() == "scoped_identifier"
+                            && text(source, part) == "org.springframework.http.MediaType"
+                    })
+            })
+        }
+        _ => false,
+    }
+}
+
+fn request_bindings(
+    source: &str,
+    parameters: Node<'_>,
+    multipart: bool,
+) -> Result<Vec<RequestBinding>> {
     let types = crate::gateway::parameter_types(source, parameters)
         .context("unsupported Controller parameters")?;
     let parameters = children(parameters)
         .into_iter()
         .filter(|node| !matches!(node.kind(), "line_comment" | "block_comment"))
         .collect::<Vec<_>>();
-    let multipart = types.iter().any(|kind| {
-        kind.simple_name() == "MultipartFile"
-            || kind
-                .arguments
-                .iter()
-                .any(|kind| kind.simple_name() == "MultipartFile")
-    });
+    let multipart = multipart
+        || types.iter().any(|kind| {
+            kind.simple_name() == "MultipartFile"
+                || kind
+                    .arguments
+                    .iter()
+                    .any(|kind| kind.simple_name() == "MultipartFile")
+        });
     parameters
         .into_iter()
         .zip(types)
@@ -502,6 +545,7 @@ mod tests {
         let source = r#"package p;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.http.MediaType;
 @RestController
 @RequestMapping("/orders")
 class OrdersController {
@@ -511,7 +555,7 @@ class OrdersController {
     Result<String> save(@RequestBody Payload payload) { return null; }
     @PostMapping("/mixed")
     Result<String> mixed(@RequestBody Payload payload, @RequestParam("q") String keyword) { return null; }
-    @PostMapping("/upload")
+    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     Result<String> upload(@RequestParam("file") MultipartFile file, @RequestParam("count") Integer count) { return null; }
     @RequestMapping("/any")
     Result<String> export(@RequestBody Payload payload) { return null; }
@@ -659,6 +703,56 @@ class Payload { String value; }
                 super::routes(repo.path(), &graph, &candidates).unwrap_err()
             )
             .contains("dynamic Controller path")
+        );
+    }
+
+    #[test]
+    fn multipart_mapping_keeps_explicit_media_and_binding_boundaries() {
+        for (consumes, allowed) in [
+            ("\"multipart/form-data\"", true),
+            ("{\"multipart/form-data\"}", true),
+            (
+                "org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE",
+                true,
+            ),
+            ("MediaType.MULTIPART_FORM_DATA_VALUE", true),
+            ("\"application/json\"", false),
+            ("{\"multipart/form-data\", \"application/json\"}", false),
+            ("OtherType.MULTIPART_FORM_DATA_VALUE", false),
+        ] {
+            let source = format!(
+                "import org.springframework.http.MediaType; import org.springframework.web.bind.annotation.*; @RestController @RequestMapping(consumes = {consumes}) class Upload {{}}"
+            );
+            let tree = parse(&source).unwrap();
+            let result = mapping(&source, classes(tree.root_node())[0]);
+            assert_eq!(result.is_ok(), allowed, "{consumes}");
+            if allowed {
+                assert!(result.unwrap().unwrap().multipart);
+            }
+        }
+        let source = "import org.springframework.web.bind.annotation.*; class Upload { void save(@RequestParam String name) {} void object(Payload payload) {} }";
+        let tree = parse(source).unwrap();
+        let class = classes(tree.root_node())[0];
+        let methods = children(class.child_by_field_name("body").unwrap());
+        let bindings = request_bindings(
+            source,
+            methods[0].child_by_field_name("parameters").unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            bindings[0].source,
+            BindingSource::Input(InputLocation::Form, Some("name".into()))
+        );
+        assert!(
+            request_bindings(
+                source,
+                methods[1].child_by_field_name("parameters").unwrap(),
+                true
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("multipart object binding")
         );
     }
 }

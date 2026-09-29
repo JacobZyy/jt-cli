@@ -1,21 +1,23 @@
 ---
 name: nlab-backend-bridge
 metadata:
-  version: 2.6.2
+  version: 3.0.0
   opencode/autoinvoke: "false"
   invocation: manual
 description:
-  仅供用户显式调用 `$nlab-backend-bridge` 或客户端对应的手动 Skill 命令。按项目本地 config 选择 `jt nlab-api` 或 standalone `nlab-api`，从后端接口目录和网关 HTTP 路由识别入口，生成契约、OpenAPI、TypeScript 类型和 API，处理跨仓库 Discover 与获取失败报告。Rust CLI 独占仓库操作、配置、契约与枚举解析及生成逻辑。本 Skill 收集输入、触发命令、反馈报告；用户要求 Mock 时整理规则与编排。不是通用 Git、接口调试、代理或网关查询工具。
+  仅供用户显式调用 `$nlab-backend-bridge` 或客户端对应的手动 Skill 命令。按项目本地 config 选择 `jt nlab-api` 或 standalone `nlab-api`，准备前端请求适配器，从新网关或 Spring Controller 识别入口，生成契约、OpenAPI、TypeScript 类型和 API，处理跨仓库 Discover 与获取失败报告。Rust CLI 独占仓库操作、配置、契约与枚举解析及生成逻辑。本 Skill 收集输入、准备前端接入、触发命令、反馈报告；用户要求 Mock 时整理规则与编排。不是通用 Git、接口调试、代理或网关查询工具。
 allowed-tools:
   - Bash
   - Read
+  - Write
+  - Edit
   - AskUserQuestion
   - request_user_input
 ---
 
 # nlab-backend-bridge
 
-调用 `nlab-api`，将 Java 后端契约同步到前端项目。本版本对应 CLI 2.2.3 及以上的入口识别规则。
+调用 `nlab-api`，将 Java 后端契约同步到前端项目。本版本要求 CLI 3.0.0 及以上。
 
 ## 边界
 
@@ -27,12 +29,12 @@ allowed-tools:
 - 可选 Mock 工作只读取 CLI 公开产物及业务资料，整理规则与编排；不接管 CLI 的仓库操作、配置、解析或生成算法。
 - 不对相同错误自动重试；用户修复仓库关联或索引后，可以继续被阻断的生成。不额外运行 typecheck、lint、测试或旧生成链。
 - 使用 `--repo-url`、`--clone-dir`、`--contract-root` 或生成时的 `--branch` 前，先从对应 `--help` 确认参数存在。
-  参数缺失时停止并提示升级 nlab-api；不得回退到手工 Git。
+  standalone 先完成下面的升级步骤再检查能力；jt 缺少参数时直接报告。不回退到手工 Git。
 
 ## Runner
 
 先找到一个同时支持 `config --show` 和 `config --detect` 的命令入口：优先检查
-`jt nlab-api config --help`，其次检查 `nlab-api config --help`。两者都不支持时停止并提示升级。
+`jt nlab-api config --help`，其次检查 `nlab-api config --help`。两者都不支持但 standalone 存在时，执行一次 `nlab-api update`，成功后重新探测；更新失败或仅有不支持的 jt 时停止并报告原始错误。
 
 执行 `<config-command> config --show --project <frontend>`，按返回值选择 runner：
 
@@ -45,7 +47,10 @@ allowed-tools:
 
 写入成功后使用刚持久化的 runner。不得直接编辑 `.nlab/nlab-api.local.json`。
 
-使用 `jt --version` 或 `nlab-api --version` 检查所选 runner。低于 2.2.3 时提示升级后继续，不自行切换 runner。
+- `runner: jt`：检查 `jt --version` 和本次命令帮助；低于 3.0.0、命令不可用或能力不足时直接中断，不自动升级或切换 runner。
+- `runner: nlab-api`：除非用户明确跳过更新，每次工作开始先执行一次 `nlab-api update`，复用 CLI 的二进制及 Skill 更新逻辑；本次若已更新则不重复。检查、下载、校验、安装或 Skill 同步失败立即中断，保留原始错误，不用旧版本继续、不循环重试。Lark 通知本期不做。
+- 更新成功后重新读取已更新的 Skill，检查 `nlab-api --version` 及所需命令帮助；仍低于 3.0.0 或缺少能力时报告具体缺口。后续命令使用 `nlab-api --no-update`，避免同一次工作重复检查更新。
+- 用户明确跳过更新时仍检查最低版本和命令能力。runner config 始终保持原值。
 
 ## 输入
 
@@ -59,6 +64,14 @@ allowed-tools:
 缺少首次初始化所需的后端 URL 或路径时询问用户，不猜测仓库。
 
 ## 初始化
+
+只接入具有 `tsconfig.json` 或 `tsconfig.app.json` 的 TypeScript 单仓库项目；缺少配置或严格 JSON 解析失败时保持中断，不补 JSONC、extends 或多项目兼容。
+
+先检查前端已有请求封装及导出的 `nlabRequest`。缺少适配器时，由 Skill 根据实际 `request.ts` 或 `http.ts` 创建独立的 `nlabRequest.ts` 并继续初始化，不把这个可处理的缺口交回用户。适配器接收 CLI 生成的 `url`、`method`、`params`、`data`、`headers` 及可选请求选项，复用项目的 URL、鉴权、错误处理与响应约定；原客户端已解包时不再次读取 `.data`。保留唯一明确的 `export function nlabRequest`、`export async function nlabRequest` 或 `export const nlabRequest` 入口。
+
+保留 TypeScript 项目限制；遇到 JavaScript 请求封装时，由 Skill 结合原有实现与 zfetch 约定迁移为 TypeScript，并补充独立的 `nlabRequest.ts`，保留既有鉴权与响应处理；zfetch 参考模板后续补充。
+
+CLI 从适配器沿本地静态 import、类型 import 与 re-export 查找响应字段声明，支持相对路径、目录 index 和当前 TS 配置中的 paths；不需要把 `code/data` 类型复制到适配文件，也不伪造类型来通过探测。找不到响应约定或本地引入无法解析时保留具体错误。alias 复用现有项目约定，必要配置交由 CLI 写入。
 
 前端项目没有 `.nlab/nlab-api.config.json`，或用户明确要求更换共享 backend/default branch 时，
 按用户提供的后端来源执行一种命令。不得手工 patch 配置。
@@ -93,7 +106,7 @@ jt nlab-api
 nlab-api
 ```
 
-初始化失败时原样展示 CLI 错误，用户补充缺失或冲突输入前停止。
+适配器准备完成后执行初始化。其余初始化失败原样展示 CLI 错误；输入或源码未改变时不重复执行。
 
 ## 生成
 
@@ -115,6 +128,8 @@ CodeGraph 同步。
 CLI 先列出 `contractRoots` 中的接口方法，再查询 ZGateway。只有查到对应 HTTP 路径的方法才进入 Discover、契约和枚举分析；未匹配的方法直接舍弃。首参是否属于 `com.zhuanzhuan.arch.zgateway.support` 包不再决定入口身份。网关查询失败，或全部候选都未匹配时，生成失败，不保留占位路径。`appName` 用于网关查询，初始化时应与后端网关配置的服务名一致。
 
 Controller 仓库沿用同一配置和命令。CLI 从 Spring MVC Controller 注解读取路由与参数绑定，随后复用 Discover、契约、枚举及生成链路，不查询 ZGateway。首次 Controller 生成也可使用 `--offline`，不要求既有路由缓存；不支持的映射按 CLI 原始错误反馈，不由 Skill 猜测路径或参数。
+
+明确的 `consumes = "multipart/form-data"` 或已导入的 Spring `MediaType.MULTIPART_FORM_DATA_VALUE` 沿用已有表单参数生成。DTO 聚合上传、同一方法的双映射注解、`{module}/{cmd}` 动态 SCF 转发保持不支持；不接入旧网关或推测运行时业务契约。
 
 跨仓库发现默认开启，新项目和未配置 discovery 的旧项目都适用。直接执行上述 generate，CLI 自动确定并保存公共目录，每次在写入生成物之前执行 Discover；不需要 Skill 额外开启或重复扫描。
 只有用户指定公共目录时才附加 `--repositories-root <path>`，使用前从 `generate --help` 确认参数存在。Facade 的 `generate --offline` 跳过网关查询，必须已有 `.nlab/contract-ir.json`，其中路由须匹配当前后端的 appName、分支和提交；Facade 首次生成需要在线查询网关。
@@ -151,6 +166,8 @@ Controller 仓库沿用同一配置和命令。CLI 从 Spring MVC Controller 注
 - 成功后展示 stdout 最终 JSON 和 `<frontend>/.nlab/generate-report.json`。
 - `diagnostics` 不自动把成功改判为失败。
 - 失败时展示原始错误和已有报告；退出码 `124` 明确说明超时。
+- 完整保留 zzcli、Git 和 CodeGraph 的诊断与配置、登录、授权提示，不截取最后一行、不新增脱敏处理；权限、分支、索引及 Discover 的原有阻断规则不变，不自动切分支兜底或重建关联。
+- 非零退出不代表没有写入文件。按报告说明失败阶段、已写入产物与后续未完成步骤；hook、migration 或 Mock 失败时不宣称全部回滚，不为重试改写用户代码或忽略失败。
 - 网关查询失败、没有匹配路由或离线路由缓存不匹配时，报告失败原因；不要把这些情况解释为可继续生成的 warning。
 - Discover 退出码 `2` 不是生成成功；获取失败警告不自动改判生成失败。
 

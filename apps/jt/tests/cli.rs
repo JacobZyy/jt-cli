@@ -1844,8 +1844,16 @@ fn nlab_api_runner_config_selects_explicit_cli_and_reads_legacy_jt() {
     assert!(configured_jt.status.success());
     fs::remove_file(&log).unwrap();
 
+    let curl = fake_bin.path().join("curl");
+    fs::write(
+        &curl,
+        "#!/bin/sh\nprintf 'unexpected update check\\n' > \"$NLAB_API_TEST_LOG\"\nexit 22\n",
+    )
+    .unwrap();
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
     let embedded = jt()
         .args(["nlab-api", "generate", "--project", project_path])
+        .env_remove("NLAB_API_NO_UPDATE")
         .env("PATH", &path)
         .env("NLAB_API_TEST_LOG", &log)
         .output()

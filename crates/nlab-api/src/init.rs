@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -7,6 +7,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use ignore::WalkBuilder;
+use oxc_allocator::Allocator;
+use oxc_parser::Parser;
+use oxc_resolver::{AliasValue, ResolveOptions, Resolver};
+use oxc_span::SourceType;
 use regex::Regex;
 use serde_json::{Map, Value};
 
@@ -294,7 +298,11 @@ fn probe_frontend(
         .find(|candidate| project.join(candidate).is_file())
         .context("TypeScript config not found")?
         .to_owned();
-    let source_root = detect_source_root(project, &tsconfig_path)?;
+    let source = fs::read_to_string(project.join(&tsconfig_path))
+        .with_context(|| format!("read TypeScript config {tsconfig_path}"))?;
+    let tsconfig =
+        serde_json::from_str::<Value>(&source).context("decode TypeScript config JSON")?;
+    let source_root = detect_source_root(project, &tsconfig)?;
     let vite_config = [
         "vite.config.ts",
         "vite.config.mts",
@@ -326,7 +334,7 @@ fn probe_frontend(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let (request, response) = detect_request(project, &source_root)?;
+    let (request, response) = detect_request(project, &source_root, &tsconfig)?;
     Ok(FrontendConfig {
         source_root,
         build_tool: BuildToolConfig {
@@ -346,10 +354,7 @@ fn probe_frontend(
     })
 }
 
-fn detect_source_root(project: &Path, tsconfig_path: &str) -> Result<String> {
-    let source = fs::read_to_string(project.join(tsconfig_path))
-        .with_context(|| format!("read TypeScript config {tsconfig_path}"))?;
-    let value = serde_json::from_str::<Value>(&source).context("decode TypeScript config JSON")?;
+fn detect_source_root(project: &Path, value: &Value) -> Result<String> {
     let configured = value["compilerOptions"]["paths"]["@/*"]
         .as_array()
         .and_then(|values| values.first())
@@ -416,7 +421,11 @@ fn aliases_for(preset: LayoutPreset) -> ImportAliases {
     }
 }
 
-fn detect_request(project: &Path, source_root: &str) -> Result<(RequestAdapter, ResponseEnvelope)> {
+fn detect_request(
+    project: &Path,
+    source_root: &str,
+    tsconfig: &Value,
+) -> Result<(RequestAdapter, ResponseEnvelope)> {
     let root = project.join(source_root);
     let mut candidates = WalkBuilder::new(&root)
         .standard_filters(true)
@@ -432,12 +441,13 @@ fn detect_request(project: &Path, source_root: &str) -> Result<(RequestAdapter, 
         .filter_map(|entry| {
             let source = fs::read_to_string(entry.path()).ok()?;
             (source.contains("export function nlabRequest")
+                || source.contains("export async function nlabRequest")
                 || source.contains("export const nlabRequest"))
             .then(|| (entry.into_path(), source))
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    let (path, source) = match candidates.as_slice() {
+    let (path, _) = match candidates.as_slice() {
         [candidate] => candidate,
         [] => bail!("no exported nlabRequest adapter found under {source_root}"),
         _ => bail!(
@@ -462,22 +472,26 @@ fn detect_request(project: &Path, source_root: &str) -> Result<(RequestAdapter, 
     let module = format!("@/{relative}")
         .trim_end_matches("/index")
         .to_owned();
+    let source = request_source_chain(project, source_root, tsconfig, path)?;
     let code_fields = ["code", "respCode"]
         .into_iter()
-        .filter(|field| has_interface_field(source, field))
+        .filter(|field| has_interface_field(&source, field))
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     let data_fields = ["data", "respData"]
         .into_iter()
-        .filter(|field| has_interface_field(source, field))
+        .filter(|field| has_interface_field(&source, field))
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     if code_fields.is_empty() || data_fields.is_empty() {
-        bail!("nlabRequest response envelope fields could not be detected");
+        bail!(
+            "nlabRequest response envelope fields could not be detected in {} or its local TypeScript import/export chain",
+            path.display()
+        );
     }
     let success_code =
         Regex::new(r#"businessCode\.toString\(\)\s*!==\s*['\"](?P<code>[^'\"]+)['\"]"#)?
-            .captures(source)
+            .captures(&source)
             .and_then(|captures| captures.name("code"))
             .map(|value| value.as_str().to_owned())
             .unwrap_or_else(|| "0".to_owned());
@@ -497,6 +511,112 @@ fn detect_request(project: &Path, source_root: &str) -> Result<(RequestAdapter, 
             mock_data_field,
         },
     ))
+}
+
+fn request_source_chain(
+    project: &Path,
+    source_root: &str,
+    tsconfig: &Value,
+    entry: &Path,
+) -> Result<String> {
+    let project = project.canonicalize()?;
+    let compiler = &tsconfig["compilerOptions"];
+    let base = project.join(compiler["baseUrl"].as_str().unwrap_or("."));
+    let mut paths = compiler["paths"].as_object().cloned().unwrap_or_default();
+    paths.entry("@/*").or_insert_with(|| {
+        serde_json::json!([project.join(source_root).join("*").to_string_lossy()])
+    });
+    let alias = paths
+        .iter()
+        .map(|(pattern, targets)| {
+            let key = if pattern.contains('*') {
+                pattern.clone()
+            } else {
+                format!("{pattern}$")
+            };
+            let values = targets
+                .as_array()
+                .context("TypeScript paths entries must be arrays")?
+                .iter()
+                .map(|target| {
+                    Ok(AliasValue::Path(
+                        base.join(
+                            target
+                                .as_str()
+                                .context("TypeScript paths must contain strings")?,
+                        )
+                        .to_string_lossy()
+                        .into_owned(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((key, values))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let resolver = Resolver::new(ResolveOptions {
+        alias,
+        extensions: vec![".ts".into(), ".tsx".into()],
+        extension_alias: vec![(".js".into(), vec![".ts".into(), ".tsx".into()])],
+        ..ResolveOptions::default()
+    });
+    let mut pending = vec![entry.to_path_buf()];
+    let mut visited = BTreeSet::new();
+    let mut sources = String::new();
+    while let Some(path) = pending.pop() {
+        let path = path.canonicalize()?;
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        if !path.starts_with(&project)
+            || !matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("ts" | "tsx")
+            )
+        {
+            bail!(
+                "nlabRequest dependency must be a TypeScript file inside the frontend project: {}",
+                path.display()
+            );
+        }
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("read nlabRequest dependency {}", path.display()))?;
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &source, SourceType::from_path(&path)?).parse();
+        if let Some(error) = parsed.errors.first() {
+            bail!("parse nlabRequest dependency {}: {error}", path.display());
+        }
+        let imports = parsed
+            .module_record
+            .requested_modules
+            .keys()
+            .map(|name| name.as_str())
+            .collect::<BTreeSet<_>>();
+        for specifier in imports {
+            let local = specifier.starts_with('.')
+                || paths.keys().any(|pattern| {
+                    pattern
+                        .split_once('*')
+                        .map_or(pattern == specifier, |(prefix, suffix)| {
+                            specifier.starts_with(prefix) && specifier.ends_with(suffix)
+                        })
+                });
+            if !local {
+                continue;
+            }
+            let dependency = resolver
+                .resolve(path.parent().expect("source parent"), specifier)
+                .with_context(|| {
+                    format!(
+                        "resolve nlabRequest TypeScript import {specifier:?} from {}",
+                        path.display()
+                    )
+                })?;
+            pending.push(dependency.path().to_path_buf());
+        }
+        sources.push_str(&source);
+        sources.push('\n');
+    }
+    Ok(sources)
 }
 
 fn detect_mock_envelope(
@@ -878,6 +998,93 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_adapter_follows_local_imports_reexports_types_and_cycles() {
+        let project = tempfile::tempdir().unwrap();
+        for (file, source) in [
+            (
+                "src/utils/nlabRequest.ts",
+                "import request from '@transport';\nexport const nlabRequest = request;",
+            ),
+            (
+                "src/transport/index.ts",
+                "export { default } from './request.js';",
+            ),
+            (
+                "src/transport/request.ts",
+                "import fetch from '@zz/fetch';\nimport type { Envelope } from '@/types';\nexport default async function request<T>(): Promise<T> { const response = await fetch() as Envelope<T>; const businessCode = response.code; if (businessCode.toString() !== '200') throw new Error(); return response.data; }",
+            ),
+            (
+                "src/types/index.ts",
+                "export type { Envelope } from './envelope';\nexport type Code = string;",
+            ),
+            (
+                "src/types/envelope.ts",
+                "import type { Code } from './index';\nexport interface Envelope<T> {\n code: Code\n data: T\n}",
+            ),
+            (
+                "src/unrelated.ts",
+                "interface Other {\n respCode: number\n respData: unknown\n}",
+            ),
+        ] {
+            let path = project.path().join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, source).unwrap();
+        }
+        let tsconfig = serde_json::json!({"compilerOptions": {"baseUrl": ".", "paths": {
+            "@/*": ["src/*"], "@transport": ["src/transport"]
+        }}});
+        let (adapter, response) = detect_request(project.path(), "src", &tsconfig).unwrap();
+        assert_eq!(adapter.module, "@/utils/nlabRequest");
+        assert_eq!(adapter.response_mode, ResponseMode::Unwrapped);
+        assert_eq!(response.code_fields, ["code"]);
+        assert_eq!(response.data_fields, ["data"]);
+        assert_eq!(response.success_code, "200");
+
+        fs::write(
+            project.path().join("src/types/envelope.ts"),
+            "export type Envelope<T> = T;",
+        )
+        .unwrap();
+        let error = detect_request(project.path(), "src", &tsconfig).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("local TypeScript import/export chain")
+        );
+
+        fs::remove_file(project.path().join("src/transport/request.ts")).unwrap();
+        fs::write(
+            project.path().join("src/transport/request.js"),
+            "export default function request() {}",
+        )
+        .unwrap();
+        let error = detect_request(project.path(), "src", &tsconfig).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("resolve nlabRequest TypeScript import")
+        );
+    }
+
+    #[test]
+    fn frontend_probe_keeps_strict_typescript_config_boundary() {
+        let project = tempfile::tempdir().unwrap();
+        assert!(
+            probe_frontend(project.path(), None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("TypeScript config not found")
+        );
+        fs::write(project.path().join("tsconfig.json"), "{ // comment\n}").unwrap();
+        assert!(
+            probe_frontend(project.path(), None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("decode TypeScript config JSON")
+        );
+    }
 
     fn frontend() -> FrontendConfig {
         FrontendConfig {
