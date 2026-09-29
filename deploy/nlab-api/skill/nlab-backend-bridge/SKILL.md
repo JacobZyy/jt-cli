@@ -52,7 +52,7 @@ allowed-tools:
 - 前端项目目录；默认当前目录。
 - 首次初始化时需要后端 Git URL 或已有本地路径。
 - 可选：默认后端分支、clone 目标目录、`appName`、前端布局 `api|service`。
-- 可选：后端提供的接口目录，可多个，路径相对后端仓库根目录。用户提供时使用 `--contract-root` 逐个传给 CLI；未提供时由 CLI 探测 `@ServiceContract` 接口目录。
+- 可选：后端提供的接口或 Controller 目录，可多个，路径相对后端仓库根目录。用户提供时使用 `--contract-root` 逐个传给 CLI；未提供时由 CLI 探测 `@ServiceContract` 接口及 Spring Controller 目录。
 - 生成时可选：只影响本次运行的后端分支。
 - 可选：后端项目公共目录 `repositoriesRoot`。用户指定时通过 `--repositories-root <path>` 交给 CLI 持久化到本地配置。未指定时优先复用已保存目录，否则使用入口后端仓库的父目录；不为开启跨仓库发现额外询问目录。
 
@@ -114,8 +114,10 @@ CodeGraph 同步。
 
 CLI 先列出 `contractRoots` 中的接口方法，再查询 ZGateway。只有查到对应 HTTP 路径的方法才进入 Discover、契约和枚举分析；未匹配的方法直接舍弃。首参是否属于 `com.zhuanzhuan.arch.zgateway.support` 包不再决定入口身份。网关查询失败，或全部候选都未匹配时，生成失败，不保留占位路径。`appName` 用于网关查询，初始化时应与后端网关配置的服务名一致。
 
+Controller 仓库沿用同一配置和命令。CLI 从 Spring MVC Controller 注解读取路由与参数绑定，随后复用 Discover、契约、枚举及生成链路，不查询 ZGateway。首次 Controller 生成也可使用 `--offline`，不要求既有路由缓存；不支持的映射按 CLI 原始错误反馈，不由 Skill 猜测路径或参数。
+
 跨仓库发现默认开启，新项目和未配置 discovery 的旧项目都适用。直接执行上述 generate，CLI 自动确定并保存公共目录，每次在写入生成物之前执行 Discover；不需要 Skill 额外开启或重复扫描。
-只有用户指定公共目录时才附加 `--repositories-root <path>`，使用前从 `generate --help` 确认参数存在。`generate --offline` 跳过网关查询，必须已有 `.nlab/contract-ir.json`，其中路由须匹配当前后端的 appName、分支和提交；首次生成需要在线查询网关。
+只有用户指定公共目录时才附加 `--repositories-root <path>`，使用前从 `generate --help` 确认参数存在。Facade 的 `generate --offline` 跳过网关查询，必须已有 `.nlab/contract-ir.json`，其中路由须匹配当前后端的 appName、分支和提交；Facade 首次生成需要在线查询网关。
 
 ## Discover 与目标分支
 

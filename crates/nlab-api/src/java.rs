@@ -79,8 +79,7 @@ impl<'a> JavaProject<'a> {
     ) -> Result<(Vec<Operation>, BTreeMap<String, Schema>)> {
         let mut schemas = BTreeMap::new();
         let mut operations = Vec::new();
-        let mut keys = BTreeSet::new();
-        for facade in self.contract_interfaces(contract_roots) {
+        for facade in self.contract_types(contract_roots) {
             let mut methods = self.graph.contained(&facade.id, "method");
             methods.sort_by(|left, right| {
                 left.name
@@ -92,22 +91,41 @@ impl<'a> JavaProject<'a> {
                 *overloads.entry(method.name.as_str()).or_insert(0usize) += 1;
             }
             for method in &methods {
-                let facade_fqn = normalize_fqn(&facade.qualified_name);
                 let overloaded = overloads[method.name.as_str()] > 1;
-                let Some(route) = routes.iter().find(|route| {
-                    route.matches_method(&facade_fqn, &method.name, &method.signature, overloaded)
-                }) else {
+                let Some(route) = routes
+                    .iter()
+                    .find(|route| route.matches_contract(facade, method, overloaded))
+                else {
                     continue;
                 };
                 let operation = self.operation(facade, method, route, &mut schemas)?;
-                if !keys.insert(operation.key.clone()) {
-                    bail!(
-                        "duplicate gateway operation identity is unsupported: {} ({})",
-                        operation.key,
-                        operation.signature
-                    );
-                }
                 operations.push(operation);
+            }
+        }
+        let mut identities = BTreeMap::new();
+        for operation in &operations {
+            *identities.entry(operation.key.clone()).or_insert(0usize) += 1;
+        }
+        let mut keys = BTreeSet::new();
+        for operation in &mut operations {
+            if identities[&operation.key] > 1 {
+                let (_, parameters) = parse_method_signature(&operation.signature)
+                    .expect("validated method signature");
+                operation.key.push_str(&format!(
+                    "({})",
+                    parameters
+                        .iter()
+                        .map(TypeRef::render_java)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
+            }
+            if !keys.insert(operation.key.clone()) {
+                bail!(
+                    "duplicate operation identity: {} ({})",
+                    operation.key,
+                    operation.signature
+                );
             }
         }
         operations.sort_by(|left, right| left.key.cmp(&right.key));
@@ -210,13 +228,13 @@ impl<'a> JavaProject<'a> {
         (candidates.len() == 1).then(|| candidates[0])
     }
 
-    fn contract_interfaces(&self, contract_roots: &[String]) -> Vec<&GraphNode> {
+    fn contract_types(&self, contract_roots: &[String]) -> Vec<&GraphNode> {
         let mut result = self
             .graph
             .nodes
             .values()
             .filter(|node| {
-                node.kind == "interface"
+                matches!(node.kind.as_str(), "interface" | "class")
                     && contract_roots
                         .iter()
                         .any(|root| Path::new(&node.file_path).starts_with(root))
@@ -311,13 +329,6 @@ impl<'a> JavaProject<'a> {
                 if argument.name.is_none() && route.request_bindings.is_none() {
                     argument.name = Some(argument.java_name.clone());
                 }
-                if argument.name.is_none() {
-                    bail!(
-                        "gateway mapping lacks field name for argument {}: {}",
-                        argument.index,
-                        method.qualified_name
-                    );
-                }
             }
         } else if let Some(argument) = request_arguments.first_mut()
             && argument.name.is_none()
@@ -335,11 +346,24 @@ impl<'a> JavaProject<'a> {
         }
         let mut field_names = HashSet::new();
         for argument in &request_arguments {
-            if let Some(name) = &argument.name
-                && !field_names.insert(name)
-            {
+            let name = argument.name.as_ref().unwrap_or(&argument.java_name);
+            if !field_names.insert(name) {
                 bail!(
                     "duplicate frontend request field {name}: {}",
+                    method.qualified_name
+                );
+            }
+        }
+        for argument in &request_arguments {
+            if argument.name.is_none()
+                && request_arguments
+                    .iter()
+                    .filter(|other| other.location == argument.location)
+                    .count()
+                    > 1
+            {
+                bail!(
+                    "whole-object request binding cannot share a location with other arguments: {}",
                     method.qualified_name
                 );
             }

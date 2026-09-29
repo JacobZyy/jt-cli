@@ -488,7 +488,7 @@ fn render_api_file(
     let mut urls = String::new();
     let mut bodies = String::new();
     for operation in operations {
-        let export_name = lower_camel(&operation.method_name);
+        let export_name = function_name(operation);
         if !method_names.insert(export_name.clone()) {
             bail!("generated method collision in {path}: {export_name}");
         }
@@ -540,7 +540,7 @@ fn render_api_file(
                 .request_arguments
                 .iter()
                 .map(|argument| {
-                    let name = argument.name.as_deref().expect("named request argument");
+                    let name = argument.name.as_deref().unwrap_or(&argument.java_name);
                     let kind = type_expression(
                         &argument.java_type,
                         &current,
@@ -572,6 +572,7 @@ fn render_api_file(
                 )
             },
         );
+        let mut preparation = String::new();
         let payload = if operation.request_arguments.is_empty() {
             request.as_ref().map_or_else(String::new, |(parameter, _)| {
                 if operation.route.method.eq_ignore_ascii_case("GET") {
@@ -588,6 +589,7 @@ fn render_api_file(
             for (location, property) in [
                 (InputLocation::Query, "params"),
                 (InputLocation::Body, "data"),
+                (InputLocation::Form, "data"),
             ] {
                 let selected = arguments
                     .iter()
@@ -599,8 +601,47 @@ fn render_api_file(
                 if location == InputLocation::Body {
                     payload.push_str("\n      headers: { 'Content-Type': 'application/json' },");
                 }
-                let value = if direct || selected.len() == arguments.len() {
+                if location == InputLocation::Form {
+                    preparation.push_str("  const form = new FormData();\n");
+                    for argument in &selected {
+                        let name = argument.name.as_deref().expect("multipart field name");
+                        let access = format!("{parameter}[{}]", ts_string(name));
+                        let item = argument
+                            .java_type
+                            .arguments
+                            .first()
+                            .unwrap_or(&argument.java_type);
+                        let array = argument.java_type.array_depth > 0
+                            || is_collection(argument.java_type.simple_name());
+                        let value = if array { "value" } else { &access };
+                        let value = if item.simple_name() == "MultipartFile" {
+                            value.to_owned()
+                        } else {
+                            format!("String({value})")
+                        };
+                        let append = format!("form.append({}, {value})", ts_string(name));
+                        let statement = if array {
+                            format!("{access}.forEach((value) => {append})")
+                        } else {
+                            append
+                        };
+                        preparation.push_str(&format!(
+                            "  if ({parameter}?.[{}] !== undefined) {statement};\n",
+                            ts_string(name)
+                        ));
+                    }
+                    payload.push_str("\n      data: form,");
+                    continue;
+                }
+                let value = if direct
+                    || (selected.len() == arguments.len()
+                        && selected.iter().all(|argument| argument.name.is_some()))
+                {
                     parameter.clone()
+                } else if let [argument] = selected.as_slice()
+                    && argument.name.is_none()
+                {
+                    format!("{parameter}?.[{}]", ts_string(&argument.java_name))
                 } else {
                     let fields = selected
                         .iter()
@@ -621,7 +662,7 @@ fn render_api_file(
             payload
         };
         bodies.push_str(&format!(
-            "export function {export_name}(\n  {parameters},\n): Promise<{}> {{\n  return {}<{}>(\n    {{\n      url: API_URLS.{export_name},\n      method: {},{payload}\n    }},\n    options,\n  );\n}}\n\n",
+            "export function {export_name}(\n  {parameters},\n): Promise<{}> {{\n{preparation}  return {}<{}>(\n    {{\n      url: API_URLS.{export_name},\n      method: {},{payload}\n    }},\n    options,\n  );\n}}\n\n",
             response,
             config.frontend.request.export,
             response,
@@ -653,6 +694,7 @@ fn type_expression(
         Some(type_ref.simple_name())
     } else {
         match type_ref.simple_name() {
+            "MultipartFile" => Some("Blob"),
             "String" | "CharSequence" | "char" | "Character" | "Long" | "long" | "BigInteger"
             | "Date" | "LocalDate" | "LocalDateTime" | "Instant" | "Timestamp" => Some("string"),
             "Integer" | "int" | "Short" | "short" | "Byte" | "byte" | "Double" | "double"
@@ -862,6 +904,65 @@ fn safe_property(value: &str) -> String {
         value.to_owned()
     } else {
         ts_string(value)
+    }
+}
+
+fn function_name(operation: &Operation) -> String {
+    let name = lower_camel(&crate::naming::operation_name(operation));
+    if matches!(
+        name.as_str(),
+        "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "implements"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "interface"
+            | "let"
+            | "new"
+            | "null"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "return"
+            | "static"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+            | "eval"
+            | "arguments"
+    ) {
+        format!("{name}Api")
+    } else {
+        name
     }
 }
 

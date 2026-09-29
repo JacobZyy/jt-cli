@@ -22,7 +22,7 @@ pub struct InitArgs {
     /// Frontend project to inspect and configure
     #[arg(long, value_name = "path", default_value = ".")]
     project: PathBuf,
-    /// Existing Java backend repository containing gateway RPC contracts
+    /// Existing Java backend repository containing gateway RPC contracts or Spring Controllers
     #[arg(
         long,
         value_name = "path",
@@ -47,7 +47,7 @@ pub struct InitArgs {
     /// Application name used for Gateway lookup; default: backend directory name
     #[arg(long)]
     app_name: Option<String>,
-    /// Backend interface directory, relative to the repository; repeat for multiple directories
+    /// Backend interface or Controller directory; repeat for multiple directories
     #[arg(long = "contract-root", value_name = "path")]
     contract_roots: Vec<PathBuf>,
     /// Generated implementation directory family; default: detect existing api/service layout
@@ -566,6 +566,8 @@ fn detect_contract_roots(repo: &Path) -> Result<Vec<String>> {
         let source = fs::read_to_string(entry.path())?;
         if !crate::gateway::has_contract_methods(&source)
             .with_context(|| format!("probe contract declarations in {}", entry.path().display()))?
+            && !crate::controller::has_controller(&source)
+                .with_context(|| format!("probe Controllers in {}", entry.path().display()))?
         {
             continue;
         }
@@ -593,7 +595,9 @@ fn detect_contract_roots(repo: &Path) -> Result<Vec<String>> {
         }
     }
     if roots.is_empty() {
-        bail!("no @ServiceContract interface directories found; pass --contract-root");
+        bail!(
+            "no @ServiceContract interface or Spring Controller directories found; pass --contract-root"
+        );
     }
     Ok(roots
         .into_values()

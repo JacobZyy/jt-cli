@@ -188,6 +188,21 @@ pub(crate) enum BindingSource {
 }
 
 impl HttpRouteKey {
+    pub(crate) fn matches_contract(
+        &self,
+        owner: &crate::graph::GraphNode,
+        method: &crate::graph::GraphNode,
+        overloaded: bool,
+    ) -> bool {
+        (owner.kind == "interface" || self.source == RouteSource::Controller)
+            && self.matches_method(
+                &owner.qualified_name.replace("::", "."),
+                &method.name,
+                &method.signature,
+                overloaded,
+            )
+    }
+
     pub(crate) fn matches(&self, interface_name: &str, method_name: &str) -> bool {
         self.method_name == method_name
             && (self.interface_name == interface_name

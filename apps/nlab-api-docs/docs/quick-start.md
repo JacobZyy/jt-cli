@@ -11,9 +11,9 @@
 - `git`。
 - `codegraph`。
 - 一个前端项目。
-- 一个包含 NLab Java Facade 的后端仓库 URL 或本地 checkout。
+- 一个包含 NLab Java Facade 或 Spring MVC Controller 的后端仓库 URL 或本地 checkout。
 
-首次识别接口需要查询 ZGateway；连接公司网络或 VPN。已有匹配的生成结果时，`--offline` 可复用其路由。
+Facade 首次识别接口需要查询 ZGateway；连接公司网络或 VPN。已有匹配的生成结果时，`--offline` 可复用其路由。Controller 直接读取源码中的 Spring MVC 注解，首次生成也可使用 `--offline`，不查询 ZGateway。
 
 ## 准备 CodeGraph
 
@@ -99,7 +99,7 @@ nlab-api init \
 - `--clone-dir`：`--repo-url` 的可选本地目标目录。
 - `--branch`：团队默认后端分支；省略时使用 clone 或本地仓库当前分支。
 - `--app-name`：网关查询使用的服务身份；省略时使用后端目录名。
-- `--contract-root`：后端提供的接口目录，相对仓库根目录；多个目录可重复传入。省略时尝试从 `@ServiceContract` 接口目录探测。
+- `--contract-root`：后端提供的接口或 Controller 目录，相对仓库根目录；多个目录可重复传入。省略时从 `@ServiceContract` 接口及 Spring `@RestController` / `@Controller` 类探测。
 - `--layout api|service`：强制输出目录族；省略时根据现有 `src/api` 或 `src/service` 检测。
 - `--timeout-seconds`：包含 clone 和更新的整体超时，默认 1200 秒。
 
@@ -167,8 +167,8 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 1. 获取后端仓库锁；缺失时根据 repository URL clone。
 2. 拒绝后端 tracked 改动；不删除或覆盖 untracked 文件。
 3. 切换配置分支或本次 `--branch`，再执行 `git pull --ff-only`。
-4. `codegraph init` 或 `codegraph sync`，读取 `contractRoots` 中的接口方法候选。
-5. 查询 ZGateway；只保留具有对应 HTTP 路径的方法。查询失败时停止生成。
+4. `codegraph init` 或 `codegraph sync`，读取 `contractRoots` 中的接口与 Controller 方法候选。
+5. Facade 查询 ZGateway；只保留具有对应 HTTP 路径的方法，查询失败时停止生成。Controller 从类与方法的 Spring MVC 注解读取 HTTP 路径、方法及参数绑定，无需网关配置开关。
 6. 从保留的方法出发，发现关联仓库并解析请求、响应和 DTO。
 7. 分析调用链、枚举与字段值来源。
 8. 生成 OpenAPI、API、types 和 enums。
@@ -180,6 +180,14 @@ ZGateway 路由决定 HTTP 方法与路径。其 `requestMappingConfigs` 按 `$.
 `$.request.singleValueQueryParams.<name>` 生成 query 字段，`$.bizContext.jsonRequestBody.<name>`
 生成 body 字段；完整 query/body 映射保留 DTO 结构，`$.bizContext` 上下文不要求前端传入。
 没有映射配置时才回退到 Java 参数名。业务参数数量不限；无法识别的映射会明确报错，避免生成错误请求。
+
+Controller 使用相同的 `init`、`generate` 命令和配置格式。`@RequestMapping` 的类路径与方法路径组合，支持 `@GetMapping`、`@PostMapping`、`@PutMapping`、`@PatchMapping`、`@DeleteMapping` 及单个显式 `RequestMethod`。未限制 HTTP 方法时，带 JSON 或 multipart 请求体选择 POST，其余选择 GET；这两种都是该映射允许的方法。
+
+`@RequestBody` 对应完整 JSON body；`@RequestParam` 和普通标量对应 query，普通对象对应展开的 query 字段。`MultipartFile` 参数生成 `Blob` 类型与 `FormData`，同一方法的请求参数放入 multipart 表单；浏览器负责 Content-Type boundary。Servlet 上下文不要求前端传入。路由来源在 IR 和 OpenAPI 中标记为 `controller`，DTO、枚举、跨仓库分析、生成和迁移仍复用既有链路。
+
+同一 Java 方法名有多个已暴露的重载时，operation key 加入参数类型，客户端函数使用 `方法名By参数类型` 区分，例如 `paramsMaterialByLong`。非重载接口沿用方法名；遇到 JavaScript 保留字时加 `Api` 后缀，例如 `deleteApi`、`exportApi`。同一个 HTTP 路径可以同时包含 GET、POST 等不同操作；相同路径和 HTTP 方法重复时明确报错。
+
+当前支持直接声明在 Controller 类上的方法。动态路径、路径变量、自定义组合注解、多个路径或 HTTP 方法、附加映射条件、非 JSON 视图、未支持的参数绑定不生成猜测结果；已识别映射遇到不支持的内容会携带类、方法或源码位置报错。multipart 对象聚合绑定需改用明确的字段参数。
 
 核心产物：
 

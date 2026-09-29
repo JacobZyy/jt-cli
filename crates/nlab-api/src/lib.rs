@@ -2,6 +2,7 @@ mod accept;
 mod after_generate;
 mod coded_values;
 mod config;
+mod controller;
 mod discover;
 mod gateway;
 mod graph;
@@ -147,7 +148,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     let repositories_root =
         discover::resolve_root(&output_dir, args.repositories_root.as_deref(), &target.root)?;
     discover::save_root(&output_dir, &repositories_root)?;
-    reporter.phase(10, "读取接口目录、查询 Gateway 并 Discover 关联仓库");
+    reporter.phase(10, "读取接口路由并 Discover 关联仓库");
     ensure_before_deadline(deadline)?;
     let discover::DiscoveryRun {
         graph,
@@ -174,7 +175,7 @@ fn generate_inner(args: GenerateArgs) -> Result<GenerateResult> {
     let (mut operations, mut schemas) =
         project.build_contracts(&config.backend.contract_roots, &routes)?;
     if operations.is_empty() {
-        bail!("no configured gateway routes matched interfaces in contractRoots");
+        bail!("no HTTP routes matched contracts in contractRoots");
     }
 
     reporter.phase(50, "分析枚举与注释");

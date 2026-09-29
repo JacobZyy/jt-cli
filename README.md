@@ -273,16 +273,21 @@ pnpm --filter @workspace/nlab-api-docs dev
 ```
 
 Initialize one frontend project from its real build, TypeScript, request, response-envelope, output,
-and backend RPC contract layout:
+and backend contract layout:
 
-The backend supplies interface directories through `backend.contractRoots` (or repeated
-`--contract-root` during init). nlab-api reads interface methods from those directories, then
+The backend supplies interface or Spring Controller directories through `backend.contractRoots`
+(or repeated `--contract-root` during init). For RPC interfaces, nlab-api reads methods, then
 queries ZGateway before cross-repository and enum analysis. Only methods with a matching HTTP
 route enter generated contracts; an unmatched method is dropped. Gateway lookup failure stops
 generation instead of producing a pending API. The first parameter's package no longer decides
 HTTP eligibility. When a method has a `com.zhuanzhuan.arch.zgateway.support` context parameter,
-the context is excluded from the frontend request. At most one business parameter is supported.
-Offline generation requires matching routes in an existing `.nlab/contract-ir.json`.
+the context is excluded from the frontend request. Gateway parameter mappings determine query
+and body fields. Offline RPC generation requires matching routes in an existing `.nlab/contract-ir.json`.
+
+Spring Controllers supply routes and parameter bindings directly from their annotations, including
+JSON, query and multipart requests. They reuse the same discovery, contract, enum and generation
+pipeline, and support a first offline generation without Gateway access. `init` detects Controller
+directories automatically. See [Controller mapping support and limits](apps/nlab-api-docs/docs/quick-start.md#生成契约).
 
 ```bash
 jt nlab-api config --runner jt --project /path/to/frontend
