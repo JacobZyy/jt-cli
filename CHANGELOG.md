@@ -1,5 +1,7 @@
 # Changelog
 
+## [2.2.7](https://github.com/JacobZyy/jt-cli/compare/v2.2.6...v2.2.7) (2026-09-29)
+
 ## [2.2.6](https://github.com/JacobZyy/jt-cli/compare/v2.2.5...v2.2.6) (2026-09-24)
 
 ## [2.2.5](https://github.com/JacobZyy/jt-cli/compare/v2.2.4...v2.2.5) (2026-09-23)
