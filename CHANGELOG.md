@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.0](https://github.com/JacobZyy/jt-cli/compare/v2.2.7...v3.0.0) (2026-09-29)
+
+
+### Features
+
+* **nlab-api:** streamline bridge setup and failure diagnostics ([b158704](https://github.com/JacobZyy/jt-cli/commit/b15870467ad8ecfe7e71c3da4041b4aca3ab8774))
+
 ## [2.2.7](https://github.com/JacobZyy/jt-cli/compare/v2.2.6...v2.2.7) (2026-09-29)
 
 ## [2.2.6](https://github.com/JacobZyy/jt-cli/compare/v2.2.5...v2.2.6) (2026-09-24)
