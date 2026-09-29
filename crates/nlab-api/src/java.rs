@@ -191,6 +191,9 @@ impl<'a> JavaProject<'a> {
         {
             return self.node_for_fqn(&format!("{import}.{nested}"));
         }
+        if name.contains('.') && name.chars().next().is_some_and(char::is_lowercase) {
+            return None;
+        }
         let simple = type_ref.simple_name();
         if let Some(import) = self.imports.get(file_path).and_then(|imports| {
             imports
@@ -198,9 +201,6 @@ impl<'a> JavaProject<'a> {
                 .find(|value| value.rsplit('.').next() == Some(simple))
         }) {
             return self.node_for_fqn(import);
-        }
-        if name.contains('.') && name.chars().next().is_some_and(char::is_lowercase) {
-            return None;
         }
         let mut lexical = owner_fqn.replace("::", ".");
         loop {
@@ -218,6 +218,26 @@ impl<'a> JavaProject<'a> {
             if let Some(id) = self.type_by_fqn.get(&candidate) {
                 return self.graph.nodes.get(id);
             }
+        }
+        let imported = self
+            .imports
+            .get(file_path)
+            .into_iter()
+            .flatten()
+            .filter_map(|import| import.strip_suffix(".*"))
+            .map(|package| format!("{package}.{simple}"))
+            .collect::<BTreeSet<_>>();
+        let candidates = self
+            .graph
+            .candidates(simple)
+            .into_iter()
+            .filter(|node| {
+                matches!(node.kind.as_str(), "class" | "interface" | "enum")
+                    && imported.contains(&normalize_fqn(&node.qualified_name))
+            })
+            .collect::<Vec<_>>();
+        if !candidates.is_empty() {
+            return (candidates.len() == 1).then(|| candidates[0]);
         }
         let candidates = self
             .graph
@@ -903,7 +923,7 @@ fn java_imports(source: &str) -> Vec<String> {
                 .strip_prefix("import ")
                 .and_then(|value| value.strip_suffix(';'))
                 .map(str::trim)
-                .filter(|value| !value.ends_with(".*") && !value.starts_with("static "))
+                .filter(|value| !value.starts_with("static "))
                 .map(str::to_owned)
         })
         .collect()

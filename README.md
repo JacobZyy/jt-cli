@@ -285,9 +285,10 @@ the context is excluded from the frontend request. Gateway parameter mappings de
 and body fields. Offline RPC generation requires matching routes in an existing `.nlab/contract-ir.json`.
 
 Spring Controllers supply routes and parameter bindings directly from their annotations, including
-JSON, query and multipart requests. They reuse the same discovery, contract, enum and generation
-pipeline, and support a first offline generation without Gateway access. `init` detects Controller
-directories automatically. See [Controller mapping support and limits](apps/nlab-api-docs/docs/quick-start.md#生成契约).
+path variables, local path constants, JSON, query and multipart requests. They reuse the same
+discovery, contract, enum and generation pipeline, and support a first offline generation without
+Gateway access. `init` detects Controller directories automatically.
+See [Controller mapping support and limits](apps/nlab-api-docs/docs/quick-start.md#生成契约).
 
 ```bash
 jt nlab-api config --runner jt --project /path/to/frontend

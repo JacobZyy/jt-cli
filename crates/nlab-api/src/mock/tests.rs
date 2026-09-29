@@ -1,6 +1,28 @@
 use super::*;
 use tempfile::TempDir;
 
+#[test]
+fn controller_path_templates_match_concrete_mock_urls() {
+    let pattern = scenarios::request_pattern("/orders/{id}/v1.0/{part}").unwrap();
+    let regex = regex::Regex::new(&pattern[1..pattern.len() - 1]).unwrap();
+    for url in [
+        "https://example.test/orders/123/v1.0/a%2Fb",
+        "http://localhost:3000/orders/123/v1.0/中文?q=1",
+    ] {
+        assert!(regex.is_match(url), "{url}");
+    }
+    for url in [
+        "https://example.test/orders//v1.0/a",
+        "https://example.test/orders/123/v1x0/a",
+        "https://example.test/orders/123/v1.0/a/b",
+        "https://example.test/other/orders/123/v1.0/a",
+    ] {
+        assert!(!regex.is_match(url), "{url}");
+    }
+    assert_eq!(scenarios::request_pattern("/orders").unwrap(), "*/orders");
+    assert!(scenarios::request_pattern("/orders/{id").is_err());
+}
+
 fn fixture_schema() -> Value {
     json!({"type":"object", "additionalProperties":false,
     "required":["orderId","goods","contact","status","buttons"],

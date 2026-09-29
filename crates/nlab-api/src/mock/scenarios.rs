@@ -130,5 +130,21 @@ pub(super) fn request_pattern(path: &str) -> Result<String> {
     {
         bail!("unsupported OpenAPI mock path: {path}");
     }
-    Ok(format!("*{path}"))
+    if !path.contains(['{', '}']) {
+        return Ok(format!("*{path}"));
+    }
+    let variables = regex::Regex::new(r"\{[^/{}]+\}")?;
+    if variables.replace_all(path, "").contains(['{', '}']) {
+        bail!("unsupported OpenAPI mock path: {path}");
+    }
+    let mut pattern = String::from("/^https?://[^/?#]+");
+    let mut end = 0;
+    for variable in variables.find_iter(path) {
+        pattern.push_str(&regex::escape(&path[end..variable.start()]));
+        pattern.push_str("[^/?#]+");
+        end = variable.end();
+    }
+    pattern.push_str(&regex::escape(&path[end..]));
+    pattern.push_str(r"(?:\?.*)?$/");
+    Ok(pattern)
 }
