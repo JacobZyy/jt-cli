@@ -10,7 +10,7 @@
 - `curl`、`tar`、`shasum`。
 - `git`。
 - `codegraph`。
-- 一个前端项目。
+- 一个具有 `tsconfig.json` 或 `tsconfig.app.json` 的 TypeScript 单仓库前端项目。
 - 一个包含 NLab Java Facade 或 Spring MVC Controller 的后端仓库 URL 或本地 checkout。
 
 Facade 首次识别接口需要查询 ZGateway；连接公司网络或 VPN。已有匹配的生成结果时，`--offline` 可复用其路由。Controller 直接读取源码中的 Spring MVC 注解，首次生成也可使用 `--offline`，不查询 ZGateway。
@@ -113,6 +113,17 @@ nlab-api init \
 - 发现 Vite 配置时，默认启用额外 alias 并幂等补充 Vite、TypeScript 和必要的测试配置。
 - 非 Vite 项目默认关闭额外 alias，生成代码直接使用现有 `@/`，不改构建、TypeScript 或测试配置。
 
+请求适配器可以放在独立的 `nlabRequest.ts`，通过 `export function`、`export async function` 或
+`export const` 导出唯一的 `nlabRequest`。CLI 沿本地静态 import、类型 import 和 re-export
+寻找现有响应字段声明，支持相对路径、目录 index、`.js` 引用对应的 TS 源文件及当前配置的
+`compilerOptions.paths`。循环引用只读取一次，不扫描未引入文件，也不读取第三方包源码。
+请求链中的本地源码仍限于 `.ts` / `.tsx`；无法解析时报告 import 和来源文件。
+
+使用 `nlab-backend-bridge` 时，Skill 根据已有请求客户端准备缺失的独立适配器，再执行 init。
+保留现有鉴权、URL 和错误处理；客户端已经返回业务数据时不再次解包，不复制响应类型来迎合探测。
+JS 请求封装迁移由 Skill 结合原实现与 zfetch 约定处理，参考模板后续补充。
+TS 配置继续使用严格 JSON；缺少配置、注释或尾逗号导致的解析失败保持中断，不新增多项目或 extends 解析。
+
 开关保存于 `.nlab/nlab-api.config.json` 的 `frontend.aliases.enabled`。Vite 项目也可以手动关闭：
 
 ```json
@@ -171,10 +182,10 @@ nlab-api generate --project /path/to/frontend --branch another-branch
 5. Facade 查询 ZGateway；只保留具有对应 HTTP 路径的方法，查询失败时停止生成。Controller 从类与方法的 Spring MVC 注解读取 HTTP 路径、方法及参数绑定，无需网关配置开关。
 6. 从保留的方法出发，发现关联仓库并解析请求、响应和 DTO。
 7. 分析调用链、枚举与字段值来源。
-8. 生成 OpenAPI、API、types 和 enums。
+8. 生成并写入 API、types、enums、IR、manifest 和 `openapi.pending.json`。
 9. 执行配置的 `afterGenerate`。
 10. 执行可证明的 migration；按配置生成 Mock。
-11. 原子提升产物并写入报告。
+11. 后续阶段全部成功后，将 pending OpenAPI 提升为 `openapi.json`，写入最终报告。
 
 ZGateway 路由决定 HTTP 方法与路径。其 `requestMappingConfigs` 按 `$.argsN` 对应 Java 第 N 个参数：
 `$.request.singleValueQueryParams.<name>` 生成 query 字段，`$.bizContext.jsonRequestBody.<name>`
@@ -185,9 +196,12 @@ Controller 使用相同的 `init`、`generate` 命令和配置格式。`@Request
 
 `@RequestBody` 对应完整 JSON body；`@RequestParam` 和普通标量对应 query，普通对象对应展开的 query 字段。`MultipartFile` 参数生成 `Blob` 类型与 `FormData`，同一方法的请求参数放入 multipart 表单；浏览器负责 Content-Type boundary。Servlet 上下文不要求前端传入。路由来源在 IR 和 OpenAPI 中标记为 `controller`，DTO、枚举、跨仓库分析、生成和迁移仍复用既有链路。
 
+显式声明 `consumes = "multipart/form-data"`、已导入的 Spring `MediaType.MULTIPART_FORM_DATA_VALUE`
+或该常量的全限定名时，沿用表单绑定；支持类级声明以及单元素数组。表单参数仍须为明确命名的标量、文件或其集合，DTO 聚合上传继续报错。
+
 同一 Java 方法名有多个已暴露的重载时，operation key 加入参数类型，客户端函数使用 `方法名By参数类型` 区分，例如 `paramsMaterialByLong`。非重载接口沿用方法名；遇到 JavaScript 保留字时加 `Api` 后缀，例如 `deleteApi`、`exportApi`。同一个 HTTP 路径可以同时包含 GET、POST 等不同操作；相同路径和 HTTP 方法重复时明确报错。
 
-当前支持直接声明在 Controller 类上的方法。动态路径、路径变量、自定义组合注解、多个路径或 HTTP 方法、附加映射条件、非 JSON 视图、未支持的参数绑定不生成猜测结果；已识别映射遇到不支持的内容会携带类、方法或源码位置报错。multipart 对象聚合绑定需改用明确的字段参数。
+当前支持直接声明在 Controller 类上的方法。动态路径、路径变量、自定义组合注解、同一方法的多个映射注解、多个路径或 HTTP 方法、上述 multipart 以外的附加映射条件、非 JSON 视图、未支持的参数绑定不生成猜测结果；已识别映射遇到不支持的内容会携带类、方法或源码位置报错。`{module}/{cmd}` 动态 SCF 转发不纳入普通 Controller 契约识别。multipart 对象聚合绑定需改用明确的字段参数。
 
 核心产物：
 
@@ -215,7 +229,7 @@ Controller 使用相同的 `init`、`generate` 命令和配置格式。`@Request
 - `1`：配置、解析、生成、hook 或写入失败。
 - `124`：超过整体 deadline。
 
-自动版本查询失败时，nlab-api 打印 warning 并继续当前命令。已经发现新版本后，下载、checksum、ownership 校验、替换或重新执行失败会返回非零；显式 `nlab-api update` 失败返回 `1`。
+自动版本查询、下载、checksum、ownership 校验、替换、Skill 同步或重新执行失败时，当前命令返回非零，不继续旧版本的生成；显式 `nlab-api update` 失败返回 `1`。
 
 常见诊断：
 
@@ -234,6 +248,11 @@ CI 应先以退出码判断成功，再按项目要求检查 diagnostics。`comp
 ```
 
 不要把所有 warning 当成失败。外部值来源或无法闭合的枚举会保留诊断，但不一定阻断核心产物。
+
+失败诊断保留外部工具的完整 stdout、stderr 和登录、配置、授权说明，不只显示最后一行。
+Git、CodeGraph、SIC 与 ZGateway 仍各自报告原有失败类型；分支、索引与 Discover 阻断规则不变。
+hook、migration 或 Mock 失败时，API 等主产物可能已经写入，稳定的 `openapi.json` 尚未提升。
+按报告核对已完成阶段，非零退出不等于全部回滚，也不应对未改变的错误重复生成。
 
 ## 更新
 
@@ -266,7 +285,7 @@ CLI 只委托 Skill Manager 更新这一项，不自行修改 Skill 文件、切
 
 来源、认证、文件更新及部署由 Skill Manager 管理；nlab-api 不公开或内置你的私有技能仓库内容。
 显式更新中 Skill Manager 失败会返回非零，并说明二进制更新已经完成，重跑 `nlab-api update`
-即可重试 Skill 同步，不会为此回滚二进制。自动升级时的 Skill 同步失败则打印警告，继续原命令。
+即可重试 Skill 同步，不会为此回滚二进制。自动升级时的 Skill 同步失败同样停止原命令。
 
 从尚未包含此能力的旧版升级时，首次升级仍由旧 updater 执行；升级完成后再运行一次
 `nlab-api update` 同步 Skill，之后的升级会自动同步。
@@ -274,7 +293,7 @@ CLI 只委托 Skill Manager 更新这一项，不自行修改 Skill 文件、切
 自动更新只替换安装器写入 ownership marker 的二进制：
 
 - marker 存在：自动更新和显式 `update` 可替换。
-- marker 缺失：自动检查提示并继续当前版本；显式 `update` 返回错误。
+- marker 缺失：需要安装新版本时，自动升级和显式 `update` 都返回错误并提示重新运行安装器。
 - 处理方式：重新执行安装脚本，让安装器接管该二进制。
 
 离线或可重复执行：
@@ -303,6 +322,11 @@ nlab-api config --show --project /path/to/frontend
 runner 保存在 `.nlab/nlab-api.local.json`，并自动加入目标项目 `.gitignore`。
 `nlab-backend-bridge` 始终使用已配置 runner。runner 为空时调用 `config --detect`；该命令先检测
 `jt`，再检测 `nlab-api`，持久化第一个可用命令。已有配置对应的命令不可用时停止，不静默回退。
+
+Skill 3.0.0 要求 CLI 3.0.0 及以上。选择 standalone 后，先自动执行一次 `nlab-api update`，
+成功后重新读取 Skill、检查版本和命令能力，再用 `nlab-api --no-update` 执行本次后续步骤。
+用户明确跳过更新时遵从该选择，但仍检查最低版本。选择 `jt` 时，版本或能力不足直接报告，
+不自动更新 jt。更新失败立即结束，Lark 通知后置。
 
 清除 runner；下次 Skill 调用时重新检测：
 

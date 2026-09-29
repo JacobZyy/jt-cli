@@ -52,6 +52,38 @@ fn upgrade_alias_exposes_the_standalone_update_options() {
     assert!(help.contains("Skill Manager"));
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn failed_update_check_stops_before_generation() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tempdir().unwrap();
+    let curl = project.path().join("curl");
+    fs::write(
+        &curl,
+        "#!/bin/sh\nprintf 'update unavailable\\ncheck network\\n' >&2\nexit 22\n",
+    )
+    .unwrap();
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = nlab_api()
+        .env_remove("NLAB_API_NO_UPDATE")
+        .env("PATH", project.path())
+        .args(["generate", "--project", project.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("automatic nlab-api update failed"),
+        "{error}"
+    );
+    assert!(
+        error.contains("update unavailable\ncheck network"),
+        "{error}"
+    );
+    assert!(!error.contains("read nlab-api config"));
+    assert!(!project.path().join(".nlab").exists());
+}
+
 #[test]
 fn discovery_requires_project_config_and_does_not_create_project_state() {
     let project = tempdir().unwrap();

@@ -178,30 +178,29 @@ pub(super) fn scan_with(
 }
 
 fn sic(command: &str, parameter: &str, value: &str, deadline: Instant) -> Result<Value> {
-    // File-backed output avoids a pipe filling while the deadline runner waits.
-    let output = tempfile::tempfile()?;
     let mut process = Command::new("zzcli");
     process
         .args(["sic", command, parameter, value])
-        .stdin(Stdio::null())
-        .stdout(output.try_clone()?)
-        .stderr(Stdio::null());
-    let status = repo::run_until(&mut process, deadline)?;
-    if !status.success() {
+        .stdin(Stdio::null());
+    let output = repo::capture_until(&mut process, deadline)?;
+    if !output.status.success() {
         bail!(
-            "SIC {command} failed with status {status}; check zzcli authentication and permissions"
+            "SIC {command} failed with status {}\n{}",
+            output.status,
+            repo::command_diagnostics(&output.stdout, &output.stderr)
         );
     }
-    use std::io::{Read, Seek};
-    let mut output = output;
-    output.rewind()?;
-    let mut bytes = Vec::new();
-    output.read_to_end(&mut bytes)?;
-    let response: Value = serde_json::from_slice(&bytes).context("decode SIC response")?;
+    let response: Value = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "decode SIC response\n{}",
+            repo::command_diagnostics(&output.stdout, &output.stderr)
+        )
+    })?;
     if response["code"] != 0 || !response["result"].is_object() {
         bail!(
-            "SIC {command} returned no successful service record (code {})",
-            response["code"]
+            "SIC {command} returned no successful service record (code {})\n{}",
+            response["code"],
+            repo::command_diagnostics(&output.stdout, &output.stderr)
         );
     }
     Ok(response["result"].clone())

@@ -1,9 +1,9 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -199,16 +199,15 @@ pub fn sync_index(root: &Path, deadline: Instant) -> Result<()> {
     } else {
         command.arg(action);
     }
-    command
-        .arg(root)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let status = run_until(&mut command, deadline)
+    command.arg(root).current_dir(root).stdin(Stdio::null());
+    let output = capture_until(&mut command, deadline)
         .with_context(|| format!("codegraph {action} {}", root.display()))?;
-    if !status.success() {
-        bail!("codegraph {action} failed with status {status}");
+    if !output.status.success() {
+        bail!(
+            "codegraph {action} failed with status {}\n{}",
+            output.status,
+            command_diagnostics(&output.stdout, &output.stderr)
+        );
     }
     Ok(())
 }
@@ -369,6 +368,37 @@ pub(crate) fn run_until(command: &mut Command, deadline: Instant) -> Result<Exit
     }
 }
 
+pub(crate) fn capture_until(command: &mut Command, deadline: Instant) -> Result<Output> {
+    // File-backed streams cannot fill a pipe while run_until waits for exit.
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    let status = run_until(
+        command
+            .stdout(stdout.try_clone()?)
+            .stderr(stderr.try_clone()?),
+        deadline,
+    );
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    stdout.rewind()?;
+    stderr.rewind()?;
+    stdout.read_to_end(&mut stdout_bytes)?;
+    stderr.read_to_end(&mut stderr_bytes)?;
+    Ok(Output {
+        status: status.with_context(|| command_diagnostics(&stdout_bytes, &stderr_bytes))?,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
+pub(crate) fn command_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
+    format!(
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+}
+
 pub(crate) fn git_text<I, S>(root: &Path, arguments: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
@@ -390,13 +420,11 @@ where
         .output()
         .context("start Git")?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("Git returned non-zero");
-        bail!("Git failed with status {}: {detail}", output.status);
+        bail!(
+            "Git failed with status {}\n{}",
+            output.status,
+            command_diagnostics(&output.stdout, &output.stderr)
+        );
     }
     Ok(output.stdout)
 }
@@ -441,6 +469,29 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_commands_keep_both_streams_and_deadline_diagnostics() {
+        let output = capture_until(
+            Command::new("sh").args(["-c", "printf 'login url\\nsetup command\\n'; printf 'permission denied\\nretry after login\\n' >&2; exit 7"]),
+            Instant::now() + Duration::from_secs(5),
+        ).unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"login url\nsetup command\n");
+        assert_eq!(output.stderr, b"permission denied\nretry after login\n");
+        let error = capture_until(
+            Command::new("sh").args([
+                "-c",
+                "printf 'waiting for authorization\\n' >&2; exec sleep 2",
+            ]),
+            Instant::now() + Duration::from_millis(150),
+        )
+        .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("waiting for authorization"));
+        assert!(error.contains("generation deadline reached"));
+    }
 
     fn prepare(
         repository: &Path,

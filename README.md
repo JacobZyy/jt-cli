@@ -344,7 +344,10 @@ writes team-owned settings to `.nlab/nlab-api.config.json`, writes the resolved 
 init defaults it to `true` when it finds a Vite config and `false` otherwise. When disabled, generated
 imports use the existing `@/` source-root alias and init does not patch build, TypeScript, or test configs.
 When enabled, init adds idempotent Vite and TypeScript aliases; Vitest configs that merge the Vite config
-inherit them without a duplicate edit. An exported `nlabRequest` adapter is still required.
+inherit them without a duplicate edit. An exported `nlabRequest` adapter is still required. It can
+live in its own TypeScript file: init follows local static imports, type imports, re-exports, and
+direct tsconfig paths to find the existing response envelope. The Skill prepares a missing adapter
+from the project's request client, preserving authentication and existing response unwrapping.
 Existing `src/api` or `src/service` layout selects the
 matching preset; `--layout` overrides it. Version 1 project config and `.nlab/cli.local.json` remain
 read-compatible; rerun `init` explicitly to write the split version 2 files.
@@ -595,11 +598,18 @@ nlab-api update --check
 nlab-api update
 ```
 
+Update check, installation, and attempted Skill synchronization failures stop the command with the
+original diagnostic. An available update cannot be skipped by continuing an unmanaged old binary.
+
 Standalone `nlab-api update` (alias `upgrade`) also updates the installed `nlab-backend-bridge`
 through Skill Manager, including when the binary is already current. `--check` remains read-only.
 Automatic binary upgrades attempt the same Skill sync; ordinary starts without a binary upgrade do
 not. The Skill keeps its registered source and deployments; missing managers, missing skills, or
 local-import sources are reported and skipped. `jt upgrade` does not synchronize Skills.
+
+The Skill updates the selected standalone runner before checking generation capabilities, then uses
+`--no-update` for the remaining commands in that invocation. The `jt` runner keeps explicit version
+and capability failures; it is never silently upgraded or replaced.
 
 Pass `--no-update` for offline or reproducible runs. Re-run the script to install a pinned release
 or change the install directory:

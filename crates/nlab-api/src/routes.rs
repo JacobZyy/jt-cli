@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use super::model::{ContractIr, HttpRoute, InputLocation, RouteSource, RouteStatus};
 use super::output::OutputLock;
+use super::repo;
 
 const ZGATEWAY_CONFIG: &str = include_str!("../assets/zgateway.zzcli.json");
 
@@ -357,20 +358,27 @@ fn query_routes(
         .output()
         .with_context(|| format!("start {}", zzcli.display()))?;
     if !output.status.success() {
-        let detail = last_non_empty(&output.stderr)
-            .or_else(|| last_non_empty(&output.stdout))
-            .unwrap_or("zzcli returned non-zero");
-        bail!("zzcli failed with status {}: {detail}", output.status);
+        bail!(
+            "zzcli failed with status {}\n{}",
+            output.status,
+            repo::command_diagnostics(&output.stdout, &output.stderr)
+        );
     }
-    let stdout = String::from_utf8(output.stdout).context("decode zzcli output")?;
-    let payload = extract_json(&stdout).context("decode zzcli JSON")?;
+    let stdout = std::str::from_utf8(&output.stdout).context("decode zzcli output")?;
+    let payload = extract_json(stdout).with_context(|| {
+        format!(
+            "decode zzcli JSON\n{}",
+            repo::command_diagnostics(&output.stdout, &output.stderr)
+        )
+    })?;
     if payload.get("respCode").and_then(Value::as_i64).unwrap_or(0) != 0 {
         bail!(
-            "ZGateway query failed: {}",
+            "ZGateway query failed: {}\n{}",
             payload
                 .get("errorMsg")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown response")
+                .unwrap_or("unknown response"),
+            repo::command_diagnostics(&output.stdout, &output.stderr)
         );
     }
     let routes = payload
@@ -478,15 +486,6 @@ fn extract_json(value: &str) -> Result<Value> {
     serde_json::from_str(&value[start..=end]).context("zzcli output is not valid JSON")
 }
 
-fn last_non_empty(value: &[u8]) -> Option<&str> {
-    let lines = std::str::from_utf8(value).ok()?.lines().collect::<Vec<_>>();
-    lines
-        .iter()
-        .find(|line| line.trim_start().starts_with("Error:"))
-        .copied()
-        .or_else(|| lines.into_iter().rev().find(|line| !line.trim().is_empty()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +568,34 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].method_name, "query");
         assert_eq!(routes[0].path, "/api/query");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gateway_failures_preserve_full_tool_instructions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let zzcli = root.path().join("zzcli");
+        for (stdout, stderr, status) in [
+            (
+                "Open https://example.test/login\nRun zzcli init",
+                "Error: permission denied\nRun zzcli login",
+                7,
+            ),
+            (
+                r#"{"respCode":401,"errorMsg":"login required","verification_url":"https://example.test/login"}"#,
+                "Run zzcli login",
+                0,
+            ),
+            ("Open https://example.test/login", "Run zzcli login", 0),
+        ] {
+            fs::write(&zzcli, format!("#!/bin/sh\nprintf '%s\\n' '{stdout}'\nprintf '%s\\n' '{stderr}' >&2\nexit {status}\n")).unwrap();
+            fs::set_permissions(&zzcli, fs::Permissions::from_mode(0o755)).unwrap();
+            let error = query_routes(&zzcli, GatewayEnvironment::Testserver, "demo").unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.contains(stdout), "{error}");
+            assert!(error.contains(stderr), "{error}");
+        }
     }
 
     #[test]

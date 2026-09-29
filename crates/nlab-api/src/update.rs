@@ -80,28 +80,17 @@ pub fn auto_update(arguments: &[OsString]) -> Result<Option<ExitCode>> {
     }
 
     let current = current_version()?;
-    let release = match fetch_ready_release() {
-        Ok(release) => release,
-        Err(error) => {
-            eprintln!("warning: nlab-api update check failed: {error:#}");
-            return Ok(None);
-        }
-    };
+    let release = fetch_ready_release().context("check nlab-api update")?;
     if release.version <= current {
         return Ok(None);
     }
 
     println!("Updating nlab-api {} to {}", current, release.version);
-    let Some(executable) = managed_install_target()? else {
-        eprintln!(
-            "warning: automatic nlab-api update skipped because current binary is not installer-managed"
-        );
-        return Ok(None);
-    };
+    let executable = managed_install_target()?.context(
+        "current nlab-api is not installer-managed; rerun install-nlab-api.sh before self-update",
+    )?;
     install_release(&release, &executable)?;
-    if let Err(error) = sync_skill() {
-        eprintln!("warning: nlab-api binary updated, but Skill synchronization failed: {error:#}");
-    }
+    sync_skill().context("binary update finished, but Skill synchronization failed; rerun `nlab-api update` after resolving the Skill Manager error")?;
     reexecute(arguments)
 }
 
@@ -491,22 +480,7 @@ fn reexecute(arguments: &[OsString]) -> Result<Option<ExitCode>> {
 }
 
 fn run_command(command: &mut Command, action: &str) -> Result<()> {
-    let output = command
-        .output()
-        .with_context(|| format!("{action}: start command"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    bail!(
-        "{action} failed with status {}; {}",
-        output.status.code().unwrap_or(1),
-        if detail.is_empty() {
-            "no details"
-        } else {
-            &detail
-        }
-    );
+    command_output(command, action).map(|_| ())
 }
 
 fn command_output(command: &mut Command, action: &str) -> Result<Vec<u8>> {
@@ -516,15 +490,11 @@ fn command_output(command: &mut Command, action: &str) -> Result<Vec<u8>> {
     if output.status.success() {
         return Ok(output.stdout);
     }
-    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     bail!(
-        "{action} failed with status {}; {}",
+        "{action} failed with status {}\nstdout:\n{}\nstderr:\n{}",
         output.status.code().unwrap_or(1),
-        if detail.is_empty() {
-            "no details"
-        } else {
-            &detail
-        }
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
 }
 
