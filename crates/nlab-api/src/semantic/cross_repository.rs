@@ -352,23 +352,9 @@ impl SemanticAnalyzer<'_> {
         }
         let mut domain = Domain::default();
         let setter_name = format!("set{}", uppercase_first(&field_name));
-        let setters = self
-            .project
-            .graph()
-            .contained(&class.id, "method")
-            .into_iter()
-            .filter(|method| method.name == setter_name)
-            .cloned()
-            .collect::<Vec<_>>();
-        if setters.len() == 1 {
-            let setter = &setters[0];
-            let edges = self
-                .project
-                .graph()
-                .incoming_calls(&setter.id)
-                .filter(|edge| reachable.nodes.contains(&edge.source))
-                .cloned()
-                .collect::<Vec<_>>();
+        {
+            let methods = reachable.nodes.iter().cloned().collect();
+            let edges = self.typed_setter_edges(&class, &field_name, &methods)?;
             let mut proven_edges = Vec::new();
             for edge in &edges {
                 if self.copied_setter_edge_matches(
@@ -378,7 +364,7 @@ impl SemanticAnalyzer<'_> {
                     offset,
                     reachable,
                     edge,
-                    &setter.name,
+                    &setter_name,
                 )? {
                     proven_edges.push(edge.clone());
                 }
@@ -388,7 +374,7 @@ impl SemanticAnalyzer<'_> {
             for edge in edges {
                 let source = self.project.graph().nodes[&edge.source].clone();
                 let Some((expression, _, value_offset)) =
-                    self.setter_argument(&edge, &setter.name)?
+                    self.setter_argument(&edge, &setter_name)?
                 else {
                     domain
                         .unknown
@@ -417,6 +403,11 @@ impl SemanticAnalyzer<'_> {
                     .unknown
                     .insert("copied field object origin is not proven".to_owned());
             }
+        }
+        for initializer in
+            self.field_initializer_domains(operation, &class, &field_name, reachable, visiting)?
+        {
+            merge_domain(&mut domain, initializer);
         }
         visiting.remove(&visit_key);
         let documented = self.copied_field_enum_reference(&class, &field_name, &mut domain);

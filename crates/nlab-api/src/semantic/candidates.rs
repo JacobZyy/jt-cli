@@ -111,7 +111,9 @@ impl SemanticAnalyzer<'_> {
             Some(node.qualified_name.replace("::", ".")).as_ref() != patch.enum_fqn.as_ref()
         }) || field.linked_enum.as_ref().is_some_and(|linked| {
             Some(&linked.enum_fqn) != patch.enum_fqn.as_ref()
-                || Some(&linked.accessor) != patch.accessor.as_ref()
+                // An inferred comment projection must not override a proven name() wire value.
+                || (patch.accessor.as_deref() != Some("name")
+                    && Some(&linked.accessor) != patch.accessor.as_ref())
         }) {
             return decision(
                 EnumCandidateStatus::Conflict,

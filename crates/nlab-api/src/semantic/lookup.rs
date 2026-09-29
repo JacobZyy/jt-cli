@@ -107,6 +107,39 @@ fn arguments(node: Node<'_>) -> Vec<Node<'_>> {
 }
 
 fn values_call(source: &str, node: Node<'_>, enum_name: &str) -> bool {
+    values_source(source, node, enum_name, 0)
+}
+
+fn values_source(source: &str, node: Node<'_>, enum_name: &str, depth: usize) -> bool {
+    if depth >= 8 {
+        return false;
+    }
+    if node.kind() == "identifier" {
+        let name = text_of(source, node);
+        let Some(scope) = ancestors(node).find(|node| node.kind() == "method_declaration") else {
+            return false;
+        };
+        let nodes = descendants(scope);
+        if nodes.iter().any(|node| {
+            matches!(node.kind(), "assignment_expression" | "update_expression")
+                && text_of(source, *node).starts_with(name)
+        }) {
+            return false;
+        }
+        let initializers = nodes
+            .into_iter()
+            .filter(|variable| {
+                variable.kind() == "variable_declarator"
+                    && variable.start_byte() < node.start_byte()
+                    && variable
+                        .child_by_field_name("name")
+                        .is_some_and(|variable| text_of(source, variable) == name)
+            })
+            .filter_map(|variable| variable.child_by_field_name("value"))
+            .collect::<Vec<_>>();
+        return initializers.len() == 1
+            && values_source(source, initializers[0], enum_name, depth + 1);
+    }
     node.kind() == "method_invocation"
         && invocation_name(source, node) == "values"
         && arguments(node).is_empty()
@@ -138,14 +171,14 @@ fn projection(source: &str, node: Node<'_>, item: &str) -> Option<String> {
             .map(|field| text_of(source, field).to_owned()),
         "method_invocation" if arguments(node).is_empty() => {
             let name = invocation_name(source, node);
-            getter_signal(name).map(|_| name.to_owned())
+            Some(name.to_owned())
         }
         _ => None,
     }
 }
 
 fn canonical_projection(source: &str, method: Node<'_>, accessor: String) -> String {
-    if getter_signal(&accessor).is_some() {
+    if getter_signal(&accessor).is_some() || accessor == "name" {
         return accessor;
     }
     let Some(declaration) = ancestors(method).find(|node| node.kind() == "enum_declaration") else {
@@ -388,6 +421,89 @@ fn map_projection(source: &str, body: Node<'_>, map: &str, enum_name: &str) -> O
         })
         .copied()
         .collect::<Vec<_>>();
+    if writes.is_empty() {
+        let initializer = nodes.iter().find_map(|node| {
+            (node.kind() == "variable_declarator"
+                && node
+                    .child_by_field_name("name")
+                    .is_some_and(|name| text_of(source, name) == map))
+            .then(|| node.child_by_field_name("value"))
+            .flatten()
+        });
+        if let Some(initializer) = initializer {
+            return collected_map_projection(source, initializer, enum_name);
+        }
+        // A local map is filled once, then wrapped without exposing the mutable alias.
+        let assignments = nodes
+            .iter()
+            .filter(|node| {
+                node.kind() == "assignment_expression"
+                    && node
+                        .child_by_field_name("left")
+                        .is_some_and(|left| text_of(source, left) == map)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let [assignment] = assignments.as_slice() else {
+            return None;
+        };
+        let value = assignment.child_by_field_name("right")?;
+        if invocation_name(source, value) != "unmodifiableMap"
+            || !value.child_by_field_name("object").is_some_and(|object| {
+                matches!(
+                    text_of(source, object),
+                    "Collections" | "java.util.Collections"
+                )
+            })
+        {
+            return None;
+        }
+        let args = arguments(value);
+        let [local] = args.as_slice() else {
+            return None;
+        };
+        let local = text_of(source, *local);
+        let block = ancestors(*assignment).find(|node| node.kind() == "static_initializer")?;
+        let local_nodes = descendants(block);
+        let calls = local_nodes
+            .iter()
+            .filter(|node| {
+                node.kind() == "method_invocation"
+                    && node
+                        .child_by_field_name("object")
+                        .is_some_and(|object| text_of(source, object) == local)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let [put] = calls.as_slice() else {
+            return None;
+        };
+        if invocation_name(source, *put) != "put" {
+            return None;
+        }
+        let loop_node = ancestors(*put).find(|node| node.kind() == "enhanced_for_statement")?;
+        if !values_call(source, loop_node.child_by_field_name("value")?, enum_name) {
+            return None;
+        }
+        let item = text_of(source, loop_node.child_by_field_name("name")?);
+        let args = arguments(*put);
+        if args.len() != 2 || text_of(source, args[1]) != item {
+            return None;
+        }
+        let statements = statements(loop_node.child_by_field_name("body")?);
+        if statements.len() != 1 || statements[0].kind() != "expression_statement" {
+            return None;
+        }
+        let uses = local_nodes
+            .iter()
+            .filter(|node| node.kind() == "identifier" && text_of(source, **node) == local)
+            .count();
+        // Declaration, put receiver, wrapper argument; any other use could leak or mutate it.
+        if uses != 3 {
+            return None;
+        }
+        return projection(source, args[0], item);
+    }
     if writes.len() != 1 || invocation_name(source, writes[0]) != "put" {
         return None;
     }
@@ -415,6 +531,70 @@ fn map_projection(source: &str, body: Node<'_>, map: &str, enum_name: &str) -> O
         return None;
     }
     projection(source, args[0], item)
+}
+
+fn collected_map_projection(
+    source: &str,
+    initializer: Node<'_>,
+    enum_name: &str,
+) -> Option<String> {
+    if invocation_name(source, initializer) != "collect"
+        || !values_stream(
+            source,
+            initializer.child_by_field_name("object")?,
+            enum_name,
+        )
+    {
+        return None;
+    }
+    let args = arguments(initializer);
+    let [collector] = args.as_slice() else {
+        return None;
+    };
+    if invocation_name(source, *collector) != "toMap"
+        || !collector
+            .child_by_field_name("object")
+            .is_some_and(|object| {
+                matches!(
+                    text_of(source, object),
+                    "Collectors" | "java.util.stream.Collectors"
+                )
+            })
+    {
+        return None;
+    }
+    let args = arguments(*collector);
+    let [key, value] = args.as_slice() else {
+        return None;
+    };
+    let identity = if value.kind() == "lambda_expression" {
+        let parameter =
+            text_of(source, value.child_by_field_name("parameters")?).trim_matches(['(', ')']);
+        text_of(source, value.child_by_field_name("body")?) == parameter
+    } else {
+        invocation_name(source, *value) == "identity"
+            && arguments(*value).is_empty()
+            && value.child_by_field_name("object").is_some_and(|object| {
+                matches!(
+                    text_of(source, object),
+                    "Function" | "java.util.function.Function"
+                )
+            })
+    };
+    if !identity {
+        return None;
+    }
+    if key.kind() == "method_reference" {
+        let parts = named_children(*key);
+        if parts.len() == 2 && text_of(source, parts[0]) == enum_name {
+            return Some(text_of(source, parts[1]).to_owned());
+        }
+    } else if key.kind() == "lambda_expression" {
+        let parameter =
+            text_of(source, key.child_by_field_name("parameters")?).trim_matches(['(', ')']);
+        return projection(source, key.child_by_field_name("body")?, parameter);
+    }
+    None
 }
 
 pub(super) fn ancestors(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {

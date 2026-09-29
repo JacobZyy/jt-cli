@@ -32,22 +32,23 @@ impl SemanticAnalyzer<'_> {
             return Ok(None);
         };
         let setter_name = format!("set{}", uppercase_first(field_name));
-        let setters = self
+        let methods = self
             .project
             .graph()
-            .contained(&class.id, "method")
-            .into_iter()
-            .filter(|method| method.name == setter_name)
-            .collect::<Vec<_>>();
-        let [setter] = setters.as_slice() else {
-            return Ok(None);
-        };
-        let edges = self
-            .project
-            .graph()
-            .incoming_calls(&setter.id)
-            .cloned()
-            .collect::<Vec<_>>();
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == "calls"
+                    && self
+                        .project
+                        .graph()
+                        .nodes
+                        .get(&edge.target)
+                        .is_some_and(|node| node.name == setter_name)
+            })
+            .map(|edge| edge.source.clone())
+            .collect();
+        let edges = self.typed_setter_edges(class, field_name, &methods)?;
         if edges.is_empty() || edges.len() > MAX_FIELD_WRITES {
             return Ok(None);
         }
@@ -91,25 +92,20 @@ impl SemanticAnalyzer<'_> {
                     .insert("database setter value unresolved".to_owned());
                 continue;
             };
-            let value = match expression {
-                Expression::Getter { receiver, accessor } => {
-                    if let Some(enum_node) = self.enum_for_receiver(&writer, &receiver, offset)? {
-                        self.enum_domain(&enum_node, &accessor)?
-                    } else {
+            let value = if let Some(domain) = self.enum_projection(&writer, &expression, offset)? {
+                domain
+            } else {
+                match expression {
+                    Expression::Literal(value) => {
+                        let mut domain = Domain::default();
+                        domain.literals.insert(value);
+                        domain
+                    }
+                    _ => {
                         let mut value = Domain::default();
                         value.unknown.insert(source.clone());
                         value
                     }
-                }
-                Expression::Literal(value) => {
-                    let mut domain = Domain::default();
-                    domain.literals.insert(value);
-                    domain
-                }
-                _ => {
-                    let mut value = Domain::default();
-                    value.unknown.insert(source.clone());
-                    value
                 }
             };
             merge_domain(&mut domain, value);

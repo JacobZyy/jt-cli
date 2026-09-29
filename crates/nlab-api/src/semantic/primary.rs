@@ -276,7 +276,7 @@ fn has_modifier(source: &str, node: Node<'_>, expected: &str) -> bool {
         })
 }
 
-fn has_annotation(source: &str, node: Node<'_>, expected: &str) -> bool {
+pub(super) fn has_annotation(source: &str, node: Node<'_>, expected: &str) -> bool {
     named_children(node)
         .into_iter()
         .filter(|node| node.kind() == "modifiers")
@@ -300,7 +300,7 @@ fn has_annotation(source: &str, node: Node<'_>, expected: &str) -> bool {
         })
 }
 
-fn owned_nodes<'a>(declaration: Node<'a>, kind: &str) -> Vec<Node<'a>> {
+pub(super) fn owned_nodes<'a>(declaration: Node<'a>, kind: &str) -> Vec<Node<'a>> {
     descendants(declaration)
         .into_iter()
         .filter(|node| node.kind() == kind)

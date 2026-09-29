@@ -237,13 +237,21 @@ fn enum_seed(patch: &SemanticPatch) -> Vec<String> {
         .enum_fqn
         .as_deref()
         .unwrap_or(&patch.target.schema_fqn);
-    enum_seed_from_parts(
+    let mut seed = enum_seed_from_parts(
         owner,
         patch
             .accessor
             .as_deref()
             .unwrap_or(&patch.target.field_name),
-    )
+    );
+    if patch.enum_fqn.is_some()
+        && patch
+            .associated_values()
+            .is_some_and(|values| values.iter().any(|value| value.key.is_none()))
+    {
+        seed.push(format!("{}Values", upper_camel(&patch.target.field_name)));
+    }
+    seed
 }
 
 fn enum_seed_from_parts(owner: &str, accessor: &str) -> Vec<String> {
@@ -423,7 +431,7 @@ fn render_interface(
                     .entry(import_specifier(&target.path, &enum_target.path, config))
                     .or_default()
                     .insert(enum_target.name.clone());
-                enum_target.name.clone()
+                enum_type_expression(&field.java_type, &enum_target.name)
             } else {
                 type_expression(
                     &field.java_type,
@@ -806,6 +814,32 @@ fn type_expression(
         result = format!("{result}[]");
     }
     result
+}
+
+fn enum_type_expression(kind: &TypeRef, name: &str) -> String {
+    let base = if is_collection(kind.simple_name()) {
+        format!(
+            "{}[]",
+            kind.arguments
+                .first()
+                .map(|item| enum_type_expression(item, name))
+                .unwrap_or_else(|| name.to_owned())
+        )
+    } else if matches!(
+        kind.simple_name(),
+        "Map" | "HashMap" | "LinkedHashMap" | "TreeMap"
+    ) {
+        format!(
+            "Record<string, {}>",
+            kind.arguments
+                .last()
+                .map(|item| enum_type_expression(item, name))
+                .unwrap_or_else(|| name.to_owned())
+        )
+    } else {
+        name.to_owned()
+    };
+    format!("{base}{}", "[]".repeat(kind.array_depth))
 }
 
 fn render_enum(name: &str, values: &[CodedValue], identity: &str, erasable: bool) -> String {

@@ -91,7 +91,17 @@ impl SemanticAnalyzer<'_> {
         let mut patches = Vec::new();
         for (schema_fqn, prefix) in response_schema_paths(request, schemas) {
             for field in &schemas[&schema_fqn].fields {
-                if !is_scalar(&field.java_type) {
+                let schema = &schemas[&schema_fqn];
+                let declared_enum = self
+                    .project
+                    .resolve_type(
+                        &schema.source_path,
+                        &schema_fqn,
+                        value_type(&field.java_type),
+                    )
+                    .filter(|node| node.kind == "enum")
+                    .cloned();
+                if !is_scalar(value_type(&field.java_type)) && declared_enum.is_none() {
                     continue;
                 }
                 let path = join_path(&prefix, &field.name);
@@ -102,6 +112,13 @@ impl SemanticAnalyzer<'_> {
                     field_path: path.clone(),
                     field_name: field.name.clone(),
                 };
+                if let Some(enum_node) = declared_enum {
+                    let domain = self.serialized_enum_domain(&enum_node)?;
+                    self.request_domains
+                        .insert((operation.key.clone(), path), domain.clone());
+                    patches.push(classify_patch(target, vec![domain]));
+                    continue;
+                }
                 let Some(candidates) = sites.get(&path) else {
                     patches.push(unresolved_patch(
                         target,

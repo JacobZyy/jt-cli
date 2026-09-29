@@ -825,6 +825,21 @@ fn enum_association_rejects_conflicts_transforms_and_unknown_writes_but_keeps_nu
     };
     let patch = classify_patch(target.clone(), vec![domain.clone(), nullable]);
     assert!(patch.enum_associated && patch.nullable);
+    let extra = Domain {
+        literals: BTreeSet::from(["999".to_owned()]),
+        ..Domain::default()
+    };
+    let patch = classify_patch(target.clone(), vec![domain.clone(), extra]);
+    assert!(patch.enum_associated);
+    assert_eq!(
+        patch
+            .associated_values()
+            .unwrap()
+            .iter()
+            .map(|member| member.value.clone())
+            .collect::<Vec<_>>(),
+        vec![WireValue::Number(1), WireValue::Number(999)]
+    );
     for bad in [
         Domain {
             enum_fqn: Some("p.Other".to_owned()),
@@ -840,10 +855,6 @@ fn enum_association_rejects_conflicts_transforms_and_unknown_writes_but_keeps_nu
         },
         Domain {
             transformed: true,
-            ..Domain::default()
-        },
-        Domain {
-            literals: BTreeSet::from(["999".to_owned()]),
             ..Domain::default()
         },
     ] {
