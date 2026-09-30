@@ -999,3 +999,337 @@ import org.mapstruct.MappingTarget;
     );
     assert!(patch(&ir, "query", "code").associated_values().is_none());
 }
+
+#[test]
+fn reverse_maps_and_generic_parsers_keep_call_site_domains() {
+    let kind = r#"package p;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
+public enum Kind {
+    A(1), B(2);
+    private final int code;
+    Kind(int code) { this.code = code; }
+    public int getCode() { return code; }
+    private static final Map<Integer, Kind> CODES;
+    private static final Map<String, Kind> NAMES;
+    static {
+        Map<Integer, Kind> codes = new HashMap<>();
+        Map<String, Kind> names = new HashMap<>();
+        List<Integer> selected = new ArrayList<>();
+        for (Kind item : values()) {
+            codes.put(item.getCode(), item);
+            names.put(item.name(), item);
+            if (item.getCode() > 1) selected.add(item.getCode());
+        }
+        CODES = Collections.unmodifiableMap(codes);
+        NAMES = Collections.unmodifiableMap(names);
+    }
+    public static Kind ofCode(Integer code) { return CODES.get(code); }
+    public static Kind ofName(String name) { return NAMES.get(name); }
+}
+enum Other { X, Y; public static Other ofName(String name) { for (Other item : values()) { if (item.name().equals(name)) return item; } return null; } }
+"#;
+    let request = "package p;\nimport java.util.List;\npublic class Source { private Integer code; private List<String> names; private List<String> otherNames; public Integer getCode() { return code; } public List<String> getNames() { return names; } public List<String> getOtherNames() { return otherNames; } }";
+    let facade = r#"package p;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.function.Function;
+public class Facade {
+    public Payload query(Source request) {
+        Kind parsed = Kind.ofCode(request.getCode());
+        if (parsed == null) throw new IllegalArgumentException();
+        convert(request.getNames(), Kind::ofName, Kind::getCode);
+        convert(request.getOtherNames(), Other::ofName, Other::name);
+        Payload result = new Payload(); result.setCode(parsed.getCode()); return result;
+    }
+    public <E,C> List<C> convert(List<String> names, Function<String,E> parser, Function<E,C> getter) {
+        List<C> result = new ArrayList<>();
+        for (String name : names) {
+            E value = parser.apply(name);
+            if (value == null) continue;
+            result.add(getter.apply(value));
+        }
+        return result;
+    }
+}
+"#;
+    let files = [
+        ("Kind.java", kind),
+        ("Payload.java", PAYLOAD),
+        ("Source.java", request),
+        ("Facade.java", facade),
+    ];
+    let ir = contract(&files, &["query"]);
+    let input = |ir: &ContractIr, name: &str| {
+        ir.operations[0]
+            .semantic_patches
+            .iter()
+            .find(|patch| {
+                patch.target.source == FieldSource::Request && patch.target.field_name == name
+            })
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        values(&input(&ir, "code")),
+        vec![WireValue::Number(1), WireValue::Number(2)]
+    );
+    assert_eq!(
+        values(&input(&ir, "names")),
+        vec![WireValue::String("A".into()), WireValue::String("B".into())]
+    );
+    assert_eq!(
+        values(&input(&ir, "otherNames")),
+        vec![WireValue::String("X".into()), WireValue::String("Y".into())]
+    );
+    assert_eq!(
+        input(&ir, "names").status,
+        ProvenanceStatus::Known,
+        "skipping unknown names does not reject the request"
+    );
+    for replacement in [
+        "name = System.getenv(\"NAME\"); E value = parser.apply(name);",
+        "E value = Kind.ofName(\"A\");",
+    ] {
+        let changed = facade.replace("E value = parser.apply(name);", replacement);
+        let ir = contract(
+            &[
+                ("Kind.java", kind),
+                ("Payload.java", PAYLOAD),
+                ("Source.java", request),
+                ("Facade.java", &changed),
+            ],
+            &["query"],
+        );
+        assert!(input(&ir, "names").associated_values().is_none());
+    }
+}
+
+#[test]
+fn dropdown_name_union_keeps_only_selected_foreign_constants() {
+    let facade = r#"package p;
+import java.util.List;
+import java.util.ArrayList;
+public class Facade {
+    public List<Payload> query() {
+        List<Payload> result = new ArrayList<>();
+        Payload unlocked = new Payload(); unlocked.setToken(Kind.A.name());
+        result.add(unlocked);
+        for (Other item : Other.values()) { Payload value = new Payload(); value.setToken(item.name()); result.add(value); }
+        return result;
+    }
+    public Payload labels() {
+        Payload value = new Payload(); value.setToken(Kind.A.getDesc()); value.setToken(Other.X.getDesc()); return value;
+    }
+    public Payload constantUnion() {
+        Payload value = new Payload(); value.setToken(Extra.LEFT.name()); value.setToken(Extra.RIGHT.name()); value.setToken(Kind.A.name()); return value;
+    }
+    public Payload reverseUnion() {
+        Payload value = new Payload(); value.setToken(Kind.A.name()); value.setToken(Extra.RIGHT.name()); value.setToken(Extra.LEFT.name()); return value;
+    }
+}
+enum Other { X("Extra"), Y("Other"); final String desc; Other(String desc) { this.desc=desc; } String getDesc() { return desc; } }
+enum Extra { LEFT, RIGHT, UNUSED }
+"#;
+    let ir = contract(
+        &[
+            ("Kind.java", KIND),
+            ("Payload.java", PAYLOAD),
+            ("Facade.java", facade),
+        ],
+        &["query", "labels", "constantUnion", "reverseUnion"],
+    );
+    assert_eq!(
+        values(patch(&ir, "query", "token")),
+        vec![
+            WireValue::String("A".into()),
+            WireValue::String("X".into()),
+            WireValue::String("Y".into())
+        ]
+    );
+    assert!(
+        patch(&ir, "query", "token")
+            .evidence
+            .iter()
+            .any(|item| item.contains("p.Kind#name + p.Other#name"))
+    );
+    for method in ["constantUnion", "reverseUnion"] {
+        let actual = values(patch(&ir, method, "token"));
+        assert_eq!(actual.len(), 3, "{method}: {actual:?}");
+        for expected in ["A", "LEFT", "RIGHT"] {
+            assert!(
+                actual.contains(&WireValue::String(expected.into())),
+                "{method}: {actual:?}"
+            );
+        }
+    }
+    let label = patch(&ir, "labels", "token");
+    assert!(label.associated_values().is_none());
+    assert_eq!(
+        label.enum_candidate.as_ref().unwrap().status,
+        crate::model::EnumCandidateStatus::Ignored
+    );
+}
+
+#[test]
+fn nested_collection_copies_follow_rpc_objects_and_callbacks() {
+    let source = "package p;\npublic class Source { private String token; public String getToken() { return token; } public void setToken(String token) { this.token=token; } }";
+    let holder = "package p;\nimport java.util.List;\npublic class Holder { private List<Source> sources; public List<Source> getSources() { return sources; } public void setSources(List<Source> sources) { this.sources=sources; } }";
+    let wrapper = "package p;\npublic class ApiResult<T> { private T data; public T getData() { return data; } public static <T> ApiResult<T> success(T data) { return null; } }";
+    let facade = r#"package p;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.stream.Collectors;
+public class Facade {
+    public List<Payload> loop() {
+        ApiResult<Holder> result = remote();
+        Holder holder = null;
+        if (result != null) holder = result.getData();
+        List<Payload> values = new ArrayList<>();
+        for (Source item : holder.getSources()) { values.add(convert(item)); }
+        return values;
+    }
+    public List<Payload> stream() {
+        Holder holder = remote().getData();
+        return holder.getSources().stream().map(this::convert).collect(Collectors.toList());
+    }
+    public List<Payload> mapValues() {
+        Map<Integer, Source> map = new HashMap<>();
+        Source source = new Source(); source.setToken(Kind.A.name()); map.put(1, source);
+        List<Payload> values = new ArrayList<>();
+        for (Source item : map.values()) { values.add(convert(item)); }
+        return values;
+    }
+    public List<Payload> unknown() {
+        remote(); Holder holder = missing();
+        return holder.getSources().stream().map(this::convert).collect(Collectors.toList());
+    }
+    public List<Payload> rewritten() {
+        Holder holder = remote().getData();
+        List<Payload> values = new ArrayList<>();
+        for (Source item : holder.getSources()) { item = external(); values.add(convert(item)); }
+        return values;
+    }
+    private Payload convert(Source source) { Payload value = new Payload(); value.setToken(source.getToken()); return value; }
+    private ApiResult<Holder> remote() { ApiResult<Holder> result = nested(); return result; }
+    private ApiResult<Holder> nested() {
+        Holder holder = new Holder(); List<Source> sources = new ArrayList<>();
+        Source source = new Source(); source.setToken(Kind.A.name()); sources.add(source);
+        holder.setSources(sources); return ApiResult.success(holder);
+    }
+    private Holder missing() { return null; }
+    private Source external() { return null; }
+}
+"#;
+    let ir = contract(
+        &[
+            ("Kind.java", KIND),
+            ("Payload.java", PAYLOAD),
+            ("Source.java", source),
+            ("Holder.java", holder),
+            ("ApiResult.java", wrapper),
+            ("Facade.java", facade),
+        ],
+        &["loop", "stream", "mapValues", "unknown", "rewritten"],
+    );
+    for method in ["loop", "stream", "mapValues"] {
+        assert_eq!(
+            values(patch(&ir, method, "token")),
+            vec![WireValue::String("A".into()), WireValue::String("B".into())],
+            "{method}"
+        );
+    }
+    for method in ["unknown", "rewritten"] {
+        assert!(
+            patch(&ir, method, "token").associated_values().is_none(),
+            "{method}"
+        );
+    }
+    for transformed in [
+        source.replace("this.token=token;", "this.token=token + \"-changed\";"),
+        source.replace("return token;", "return token + \"-changed\";"),
+    ] {
+        let ir = contract(
+            &[
+                ("Kind.java", KIND),
+                ("Payload.java", PAYLOAD),
+                ("Source.java", &transformed),
+                ("Holder.java", holder),
+                ("ApiResult.java", wrapper),
+                ("Facade.java", facade),
+            ],
+            &["loop"],
+        );
+        assert!(patch(&ir, "loop", "token").associated_values().is_none());
+    }
+    for escaped in [
+        facade.replace(
+            "holder.setSources(sources);",
+            "mutate(sources); holder.setSources(sources);",
+        ),
+        facade.replace(
+            "holder.setSources(sources);",
+            "List<Source> alias = sources; alias.add(external()); holder.setSources(sources);",
+        ),
+    ] {
+        let ir = contract(
+            &[
+                ("Kind.java", KIND),
+                ("Payload.java", PAYLOAD),
+                ("Source.java", source),
+                ("Holder.java", holder),
+                ("ApiResult.java", wrapper),
+                ("Facade.java", &escaped),
+            ],
+            &["loop"],
+        );
+        assert!(patch(&ir, "loop", "token").associated_values().is_none());
+    }
+}
+
+#[test]
+fn dynamic_map_configuration_and_composed_details_remain_scalar() {
+    let config = "package p;\npublic class Config { private String displayName; public String getDisplayName() { return displayName; } }";
+    let facade = r#"package p;
+import java.util.Map;
+import java.util.List;
+import java.util.stream.Collectors;
+public class Facade {
+    public Payload configuration() { Payload value = new Payload(); Map.Entry<String,Config> entry = null; value.setToken(label(entry)); return value; }
+    private String label(Map.Entry<String,Config> entry) { return entry.getValue().getDisplayName() == null ? Kind.A.name() : entry.getValue().getDisplayName(); }
+    public Payload detail() { Payload value = new Payload(); value.setToken(compose(Kind.A.getDesc(), System.getenv("DETAIL"))); return value; }
+    private String compose(String label, String detail) { if (detail == null) return label; return label + "：【" + detail + "】"; }
+    public Payload joining() { Payload value = new Payload(); value.setToken(List.of(Kind.A.name(), Kind.B.name()).stream().collect(Collectors.joining(";"))); return value; }
+}
+"#;
+    let ir = contract(
+        &[
+            ("Kind.java", KIND),
+            ("Payload.java", PAYLOAD),
+            ("Config.java", config),
+            ("Facade.java", facade),
+        ],
+        &["configuration", "detail", "joining"],
+    );
+    let configuration = patch(&ir, "configuration", "token");
+    assert!(configuration.associated_values().is_none());
+    assert!(
+        configuration
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("p.Config#displayName"),
+        "{configuration:#?}"
+    );
+    for method in ["detail", "joining"] {
+        assert!(
+            patch(&ir, method, "token").associated_values().is_none(),
+            "{method}"
+        );
+    }
+}

@@ -15,15 +15,8 @@ impl SemanticAnalyzer<'_> {
         };
         let instance_fields = primary::instance_fields(&class_source.source, class_declaration);
         let setter = format!("set{}", uppercase_first(field));
-        let rewritten_setter = primary::owned_nodes(class_declaration, "method_declaration").into_iter()
-            .filter(|node| node.child_by_field_name("name").is_some_and(|name| text_of(&class_source.source, name) == setter))
-            .any(|declaration| {
-                let parameter = declaration.child_by_field_name("parameters").and_then(|params| params.named_child(0))
-                    .and_then(|param| param.child_by_field_name("name")).map(|name| text_of(&class_source.source, name));
-                descendants(declaration).into_iter().filter(|node| node.kind() == "assignment_expression"
-                    && node.child_by_field_name("left").is_some_and(|node| matches!(text_of(&class_source.source, node), name if name == field || name == format!("this.{field}"))))
-                    .any(|node| node.child_by_field_name("right").is_none_or(|node| Some(text_of(&class_source.source, node)) != parameter))
-            });
+        let rewritten_setter =
+            primary::setter_transforms(&class_source.source, class_declaration, field);
         let builder = primary::has_annotation(&class_source.source, class_declaration, "Builder");
         let methods = reachable
             .nodes
@@ -348,7 +341,7 @@ impl SemanticAnalyzer<'_> {
                         operation,
                         &method,
                         &returned,
-                        declaration.end_byte(),
+                        declaration.end_byte().saturating_sub(1),
                         reachable,
                     )?;
                     let actual = self.copied_field_origins(

@@ -100,7 +100,11 @@ impl SemanticAnalyzer<'_> {
         else {
             return Ok(value);
         };
-        if variable.child_by_field_name("value").is_some() {
+        if variable.child_by_field_name("value").is_some()
+            && !variable
+                .child_by_field_name("value")
+                .is_some_and(|node| text_of(&parsed.source, node) == "null")
+        {
             return Ok(value);
         }
         let assignments = nodes
@@ -124,11 +128,11 @@ impl SemanticAnalyzer<'_> {
         {
             return Ok(value);
         }
+        let nullable = variable.child_by_field_name("value").is_some();
         for parent in lookup::ancestors(**assignment).take_while(|node| *node != declaration) {
             if matches!(
                 parent.kind(),
-                "if_statement"
-                    | "switch_expression"
+                "switch_expression"
                     | "switch_statement"
                     | "for_statement"
                     | "enhanced_for_statement"
@@ -137,6 +141,9 @@ impl SemanticAnalyzer<'_> {
                     | "catch_clause"
                     | "finally_clause"
             ) {
+                return Ok(value);
+            }
+            if parent.kind() == "if_statement" && !nullable {
                 return Ok(value);
             }
             if parent.kind() == "try_statement" {
@@ -156,7 +163,14 @@ impl SemanticAnalyzer<'_> {
         }
         Ok(assignment.child_by_field_name("right").map(|right| {
             (
-                expression_from_node(&parsed.source, right),
+                if nullable {
+                    Expression::Branch(vec![
+                        Expression::Literal("null".to_owned()),
+                        expression_from_node(&parsed.source, right),
+                    ])
+                } else {
+                    expression_from_node(&parsed.source, right)
+                },
                 right.start_byte(),
             )
         }))
@@ -174,6 +188,19 @@ impl SemanticAnalyzer<'_> {
         let receiver = receiver.trim();
         if receiver.is_empty() || depth >= MAX_COPY_ORIGIN_DEPTH {
             return Ok(None);
+        }
+        if receiver.contains('(') && !receiver.ends_with(".getData()") {
+            let parsed = self.parsed(&method.file_path)?.clone();
+            if let Some(node) = values::expression_node(&parsed, method, receiver, offset) {
+                return self.trace_expression(
+                    method,
+                    expression_from_node(&parsed.source, node),
+                    node.start_byte(),
+                    reachable,
+                    visiting,
+                    depth + 1,
+                );
+            }
         }
         if let Some((base, accessor)) = receiver.rsplit_once(".") {
             if accessor.ends_with("()") {
@@ -231,6 +258,38 @@ impl SemanticAnalyzer<'_> {
             Expression::Literal(value) if value == "null" => Ok(Some(BTreeSet::new())),
             Expression::Identifier(name) => {
                 let name = normalize_receiver(&name);
+                let parsed = self.parsed(&method.file_path)?.clone();
+                if let Some(declaration) = lookup::method_declaration(&parsed, method)
+                    && let Some(loop_node) = descendants(declaration).into_iter().find(|node| {
+                        node.kind() == "enhanced_for_statement"
+                            && node
+                                .child_by_field_name("name")
+                                .is_some_and(|item| text_of(&parsed.source, item) == name)
+                            && node.child_by_field_name("body").is_some_and(|body| {
+                                body.start_byte() <= offset && offset <= body.end_byte()
+                            })
+                    })
+                    && let Some(collection) = loop_node.child_by_field_name("value")
+                {
+                    if descendants(loop_node).iter().any(|node| {
+                        node.start_byte() < offset
+                            && matches!(node.kind(), "assignment_expression" | "update_expression")
+                            && node
+                                .child_by_field_name("left")
+                                .or_else(|| node.named_child(0))
+                                .is_some_and(|left| text_of(&parsed.source, left) == name)
+                    }) {
+                        return Ok(None);
+                    }
+                    return self.trace_expression(
+                        method,
+                        expression_from_node(&parsed.source, collection),
+                        collection.start_byte(),
+                        reachable,
+                        visiting,
+                        depth + 1,
+                    );
+                }
                 if let Some(index) = method_parameters(&method.signature)
                     .iter()
                     .position(|(_, parameter)| parameter == &name)
@@ -245,7 +304,78 @@ impl SemanticAnalyzer<'_> {
                     }
                     if matches!(&value, Expression::Unknown(value) if value.trim_start().starts_with("new "))
                     {
-                        return Ok(Some(BTreeSet::from([(method.id.clone(), name)])));
+                        if self.copy_collection_type(method, &name, offset)?.is_some() {
+                            if let Some(declaration) = lookup::method_declaration(&parsed, method)
+                                && descendants(declaration).iter().any(|node| {
+                                    node.start_byte() > declaration_offset
+                                        && node.start_byte() < offset
+                                        && matches!(
+                                            node.kind(),
+                                            "variable_declarator" | "assignment_expression"
+                                        )
+                                        && node
+                                            .child_by_field_name("value")
+                                            .or_else(|| node.child_by_field_name("right"))
+                                            .is_some_and(|value| {
+                                                text_of(&parsed.source, value) == name
+                                            })
+                                })
+                            {
+                                return Ok(None);
+                            }
+                            let Some(mut origins) = self.trace_expression(
+                                method,
+                                value.clone(),
+                                declaration_offset,
+                                reachable,
+                                visiting,
+                                depth + 1,
+                            )?
+                            else {
+                                return Ok(None);
+                            };
+                            for site in self.method_invocations(method)? {
+                                if site.offset > declaration_offset && site.offset < offset
+                                    && site.arguments.iter().any(|argument| matches!(argument, Expression::Identifier(value) if value == &name))
+                                    && !self.copy_collection_escape_is_setter(method, &site, &name)?
+                                { return Ok(None); }
+                                if site.offset <= declaration_offset
+                                    || site.offset >= offset
+                                    || site.receiver.as_deref() != Some(&name)
+                                {
+                                    continue;
+                                }
+                                let index = match site.name.as_str() {
+                                    "add" | "addAll" | "putAll" => 0,
+                                    "put" | "set" => 1,
+                                    "isEmpty" | "size" | "containsKey" | "get" | "remove"
+                                    | "clear" => continue,
+                                    _ => return Ok(None),
+                                };
+                                let Some((value, offset)) =
+                                    self.invocation_argument(method, &site, index)?
+                                else {
+                                    return Ok(None);
+                                };
+                                let Some(value) = self.trace_expression(
+                                    method,
+                                    value,
+                                    offset,
+                                    reachable,
+                                    visiting,
+                                    depth + 1,
+                                )?
+                                else {
+                                    return Ok(None);
+                                };
+                                origins.extend(value);
+                            }
+                            return Ok(Some(origins));
+                        }
+                        return Ok(Some(BTreeSet::from([(
+                            method.id.clone(),
+                            format!("{name}@{declaration_offset}"),
+                        )])));
                     }
                     return self.trace_expression(
                         method,
@@ -285,7 +415,200 @@ impl SemanticAnalyzer<'_> {
                     depth + 1,
                 )
             }
-            Expression::Call { name, .. } => {
+            Expression::Unknown(source) if source.trim_start().starts_with("new ") => {
+                let parsed = self.parsed(&method.file_path)?.clone();
+                let Some(node) = values::expression_node(&parsed, method, &source, offset) else {
+                    return Ok(None);
+                };
+                let Some(kind) = node.child_by_field_name("type").and_then(|kind| {
+                    parse_java_type(text_of(&parsed.source, kind).trim_end_matches("<>"))
+                }) else {
+                    return Ok(None);
+                };
+                if !self
+                    .project
+                    .imported_type(&method.file_path, &kind.name)
+                    .is_some_and(|name| {
+                        matches!(
+                            name.as_str(),
+                            "java.util.ArrayList" | "java.util.HashMap" | "java.util.LinkedHashMap"
+                        )
+                    })
+                    || self
+                        .project
+                        .resolve_type(&method.file_path, &method.qualified_name, &kind)
+                        .is_some()
+                {
+                    return Ok(None);
+                }
+                let args = node
+                    .child_by_field_name("arguments")
+                    .map(named_children)
+                    .unwrap_or_default();
+                match args.as_slice() {
+                    [] => Ok(Some(BTreeSet::new())),
+                    [argument] if text_of(&parsed.source, *argument).parse::<usize>().is_ok() => {
+                        Ok(Some(BTreeSet::new()))
+                    }
+                    [argument] => self.trace_expression(
+                        method,
+                        expression_from_node(&parsed.source, *argument),
+                        argument.start_byte(),
+                        reachable,
+                        visiting,
+                        depth + 1,
+                    ),
+                    _ => Ok(None),
+                }
+            }
+            Expression::Call { name, source } => {
+                let parsed = self.parsed(&method.file_path)?.clone();
+                if let Some(node) = values::expression_node(&parsed, method, &source, offset)
+                    && self.copy_pipeline(method, node, &parsed.source)?
+                {
+                    let args = node
+                        .child_by_field_name("arguments")
+                        .map(named_children)
+                        .unwrap_or_default();
+                    if matches!(name.as_str(), "emptyList" | "emptyMap" | "emptySet") {
+                        return Ok(Some(BTreeSet::new()));
+                    }
+                    if matches!(
+                        name.as_str(),
+                        "singletonList" | "singleton" | "asList" | "of"
+                    ) {
+                        let mut origins = BTreeSet::new();
+                        for value in args {
+                            let Some(value) = self.trace_expression(
+                                method,
+                                expression_from_node(&parsed.source, value),
+                                value.start_byte(),
+                                reachable,
+                                visiting,
+                                depth + 1,
+                            )?
+                            else {
+                                return Ok(None);
+                            };
+                            origins.extend(value);
+                        }
+                        return Ok(Some(origins));
+                    }
+                    if name == "map"
+                        && let [callback] = args.as_slice()
+                    {
+                        return self.trace_copy_callback(
+                            method,
+                            *callback,
+                            &parsed.source,
+                            reachable,
+                            visiting,
+                            depth + 1,
+                        );
+                    }
+                    if name == "collect"
+                        && let [collector] = args.as_slice()
+                    {
+                        let collector_site = values::invocation(&parsed.source, *collector);
+                        if !collector_site.receiver.as_deref().is_some_and(|receiver| {
+                            self.project
+                                .imported_type(&method.file_path, receiver)
+                                .as_deref()
+                                == Some("java.util.stream.Collectors")
+                        }) {
+                            return Ok(None);
+                        }
+                        if collector_site.name == "toMap" {
+                            if let Some(arguments) = collector.child_by_field_name("arguments")
+                                && let Some(merge) = arguments.named_child(2)
+                            {
+                                let parameters = merge
+                                    .child_by_field_name("parameters")
+                                    .map(|node| {
+                                        text_of(&parsed.source, node)
+                                            .trim_matches(['(', ')'])
+                                            .split(',')
+                                            .map(str::trim)
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                if merge.kind() != "lambda_expression"
+                                    || parameters.len() != 2
+                                    || merge.child_by_field_name("body").is_none_or(|body| {
+                                        !parameters.contains(&text_of(&parsed.source, body))
+                                    })
+                                {
+                                    return Ok(None);
+                                }
+                            }
+                            let mapper = collector
+                                .child_by_field_name("arguments")
+                                .and_then(|args| args.named_child(1));
+                            if let Some(mapper) = mapper {
+                                return self.trace_copy_callback(
+                                    method,
+                                    mapper,
+                                    &parsed.source,
+                                    reachable,
+                                    visiting,
+                                    depth + 1,
+                                );
+                            }
+                        }
+                        if !matches!(collector_site.name.as_str(), "toList" | "toSet") {
+                            return Ok(None);
+                        }
+                    }
+                    if matches!(
+                        name.as_str(),
+                        "stream"
+                            | "filter"
+                            | "collect"
+                            | "toList"
+                            | "values"
+                            | "get"
+                            | "getOrDefault"
+                            | "unmodifiableList"
+                            | "unmodifiableMap"
+                    ) {
+                        let input =
+                            if matches!(name.as_str(), "unmodifiableList" | "unmodifiableMap") {
+                                args.first().copied()
+                            } else {
+                                node.child_by_field_name("object")
+                            };
+                        if let Some(input) = input {
+                            let Some(mut origins) = self.trace_expression(
+                                method,
+                                expression_from_node(&parsed.source, input),
+                                input.start_byte(),
+                                reachable,
+                                visiting,
+                                depth + 1,
+                            )?
+                            else {
+                                return Ok(None);
+                            };
+                            if name == "getOrDefault"
+                                && let Some(default) = args.get(1)
+                            {
+                                let Some(default) = self.trace_expression(
+                                    method,
+                                    expression_from_node(&parsed.source, *default),
+                                    default.start_byte(),
+                                    reachable,
+                                    visiting,
+                                    depth + 1,
+                                )?
+                                else {
+                                    return Ok(None);
+                                };
+                                origins.extend(default);
+                            }
+                            return Ok(Some(origins));
+                        }
+                    }
+                }
                 self.trace_call(method, &name, offset, reachable, visiting, depth + 1, false)
             }
             Expression::Branch(expressions) => {
@@ -310,6 +633,258 @@ impl SemanticAnalyzer<'_> {
         }
     }
 
+    fn copy_collection_type(
+        &mut self,
+        method: &GraphNode,
+        receiver: &str,
+        offset: usize,
+    ) -> Result<Option<TypeRef>> {
+        let mut kind = self
+            .receiver_type(method, receiver, offset)?
+            .and_then(|kind| parse_java_type(&kind));
+        let mut file = method.file_path.clone();
+        if kind.is_none()
+            && let Some((base, accessor)) = receiver.rsplit_once('.')
+        {
+            let field = getter_signal(accessor.trim_end_matches("()"))
+                .or_else(|| (!accessor.contains('(')).then(|| accessor.to_owned()));
+            if let Some(field) = field
+                && let Some(class) = self.expression_class(method, base, offset)?
+                && let Some(node) = self
+                    .project
+                    .graph()
+                    .contained(&class.id, "field")
+                    .into_iter()
+                    .find(|node| node.name == field)
+            {
+                kind = declared_variable_type(&node.signature, &node.name)
+                    .and_then(|kind| parse_java_type(&kind));
+                file = node.file_path.clone();
+            }
+        }
+        let Some(kind) = kind else {
+            return Ok(None);
+        };
+        Ok(self
+            .project
+            .imported_type(&file, &kind.name)
+            .filter(|name| {
+                matches!(
+                    name.as_str(),
+                    "java.util.List"
+                        | "java.util.Set"
+                        | "java.util.Collection"
+                        | "java.util.Map"
+                        | "java.util.ArrayList"
+                        | "java.util.HashMap"
+                        | "java.util.LinkedHashMap"
+                )
+            })
+            .filter(|_| {
+                self.project
+                    .resolve_type(&file, &method.qualified_name, &kind)
+                    .is_none()
+            })
+            .map(|_| kind))
+    }
+
+    fn copy_collection_escape_is_setter(
+        &mut self,
+        method: &GraphNode,
+        site: &InvocationSite,
+        collection: &str,
+    ) -> Result<bool> {
+        if matches!(site.name.as_str(), "unmodifiableList" | "unmodifiableMap")
+            && site.receiver.as_deref().is_some_and(|receiver| {
+                self.project
+                    .imported_type(&method.file_path, receiver)
+                    .as_deref()
+                    == Some("java.util.Collections")
+            })
+        {
+            return Ok(true);
+        }
+        let Some(field) = site
+            .name
+            .strip_prefix("set")
+            .filter(|field| !field.is_empty())
+            .map(|field| {
+                let mut chars = field.chars();
+                format!(
+                    "{}{}",
+                    chars.next().unwrap().to_ascii_lowercase(),
+                    chars.as_str()
+                )
+            })
+        else {
+            return Ok(false);
+        };
+        let targets = self.resolve_invocation(method, site)?;
+        let Some(target) = targets
+            .first()
+            .filter(|_| targets.len() == 1)
+            .and_then(|id| self.project.graph().nodes.get(id))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let parsed = self.parsed(&target.file_path)?.clone();
+        if let Some(declaration) = lookup::method_declaration(&parsed, &target) {
+            let Some(index) = site.arguments.iter().position(
+                |argument| matches!(argument, Expression::Identifier(value) if value == collection),
+            ) else {
+                return Ok(false);
+            };
+            let parameters = method_parameters(&target.signature);
+            let Some((_, parameter)) = parameters.get(index) else {
+                return Ok(false);
+            };
+            let Some(body) = declaration.child_by_field_name("body") else {
+                return Ok(false);
+            };
+            let statements = lookup::statements(body);
+            let [statement] = statements.as_slice() else {
+                return Ok(false);
+            };
+            let Some(assignment) = statement.named_child(0) else {
+                return Ok(false);
+            };
+            return Ok(assignment.kind() == "assignment_expression"
+                && assignment.child_by_field_name("left").is_some_and(|node| {
+                    text_of(&parsed.source, node) == field
+                        || text_of(&parsed.source, node) == format!("this.{field}")
+                })
+                && assignment
+                    .child_by_field_name("operator")
+                    .is_some_and(|node| text_of(&parsed.source, node) == "=")
+                && assignment
+                    .child_by_field_name("right")
+                    .is_some_and(|node| text_of(&parsed.source, node) == parameter));
+        }
+        let Some(receiver) = site.receiver.as_deref() else {
+            return Ok(false);
+        };
+        let Some(class) = self.expression_class(method, receiver, site.offset)? else {
+            return Ok(false);
+        };
+        Ok(
+            values::type_declaration(&parsed, &class).is_some_and(|declaration| {
+                (primary::has_annotation(&parsed.source, declaration, "Data")
+                    || primary::has_annotation(&parsed.source, declaration, "Setter"))
+                    && primary::instance_fields(&parsed.source, declaration).contains(&field)
+            }),
+        )
+    }
+
+    fn copy_pipeline(
+        &mut self,
+        method: &GraphNode,
+        mut node: Node<'_>,
+        source: &str,
+    ) -> Result<bool> {
+        if self.standard_pipeline(method, node, source)? {
+            return Ok(true);
+        }
+        while node.kind() == "method_invocation" {
+            let site = values::invocation(source, node);
+            if !matches!(
+                site.name.as_str(),
+                "stream"
+                    | "filter"
+                    | "map"
+                    | "collect"
+                    | "toList"
+                    | "values"
+                    | "get"
+                    | "getOrDefault"
+            ) {
+                return Ok(false);
+            }
+            let Some(object) = node.child_by_field_name("object") else {
+                return Ok(false);
+            };
+            if self
+                .copy_collection_type(method, text_of(source, object), object.start_byte())?
+                .is_some()
+            {
+                return Ok(true);
+            }
+            node = object;
+        }
+        Ok(false)
+    }
+
+    fn trace_copy_callback(
+        &mut self,
+        method: &GraphNode,
+        callback: Node<'_>,
+        source: &str,
+        reachable: &Reachability,
+        visiting: &mut BTreeSet<(String, bool)>,
+        depth: usize,
+    ) -> Result<Option<BTreeSet<SetterOrigin>>> {
+        if callback.kind() == "method_reference" {
+            let parts = named_children(callback);
+            let [receiver, name] = parts.as_slice() else {
+                return Ok(None);
+            };
+            let site = InvocationSite {
+                name: text_of(source, *name).to_owned(),
+                receiver: Some(text_of(source, *receiver).to_owned()),
+                arity: 1,
+                exact_arity: true,
+                arguments: Vec::new(),
+                offset: callback.start_byte(),
+                line: callback.start_position().row + 1,
+                column: callback.start_position().column + 1,
+            };
+            let targets = self.resolve_invocation(method, &site)?;
+            if let [target] = targets.as_slice()
+                && let Some(target) = self.project.graph().nodes.get(target).cloned()
+            {
+                return self.trace_method_return(&target, reachable, visiting, depth + 1, false);
+            }
+        }
+        if callback.kind() == "lambda_expression"
+            && let Some(body) = callback.child_by_field_name("body")
+        {
+            let values = if body.kind() == "block" {
+                descendants(body)
+                    .into_iter()
+                    .filter(|node| {
+                        node.kind() == "return_statement"
+                            && lookup::ancestors(*node)
+                                .find(|node| node.kind() == "lambda_expression")
+                                == Some(callback)
+                    })
+                    .filter_map(|node| node.named_child(0))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![body]
+            };
+            if values.is_empty() {
+                return Ok(None);
+            }
+            let mut origins = BTreeSet::new();
+            for value in values {
+                let Some(value) = self.trace_expression(
+                    method,
+                    expression_from_node(source, value),
+                    value.start_byte(),
+                    reachable,
+                    visiting,
+                    depth + 1,
+                )?
+                else {
+                    return Ok(None);
+                };
+                origins.extend(value);
+            }
+            return Ok(Some(origins));
+        }
+        Ok(None)
+    }
+
     fn trace_parameter(
         &mut self,
         method: &GraphNode,
@@ -331,6 +906,49 @@ impl SemanticAnalyzer<'_> {
                 continue;
             };
             for invocation in self.method_invocations(&caller)? {
+                if !invocation.exact_arity
+                    && index == 0
+                    && self.invocation_reaches(&caller, &invocation, &method.id)?
+                {
+                    let parsed = self.parsed(&caller.file_path)?.clone();
+                    let reference = descendants(parsed.tree.root_node())
+                        .into_iter()
+                        .find(|node| {
+                            node.kind() == "method_reference"
+                                && node.start_byte() == invocation.offset
+                        });
+                    if let Some(reference) = reference
+                        && let Some(map) =
+                            reference
+                                .parent()
+                                .and_then(|node| node.parent())
+                                .filter(|node| {
+                                    node.kind() == "method_invocation"
+                                        && values::invocation(&parsed.source, *node).name == "map"
+                                })
+                        && self.copy_pipeline(&caller, map, &parsed.source)?
+                        && let Some(input) = map.child_by_field_name("object")
+                    {
+                        let Some(origins) = self.trace_expression(
+                            &caller,
+                            expression_from_node(&parsed.source, input),
+                            input.start_byte(),
+                            reachable,
+                            visiting,
+                            depth + 1,
+                        )?
+                        else {
+                            visiting.remove(&key);
+                            return Ok(None);
+                        };
+                        if result.as_ref().is_some_and(|previous| previous != &origins) {
+                            visiting.remove(&key);
+                            return Ok(None);
+                        }
+                        result = Some(origins);
+                    }
+                    continue;
+                }
                 if !invocation.exact_arity || invocation.arguments.len() <= index {
                     continue;
                 }
@@ -383,9 +1001,9 @@ impl SemanticAnalyzer<'_> {
             return Ok(None);
         };
         let holder_receiver = normalize_receiver(holder_receiver);
-        let Some(holder_origins) = self.trace_expression(
+        let Some(holder_origins) = self.trace_receiver(
             method,
-            Expression::Identifier(holder_receiver.clone()),
+            &holder_receiver,
             offset,
             reachable,
             visiting,
@@ -394,49 +1012,19 @@ impl SemanticAnalyzer<'_> {
         else {
             return Ok(None);
         };
-        let Some(type_name) = self.receiver_type(method, &holder_receiver, offset)? else {
-            return Ok(None);
-        };
-        let Some(type_ref) = parse_java_type(&type_name) else {
-            return Ok(None);
-        };
-        let owner_fqn = method
-            .qualified_name
-            .rsplit_once("::")
-            .map(|(owner, _)| owner)
-            .unwrap_or(&method.qualified_name);
-        let Some(holder) = self
-            .project
-            .resolve_type(&method.file_path, owner_fqn, &type_ref)
-            .cloned()
-        else {
+        let Some(holder) = self.expression_class(method, &holder_receiver, offset)? else {
             return Ok(None);
         };
         let setter_name = format!("set{}", uppercase_first(&field_name));
-        let setters = self
-            .project
-            .graph()
-            .contained(&holder.id, "method")
-            .into_iter()
-            .filter(|setter| setter.name == setter_name)
-            .cloned()
-            .collect::<Vec<_>>();
-        let [setter] = setters.as_slice() else {
-            return Ok(None);
-        };
         let mut origins = BTreeSet::new();
         let mut matched = false;
-        for edge in self
-            .project
-            .graph()
-            .incoming_calls(&setter.id)
-            .filter(|edge| reachable.nodes.contains(&edge.source))
-        {
+        let methods = reachable.nodes.iter().cloned().collect();
+        for edge in self.typed_setter_edges(&holder, &field_name, &methods)? {
             let Some(source) = self.project.graph().nodes.get(&edge.source).cloned() else {
                 continue;
             };
             let Some((setter_receiver, setter_offset)) =
-                self.setter_receiver(edge, &source, &setter.name)?
+                self.setter_receiver(&edge, &source, &setter_name)?
             else {
                 continue;
             };
@@ -452,7 +1040,7 @@ impl SemanticAnalyzer<'_> {
                 continue;
             }
             matched = true;
-            let Some((expression, _, value_offset)) = self.setter_argument(edge, &setter.name)?
+            let Some((expression, _, value_offset)) = self.setter_argument(&edge, &setter_name)?
             else {
                 return Ok(None);
             };
@@ -549,14 +1137,33 @@ impl SemanticAnalyzer<'_> {
                         )
                     })
                 } else {
-                    Some(self.trace_expression(
-                        method,
-                        value.expression,
-                        value.offset,
-                        reachable,
-                        visiting,
-                        depth + 1,
-                    ))
+                    Some(match value.expression {
+                        Expression::Identifier(receiver) => self.trace_wrapper_receiver(
+                            method,
+                            &receiver,
+                            value.offset,
+                            reachable,
+                            visiting,
+                            depth + 1,
+                        ),
+                        Expression::Call { name, .. } => self.trace_call(
+                            method,
+                            &name,
+                            value.offset,
+                            reachable,
+                            visiting,
+                            depth + 1,
+                            true,
+                        ),
+                        expression => self.trace_expression(
+                            method,
+                            expression,
+                            value.offset,
+                            reachable,
+                            visiting,
+                            depth + 1,
+                        ),
+                    })
                 }
             } else {
                 Some(self.trace_expression(
@@ -678,6 +1285,19 @@ impl SemanticAnalyzer<'_> {
         receiver: &str,
         offset: usize,
     ) -> Result<bool> {
+        if receiver.ends_with(')') {
+            let parsed = self.parsed(&method.file_path)?.clone();
+            if let Some(node) = values::expression_node(&parsed, method, receiver, offset) {
+                let targets =
+                    self.resolve_invocation(method, &values::invocation(&parsed.source, node))?;
+                return Ok(targets
+                    .first()
+                    .filter(|_| targets.len() == 1)
+                    .and_then(|id| self.project.graph().nodes.get(id))
+                    .and_then(|method| parse_java_type(&method.return_type))
+                    .is_some_and(|kind| KNOWN_RESULT_WRAPPERS.contains(&kind.simple_name())));
+            }
+        }
         let base = receiver
             .trim()
             .rsplit('.')
@@ -743,7 +1363,7 @@ impl SemanticAnalyzer<'_> {
             if lookup::ancestors(statement).find(|node| {
                 matches!(
                     node.kind(),
-                    "method_declaration" | "constructor_declaration"
+                    "method_declaration" | "constructor_declaration" | "lambda_expression"
                 )
             }) != Some(declaration)
             {
@@ -1076,9 +1696,11 @@ mod tests {
         let origins = analyzer
             .copied_field_origins(&operation(), &writer, "workOrder", 70, &reachable)
             .unwrap();
-        assert_eq!(
-            origins,
-            BTreeSet::from([("query".to_owned(), "returned".to_owned())])
+        assert_eq!(origins.len(), 1);
+        assert!(
+            origins
+                .iter()
+                .any(|(method, receiver)| method == "query" && receiver.starts_with("returned@"))
         );
         assert!(
             analyzer
@@ -1209,9 +1831,11 @@ class Writer {
                 &reachable,
             )
             .unwrap();
-        assert_eq!(
-            origins,
-            BTreeSet::from([("run".to_owned(), "dto".to_owned())])
+        assert_eq!(origins.len(), 1);
+        assert!(
+            origins
+                .iter()
+                .any(|(method, receiver)| method == "run" && receiver.starts_with("dto@"))
         );
     }
 }

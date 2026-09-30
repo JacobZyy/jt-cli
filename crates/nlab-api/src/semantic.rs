@@ -38,6 +38,8 @@ struct Domain {
     complete: bool,
     primary_enum_value: bool,
     auxiliary_enum_value: bool,
+    enum_constants: Option<BTreeSet<String>>,
+    enum_name_union: bool,
     external: BTreeSet<String>,
     unknown: BTreeSet<String>,
     /// Gaps in proving a closed value domain, not gaps in the enum association.
@@ -1182,11 +1184,10 @@ fn extract_enum_domain(
         ));
     };
     let Some(primary_field) = primary::field_name(source, declaration, &fields) else {
-        return Ok(incomplete_enum_domain(
-            enum_node,
-            accessor,
-            "enum primary value is not proven",
-        ));
+        let mut domain =
+            incomplete_enum_domain(enum_node, accessor, "enum primary value is not proven");
+        domain.auxiliary_enum_value = primary::auxiliary_name(&signal);
+        return Ok(domain);
     };
     if signal != primary_field {
         let mut domain =
@@ -1419,7 +1420,7 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
             && domain.closure_gaps.is_empty()
             && !domain.transformed
     });
-    let status = if all_closed && identities.len() == 1 {
+    let status = if all_closed && (identities.len() == 1 || merged.enum_name_union) {
         ProvenanceStatus::Closed
     } else if merged.enum_fqn.is_some() {
         ProvenanceStatus::Known
@@ -1435,6 +1436,10 @@ fn classify_patch(target: FieldTarget, domains: Vec<Domain>) -> SemanticPatch {
     };
     let warning = match status {
         ProvenanceStatus::Closed => None,
+        ProvenanceStatus::Known if merged.transformed => Some(
+            "field value includes a transformation; the original scalar type is retained"
+                .to_owned(),
+        ),
         ProvenanceStatus::Known => Some(format!(
             "enum evidence does not prove a complete field domain{}",
             merged
@@ -1583,14 +1588,83 @@ fn merge_domain(target: &mut Domain, source: Domain) {
             target.complete = source.complete;
             target.primary_enum_value = source.primary_enum_value;
             target.auxiliary_enum_value = source.auxiliary_enum_value;
+            target.enum_constants = source.enum_constants.clone();
+            target.enum_name_union = source.enum_name_union;
         }
         (Some(left), Some(right)) if left != right || target.accessor != source.accessor => {
-            target.complete = false;
-            target.primary_enum_value = false;
-            target.auxiliary_enum_value = false;
-            target
-                .unknown
-                .insert(format!("conflicting enum projections:{left}:{right}"));
+            if left != right
+                && target.accessor.as_deref() == Some("name")
+                && source.accessor.as_deref() == Some("name")
+                && target.complete
+                && source.complete
+                && target.primary_enum_value
+                && source.primary_enum_value
+            {
+                // Retain both proven enum sources in the field-level union.
+                let provenance = format!("enum-union:{}#name + {}#name", left, right);
+                target.values.retain(|member| {
+                    target.enum_constants.as_ref().is_none_or(|constants| {
+                        member
+                            .key
+                            .as_ref()
+                            .is_some_and(|key| constants.contains(key))
+                    })
+                });
+                for member in &source.values {
+                    if source.enum_constants.as_ref().is_none_or(|constants| {
+                        member
+                            .key
+                            .as_ref()
+                            .is_some_and(|key| constants.contains(key))
+                    }) && !target
+                        .values
+                        .iter()
+                        .any(|value| value.value == member.value)
+                    {
+                        target.values.push(member.clone());
+                    }
+                }
+                for member in &mut target.values {
+                    member.key = None;
+                }
+                target.enum_constants = None;
+                target.enum_name_union = true;
+                push_unique(&mut target.evidence, provenance);
+            } else {
+                target.complete = false;
+                target.primary_enum_value = false;
+                target.auxiliary_enum_value &= source.auxiliary_enum_value;
+                target
+                    .unknown
+                    .insert(format!("conflicting enum projections:{left}:{right}"));
+            }
+        }
+        (Some(_), Some(_)) => {
+            if target.enum_name_union {
+                for member in &source.values {
+                    if source.enum_constants.as_ref().is_none_or(|constants| {
+                        member
+                            .key
+                            .as_ref()
+                            .is_some_and(|key| constants.contains(key))
+                    }) && !target
+                        .values
+                        .iter()
+                        .any(|value| value.value == member.value)
+                    {
+                        let mut member = member.clone();
+                        member.key = None;
+                        target.values.push(member);
+                    }
+                }
+            }
+            if let (Some(target), Some(source)) =
+                (&mut target.enum_constants, source.enum_constants)
+            {
+                target.extend(source);
+            } else {
+                target.enum_constants = None;
+            }
         }
         _ => {}
     }

@@ -37,7 +37,13 @@ impl SemanticAnalyzer<'_> {
                 ..Domain::default()
             }));
         }
-        self.enum_domain(&class, accessor).map(Some)
+        let mut domain = self.enum_domain(&class, accessor)?;
+        if let Some((_, constant)) = receiver.rsplit_once('.')
+            && self.enum_member(&class, constant)?
+        {
+            domain.enum_constants = Some(BTreeSet::from([constant.to_owned()]));
+        }
+        Ok(Some(domain))
     }
 
     /// Resolve the declared receiver type, including enum factories and chained calls.
@@ -125,6 +131,35 @@ impl SemanticAnalyzer<'_> {
             return Ok(None);
         }
         let site = invocation(&parsed.source, node);
+        if matches!(site.name.as_str(), "getKey" | "getValue")
+            && site.arity == 0
+            && let Some(receiver) = site.receiver.as_deref()
+            && let Some(kind) = self
+                .receiver_type(method, receiver, offset)?
+                .and_then(|kind| parse_java_type(&kind))
+            && self
+                .project
+                .resolve_type(&method.file_path, &method.qualified_name, &kind)
+                .is_none()
+            && (kind.name == "java.util.Map.Entry"
+                || kind.name == "Map.Entry"
+                    && self
+                        .project
+                        .imported_type(&method.file_path, "Map")
+                        .as_deref()
+                        == Some("java.util.Map")
+                || self
+                    .project
+                    .imported_type(&method.file_path, &kind.name)
+                    .as_deref()
+                    == Some("java.util.Map.Entry"))
+            && let Some(value) = kind.arguments.get(usize::from(site.name == "getValue"))
+        {
+            return Ok(self
+                .project
+                .resolve_type(&method.file_path, &method.qualified_name, value)
+                .cloned());
+        }
         let targets = self.resolve_invocation(method, &site)?;
         let Some(target) = targets
             .first()
@@ -309,16 +344,38 @@ impl SemanticAnalyzer<'_> {
                     } else {
                         object
                     };
-                    return self
-                        .analyze_expression(
-                            operation,
-                            method,
-                            expression_from_node(&parsed.source, input),
-                            input.start_byte(),
-                            reachable,
-                            visiting,
-                        )
-                        .map(Some);
+                    let mut domain = self.analyze_expression(
+                        operation,
+                        method,
+                        expression_from_node(&parsed.source, input),
+                        input.start_byte(),
+                        reachable,
+                        visiting,
+                    )?;
+                    if site.name == "collect"
+                        && !args.first().is_some_and(|collector| {
+                            let collector = invocation(&parsed.source, *collector);
+                            collector.receiver.as_deref().is_some_and(|receiver| {
+                                self.project
+                                    .imported_type(&method.file_path, receiver)
+                                    .as_deref()
+                                    == Some("java.util.stream.Collectors")
+                            }) && matches!(
+                                collector.name.as_str(),
+                                "toList"
+                                    | "toSet"
+                                    | "toUnmodifiableList"
+                                    | "toUnmodifiableSet"
+                                    | "toCollection"
+                            )
+                        })
+                    {
+                        domain.transformed = true;
+                        domain.unknown.insert(
+                            "collector does not preserve individual enum values".to_owned(),
+                        );
+                    }
+                    return Ok(Some(domain));
                 }
                 _ => {}
             }
