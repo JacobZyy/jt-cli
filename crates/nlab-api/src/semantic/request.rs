@@ -1,4 +1,5 @@
 use super::lookup::{ancestors, method_declaration, statements, unwrap_parentheses};
+use super::values::invocation;
 use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +29,11 @@ impl SemanticAnalyzer<'_> {
         methods.sort_by(|left, right| left.id.cmp(&right.id));
         for method in methods {
             for invocation in self.method_invocations(&method)? {
+                for (path, domain) in
+                    self.request_callback_domains(operation, &method, &invocation, reachable)?
+                {
+                    sites.entry(path).or_default().push((domain, false));
+                }
                 if invocation.arguments.len() != 1 {
                     continue;
                 }
@@ -148,6 +154,173 @@ impl SemanticAnalyzer<'_> {
             }
         }
         Ok(patches)
+    }
+
+    /// Bind a parser callback at its concrete call site, rather than mixing
+    /// different enum parsers passed to the same generic collection helper.
+    fn request_callback_domains(
+        &mut self,
+        operation: &Operation,
+        caller: &GraphNode,
+        site: &InvocationSite,
+        reachable: &Reachability,
+    ) -> Result<Vec<(String, Domain)>> {
+        if !site.exact_arity
+            || site.arguments.len() < 2
+            || !site.arguments.iter().any(
+                |argument| matches!(argument, Expression::Unknown(text) if text.contains("::")),
+            )
+        {
+            return Ok(Vec::new());
+        }
+        let targets = self.resolve_invocation(caller, site)?;
+        let Some(helper) = targets
+            .first()
+            .filter(|_| targets.len() == 1)
+            .and_then(|id| self.project.graph().nodes.get(id))
+            .cloned()
+        else {
+            return Ok(Vec::new());
+        };
+        let parsed = self.parsed(&caller.file_path)?.clone();
+        let Some(call) = descendants(parsed.tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "method_invocation" && node.start_byte() == site.offset)
+        else {
+            return Ok(Vec::new());
+        };
+        let args = call
+            .child_by_field_name("arguments")
+            .map(named_children)
+            .unwrap_or_default();
+        let parameters = method_parameters(&helper.signature);
+        let helper_file = self.parsed(&helper.file_path)?.clone();
+        let Some(declaration) = method_declaration(&helper_file, &helper) else {
+            return Ok(Vec::new());
+        };
+        let mut result = Vec::new();
+        for (callback_index, (kind, parameter)) in parameters.iter().enumerate() {
+            let Some(kind) = parse_java_type(kind) else {
+                continue;
+            };
+            if self
+                .project
+                .imported_type(&helper.file_path, &kind.name)
+                .as_deref()
+                != Some("java.util.function.Function")
+                || self
+                    .project
+                    .resolve_type(&helper.file_path, &helper.qualified_name, &kind)
+                    .is_some()
+            {
+                continue;
+            }
+            let Some(callback) = args
+                .get(callback_index)
+                .filter(|node| node.kind() == "method_reference")
+            else {
+                continue;
+            };
+            let parts = named_children(*callback);
+            let [receiver, name] = parts.as_slice() else {
+                continue;
+            };
+            let lookup_site = InvocationSite {
+                name: text_of(&parsed.source, *name).to_owned(),
+                receiver: Some(text_of(&parsed.source, *receiver).to_owned()),
+                arity: 1,
+                exact_arity: true,
+                arguments: Vec::new(),
+                offset: callback.start_byte(),
+                line: callback.start_position().row + 1,
+                column: callback.start_position().column + 1,
+            };
+            let targets = self.resolve_invocation(caller, &lookup_site)?;
+            let Some(lookup) = targets
+                .first()
+                .filter(|_| targets.len() == 1)
+                .and_then(|id| self.enum_lookups.get(id))
+                .cloned()
+            else {
+                continue;
+            };
+            for apply in descendants(declaration)
+                .into_iter()
+                .filter(|node| node.kind() == "method_invocation")
+            {
+                let apply_site = invocation(&helper_file.source, apply);
+                if apply_site.name != "apply"
+                    || apply_site.receiver.as_deref() != Some(parameter)
+                    || apply_site.arguments.len() != 1
+                {
+                    continue;
+                }
+                let Some(loop_node) =
+                    ancestors(apply).find(|node| node.kind() == "enhanced_for_statement")
+                else {
+                    continue;
+                };
+                let Some(item) = loop_node.child_by_field_name("name") else {
+                    continue;
+                };
+                if !matches!(&apply_site.arguments[0], Expression::Identifier(name) if name == text_of(&helper_file.source, item))
+                {
+                    continue;
+                }
+                let Some(collection) = loop_node.child_by_field_name("value") else {
+                    continue;
+                };
+                let Some(input_index) = parameters
+                    .iter()
+                    .position(|(_, name)| name == text_of(&helper_file.source, collection))
+                else {
+                    continue;
+                };
+                if descendants(declaration).iter().any(|node| {
+                    matches!(node.kind(), "assignment_expression" | "update_expression")
+                        && node
+                            .child_by_field_name("left")
+                            .or_else(|| node.named_child(0))
+                            .is_some_and(|left| {
+                                [
+                                    parameter.as_str(),
+                                    parameters[input_index].1.as_str(),
+                                    text_of(&helper_file.source, item),
+                                ]
+                                .contains(&text_of(&helper_file.source, left))
+                            })
+                }) {
+                    continue;
+                }
+                let Some(argument) = site.arguments.get(input_index) else {
+                    continue;
+                };
+                let Some(origin) = self.request_origin(
+                    operation,
+                    caller,
+                    argument.clone(),
+                    site.offset,
+                    reachable,
+                    &mut BTreeSet::new(),
+                )?
+                else {
+                    continue;
+                };
+                if origin.path.is_empty() {
+                    continue;
+                }
+                let mut domain = lookup.domain.clone();
+                push_unique(
+                    &mut domain.evidence,
+                    format!(
+                        "callback-lookup:{}:{}:{}({}) via {}.apply",
+                        caller.file_path, site.line, lookup_site.name, origin.path, parameter
+                    ),
+                );
+                result.push((origin.path, domain));
+            }
+        }
+        Ok(result)
     }
 
     pub(super) fn request_expression_domain(

@@ -114,6 +114,20 @@ pub(super) fn accessor_field(
     getter_generated.then_some(field)
 }
 
+pub(super) fn setter_transforms(source: &str, declaration: Node<'_>, field: &str) -> bool {
+    let setter = format!("set{}", uppercase_first(field));
+    owned_nodes(declaration, "method_declaration").into_iter()
+        .filter(|node| method_name(source, *node) == setter)
+        .any(|method| {
+            let parameter = method.child_by_field_name("parameters").and_then(|params| params.named_child(0))
+                .and_then(|param| param.child_by_field_name("name")).map(|name| text_of(source, name));
+            descendants(method).into_iter().filter(|node| node.kind() == "assignment_expression"
+                && node.child_by_field_name("left").is_some_and(|node| matches!(text_of(source, node), name if name == field || name == format!("this.{field}"))))
+                .any(|node| node.child_by_field_name("operator").is_none_or(|operator| text_of(source, operator) != "=")
+                    || node.child_by_field_name("right").is_none_or(|node| Some(text_of(source, node)) != parameter))
+        })
+}
+
 pub(super) fn argument_index(
     source: &str,
     declaration: Node<'_>,
@@ -221,7 +235,24 @@ fn returned_field(source: &str, method: Node<'_>, fields: &[String]) -> Option<S
 }
 
 fn identity_name(enum_name: &str, field: &str) -> bool {
-    if matches!(field, "buttonType" | "actions")
+    if auxiliary_name(field) {
+        return false;
+    }
+    if matches!(
+        field,
+        "code" | "value" | "state" | "status" | "type" | "id" | "key" | "result" | "channel"
+    ) {
+        return true;
+    }
+    let owner = enum_name.strip_suffix("Enum").unwrap_or(enum_name);
+    owner.ends_with(&uppercase_first(field))
+        || field
+            .strip_suffix("Code")
+            .is_some_and(|stem| !stem.is_empty() && owner.ends_with(&uppercase_first(stem)))
+}
+
+pub(super) fn auxiliary_name(field: &str) -> bool {
+    matches!(field, "buttonType" | "actions")
         || [
             "name",
             "desc",
@@ -237,20 +268,6 @@ fn identity_name(enum_name: &str, field: &str) -> bool {
         ]
         .iter()
         .any(|suffix| field == *suffix || field.ends_with(&uppercase_first(suffix)))
-    {
-        return false;
-    }
-    if matches!(
-        field,
-        "code" | "value" | "state" | "status" | "type" | "id" | "key" | "result" | "channel"
-    ) {
-        return true;
-    }
-    let owner = enum_name.strip_suffix("Enum").unwrap_or(enum_name);
-    owner.ends_with(&uppercase_first(field))
-        || field
-            .strip_suffix("Code")
-            .is_some_and(|stem| !stem.is_empty() && owner.ends_with(&uppercase_first(stem)))
 }
 
 fn unique(values: BTreeSet<String>) -> Option<String> {

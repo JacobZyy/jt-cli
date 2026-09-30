@@ -490,9 +490,48 @@ fn map_projection(source: &str, body: Node<'_>, map: &str, enum_name: &str) -> O
         if args.len() != 2 || text_of(source, args[1]) != item {
             return None;
         }
-        let statements = statements(loop_node.child_by_field_name("body")?);
-        if statements.len() != 1 || statements[0].kind() != "expression_statement" {
+        let loop_body = loop_node.child_by_field_name("body")?;
+        // Other indexes/lists may be built in the same loop. The map write must
+        // still execute once for every enum constant, without changing its key.
+        if put.parent()?.kind() != "expression_statement"
+            || put.parent()?.parent()? != loop_body
+            || descendants(loop_body).iter().any(|node| {
+                matches!(
+                    node.kind(),
+                    "break_statement"
+                        | "continue_statement"
+                        | "return_statement"
+                        | "throw_statement"
+                ) || matches!(node.kind(), "assignment_expression" | "update_expression")
+                    && node
+                        .child_by_field_name("left")
+                        .or_else(|| node.named_child(0))
+                        .is_some_and(|left| text_of(source, left) == item)
+            })
+        {
             return None;
+        }
+        let accessor = projection(source, args[0], item)?;
+        if statements(loop_body).len() > 1 && accessor != "name" {
+            let declaration = body.parent()?;
+            let fields = primary::instance_fields(source, declaration);
+            let field = primary::accessor_field(source, declaration, &accessor, &fields)?;
+            if !primary::owned_nodes(declaration, "field_declaration")
+                .iter()
+                .any(|node| {
+                    text_of(source, *node)
+                        .split_whitespace()
+                        .any(|word| word == "final")
+                        && named_children(*node).iter().any(|variable| {
+                            variable.kind() == "variable_declarator"
+                                && variable
+                                    .child_by_field_name("name")
+                                    .is_some_and(|name| text_of(source, name) == field)
+                        })
+                })
+            {
+                return None;
+            }
         }
         let uses = local_nodes
             .iter()
@@ -502,7 +541,7 @@ fn map_projection(source: &str, body: Node<'_>, map: &str, enum_name: &str) -> O
         if uses != 3 {
             return None;
         }
-        return projection(source, args[0], item);
+        return Some(accessor);
     }
     if writes.len() != 1 || invocation_name(source, writes[0]) != "put" {
         return None;
@@ -668,6 +707,55 @@ mod tests {
         assert_eq!(
             lookup(&map.replace("private static final", "public static final")),
             None
+        );
+    }
+
+    #[test]
+    fn immutable_reverse_map_can_share_its_loop_with_other_indexes() {
+        let source = "enum Kind { A(1); final int code; Kind(int code) { this.code=code; } int getCode() { return code; } private static final Map<Integer, Kind> INDEX; static { Map<Integer, Kind> local = new HashMap<>(); List<Integer> codes = new ArrayList<>(); for (Kind item : values()) { local.put(item.getCode(), item); if (item.getCode() > 0) codes.add(item.getCode()); } INDEX = Collections.unmodifiableMap(local); } static Kind decode(Integer input) { return INDEX.get(input); } }";
+        assert_eq!(lookup(source), Some(("getCode".to_owned(), true)));
+        assert_eq!(
+            lookup(&source.replace(
+                "local.put(item.getCode(), item);",
+                "if (item.getCode() > 0) local.put(item.getCode(), item);"
+            )),
+            None
+        );
+        assert_eq!(
+            lookup(&source.replace(
+                "local.put(item.getCode(), item);",
+                "if (item.getCode() < 0) continue; local.put(item.getCode(), item);"
+            )),
+            None
+        );
+        assert_eq!(
+            lookup(&source.replace(
+                "local.put(item.getCode(), item);",
+                "item = A; local.put(item.getCode(), item);"
+            )),
+            None
+        );
+        assert_eq!(
+            lookup(&source.replace(
+                "local.put(item.getCode(), item);",
+                "local.put(item.getCode() + 1, item);"
+            )),
+            None
+        );
+        assert_eq!(lookup(&source.replace("final int code", "int code")), None);
+        assert_eq!(
+            lookup(&source.replace(
+                "INDEX = Collections.unmodifiableMap(local);",
+                "leak(local); INDEX = Collections.unmodifiableMap(local);"
+            )),
+            None
+        );
+        assert_eq!(
+            lookup(&source.replace(
+                "local.put(item.getCode(), item);",
+                "codes.add(item); local.put(item.name(), item);"
+            )),
+            Some(("name".to_owned(), true))
         );
     }
 }

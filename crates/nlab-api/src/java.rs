@@ -156,7 +156,7 @@ impl<'a> JavaProject<'a> {
         self.graph.source_path(&self.root, path)
     }
 
-    /// Resolve an explicit import even when its dependency source is not indexed locally.
+    /// Resolve explicit imports and known java.util wildcard imports without dependency sources.
     pub(crate) fn imported_type(&self, file: &str, name: &str) -> Option<String> {
         if name.contains('.') {
             return Some(name.to_owned());
@@ -167,7 +167,32 @@ impl<'a> JavaProject<'a> {
             .iter()
             .filter(|import| import.rsplit('.').next() == Some(name))
             .collect::<Vec<_>>();
-        (candidates.len() == 1).then(|| candidates[0].clone())
+        if candidates.len() == 1 {
+            return Some(candidates[0].clone());
+        }
+        if candidates.is_empty()
+            && matches!(
+                name,
+                "List"
+                    | "Set"
+                    | "Collection"
+                    | "Map"
+                    | "ArrayList"
+                    | "HashMap"
+                    | "LinkedHashMap"
+                    | "Collections"
+                    | "Arrays"
+                    | "Optional"
+            )
+            && self
+                .imports
+                .get(file)?
+                .iter()
+                .any(|import| import == "java.util.*")
+        {
+            return Some(format!("java.util.{name}"));
+        }
+        None
     }
 
     pub fn node_for_fqn(&self, fqn: &str) -> Option<&GraphNode> {

@@ -318,21 +318,31 @@ impl SemanticAnalyzer<'_> {
         let Some(field_name) = getter_signal(accessor) else {
             return Ok(None);
         };
-        let Some(type_name) =
-            self.receiver_type(writer, receiver.trim_start_matches("this."), offset)?
-        else {
+        let Some(class) = self.expression_class(writer, receiver, offset)? else {
             return Ok(None);
         };
-        let Some(type_ref) = parse_java_type(&type_name) else {
-            return Ok(None);
-        };
-        let Some(class) = self
-            .project
-            .resolve_type(&writer.file_path, &writer.qualified_name, &type_ref)
-            .cloned()
-        else {
-            return Ok(None);
-        };
+        let class_file = self.parsed(&class.file_path)?.clone();
+        if let Some(declaration) = values::type_declaration(&class_file, &class) {
+            let fields = primary::instance_fields(&class_file.source, declaration);
+            let explicit_getter = primary::owned_nodes(declaration, "method_declaration")
+                .iter()
+                .any(|method| {
+                    method
+                        .child_by_field_name("name")
+                        .is_some_and(|name| text_of(&class_file.source, name) == accessor)
+                });
+            if primary::setter_transforms(&class_file.source, declaration, &field_name)
+                || explicit_getter
+                    && primary::accessor_field(&class_file.source, declaration, accessor, &fields)
+                        .as_deref()
+                        != Some(&field_name)
+            {
+                return Ok(Some(values::unknown(format!(
+                    "copied field accessor transforms values:{}#{}",
+                    class.qualified_name, field_name
+                ))));
+            }
+        }
         let cache_key = (
             operation.key.clone(),
             format!("{}:{}:{receiver}:{offset}", class.id, writer.id),
@@ -412,7 +422,19 @@ impl SemanticAnalyzer<'_> {
         visiting.remove(&visit_key);
         let documented = self.copied_field_enum_reference(&class, &field_name, &mut domain);
         if domain.enum_fqn.is_none() && !documented {
-            return Ok(None);
+            return Ok(self
+                .project
+                .graph()
+                .contained(&class.id, "field")
+                .iter()
+                .any(|field| field.name == field_name)
+                .then(|| {
+                    values::unknown(format!(
+                        "field value is not statically enumerable:{}#{}",
+                        class.qualified_name.replace("::", "."),
+                        field_name
+                    ))
+                }));
         }
         if domain.enum_fqn.is_some() {
             domain.closure_gaps.insert(
