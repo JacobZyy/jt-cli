@@ -26,7 +26,7 @@ use crate::node::{
         NODE_MIRROR, PACKAGE_REGISTRY, PNPM_VERSIONS, ReferenceFact, StageOutcome, TOOLCHAINS,
         VITE_PLUS_INSTALLER_URL,
     },
-    nrm::configure_taobao_and_zz,
+    nrm::configure_registry_and_zz,
     platform::{executable_candidates, first_executable},
     shell::{reconcile_vite_loader, shell_config_plan, validate_zdotdir},
 };
@@ -138,29 +138,15 @@ pub fn install(context: &AppContext<'_>) -> Result<VitePlusInstall> {
             index + 4,
             &format!("预装 Node {}", pair.node),
             || {
-                if std::env::consts::OS == "macos"
-                    && std::env::consts::ARCH == "aarch64"
-                    && pair.node == "14.21.3"
-                {
-                    install_node14_x64(
-                        context,
-                        &vp,
-                        &home,
-                        &environment,
-                        &version,
-                        bootstrap.path(),
-                    )
-                } else {
-                    run_vp(
-                        context,
-                        &vp,
-                        &environment,
-                        bootstrap.path(),
-                        ["env", "install", pair.node],
-                        &format!("preinstall Node {}", pair.node),
-                    )
-                    .map(|_| ())
-                }
+                install_node(
+                    context,
+                    &vp,
+                    &home,
+                    &environment,
+                    &version,
+                    pair.node,
+                    bootstrap.path(),
+                )
             },
         )?;
     }
@@ -219,11 +205,11 @@ pub fn configure(context: &AppContext<'_>, install: &VitePlusInstall) -> Result<
     let environment = vite_environment(context, &install.home);
     let mut snapshots = configuration_snapshots(context)?;
     let configured = (|| {
-        configure_taobao_and_zz(
+        configure_registry_and_zz(
             context.runner,
             &install.home.join("bin/nrm"),
             &environment,
-            &context.home.home.join(".nrmrc"),
+            &context.npm_registry,
         )?;
         configure_shell_blocks(context, &mut snapshots)
     })();
@@ -746,6 +732,7 @@ fn install_vp(
     home: &Path,
     environment: &BTreeMap<OsString, OsString>,
 ) -> Result<String> {
+    let environment = &vite_bootstrap_environment(environment);
     let installer = Builder::new()
         .prefix("jt-vite-plus-")
         .tempfile_in(&context.home.temp_root)
@@ -843,14 +830,54 @@ fn prewarm_pnpm(
     Ok(())
 }
 
-fn install_node14_x64(
+fn install_node(
     context: &AppContext<'_>,
     vp: &Path,
     home: &Path,
     environment: &BTreeMap<OsString, OsString>,
-    version: &str,
+    vp_version: &str,
+    node_version: &str,
     workspace: &Path,
 ) -> Result<()> {
+    let result = run_program(
+        context,
+        vp,
+        environment,
+        Some(workspace),
+        ["env", "install", node_version],
+    )?;
+    if std::env::consts::OS == "macos"
+        && std::env::consts::ARCH == "aarch64"
+        && missing_macos_arm64_node(&result, node_version)
+    {
+        return install_node_x64(
+            context,
+            home,
+            environment,
+            vp_version,
+            node_version,
+            workspace,
+        );
+    }
+    result.require_success(&format!("preinstall Node {node_version}"), &[])
+}
+
+fn missing_macos_arm64_node(result: &CommandResult, version: &str) -> bool {
+    !result.success()
+        && result.stderr.contains(&format!(
+            "Hash not found for node-v{version}-darwin-arm64.tar.gz in SHASUMS256.txt"
+        ))
+}
+
+fn install_node_x64(
+    context: &AppContext<'_>,
+    home: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+    version: &str,
+    node_version: &str,
+    workspace: &Path,
+) -> Result<()> {
+    let environment = &vite_bootstrap_environment(environment);
     let curl = first_executable("curl", &context.environment).ok_or_else(|| {
         AppError::Invalid("curl is required for macOS x64 Vite+ bootstrap".to_owned())
     })?;
@@ -921,7 +948,7 @@ fn install_node14_x64(
             x64_vp.to_string_lossy().as_ref(),
             "env",
             "install",
-            "14.21.3",
+            node_version,
         ],
     )
     .cwd(workspace);
@@ -930,11 +957,10 @@ fn install_node14_x64(
     command
         .env
         .insert(OsString::from("VP_HOME"), OsString::from(home.as_os_str()));
-    context
-        .runner
-        .run(&command)?
-        .require_success("preinstall Node 14 x64 through matching Vite+ CLI", &[])?;
-    let _ = vp;
+    context.runner.run(&command)?.require_success(
+        &format!("preinstall Node {node_version} x64 through matching Vite+ CLI"),
+        &[],
+    )?;
     Ok(())
 }
 
@@ -1018,6 +1044,16 @@ fn restore_configuration_snapshots(
     Ok(())
 }
 
+fn vite_bootstrap_environment(
+    environment: &BTreeMap<OsString, OsString>,
+) -> BTreeMap<OsString, OsString> {
+    let mut environment = environment.clone();
+    for key in ["NPM_CONFIG_REGISTRY", "npm_config_registry"] {
+        environment.insert(OsString::from(key), OsString::from(PACKAGE_REGISTRY));
+    }
+    environment
+}
+
 fn vite_environment(context: &AppContext<'_>, home: &Path) -> BTreeMap<OsString, OsString> {
     let mut environment = inherited_proxy_env(&context.environment);
     environment.insert(
@@ -1031,11 +1067,11 @@ fn vite_environment(context: &AppContext<'_>, home: &Path) -> BTreeMap<OsString,
     );
     environment.insert(
         OsString::from("NPM_CONFIG_REGISTRY"),
-        OsString::from(PACKAGE_REGISTRY),
+        OsString::from(&context.npm_registry),
     );
     environment.insert(
         OsString::from("npm_config_registry"),
-        OsString::from(PACKAGE_REGISTRY),
+        OsString::from(&context.npm_registry),
     );
     let inherited_path = context.env("PATH").unwrap_or_default();
     let path = std::env::join_paths(
@@ -1311,8 +1347,9 @@ mod tests {
         AggressiveCleanupPlan, FileSnapshot, GlobalStage, VitePlusInstall, cleanup_plan,
         configuration_snapshots, configure_global_environment, configure_shell_blocks,
         decode_vp_globals, execute_cleanup, fnm_multishell_root, global_inventory_fingerprint,
-        global_results, install_vp, progress_step, require_expected_version,
-        restore_configuration_snapshots, verify_vp_global_candidates, vite_environment,
+        global_results, install_node, install_node_x64, install_vp, missing_macos_arm64_node,
+        progress_step, require_expected_version, restore_configuration_snapshots,
+        verify_vp_global_candidates, vite_environment,
     };
 
     #[test]
@@ -1331,6 +1368,7 @@ mod tests {
         let mut prompt = ProgressPrompt::default();
         {
             let context = AppContext {
+                npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
                 runner: &runner,
                 prompt: &mut prompt,
                 home: HomePaths {
@@ -1377,6 +1415,7 @@ mod tests {
         let runner = InstallerRunner;
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: "https://registry.npmjs.org/".to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1386,7 +1425,146 @@ mod tests {
             environment: environment.clone(),
         };
 
+        let environment = vite_environment(&context, &home);
         assert_eq!(install_vp(&context, &home, &environment).unwrap(), "1.2.3");
+    }
+
+    #[test]
+    fn node_install_always_tries_native_vp_first() {
+        let root = tempdir().unwrap();
+        let runner = NodeInstallRunner {
+            native: CommandResult {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            commands: Mutex::new(Vec::new()),
+        };
+        let mut prompt = NoopPrompt;
+        let home = root.path().join("home/.vite-plus");
+        let vp = home.join("bin/vp");
+        let context = AppContext {
+            npm_registry: "https://registry.npmjs.org/".to_owned(),
+            runner: &runner,
+            prompt: &mut prompt,
+            home: HomePaths {
+                home: root.path().join("home"),
+                temp_root: root.path().to_path_buf(),
+            },
+            environment: BTreeMap::new(),
+        };
+        let environment = vite_environment(&context, &home);
+        for pair in crate::node::model::TOOLCHAINS {
+            install_node(
+                &context,
+                &vp,
+                &home,
+                &environment,
+                "1.2.3",
+                pair.node,
+                root.path(),
+            )
+            .unwrap();
+        }
+        let commands = runner.commands.lock().unwrap();
+        assert_eq!(commands.len(), crate::node::model::TOOLCHAINS.len());
+        for (command, pair) in commands.iter().zip(crate::node::model::TOOLCHAINS) {
+            assert_eq!(command.program, vp);
+            assert_eq!(
+                command.args,
+                ["env", "install", pair.node].map(OsString::from)
+            );
+        }
+    }
+
+    #[test]
+    fn x64_fallback_only_matches_missing_requested_macos_arm64_archive() {
+        for version in ["12.22.12", "14.21.3"] {
+            let missing = format!(
+                "error: Hash not found for node-v{version}-darwin-arm64.tar.gz in SHASUMS256.txt"
+            );
+            let result = CommandResult {
+                status: 1,
+                stdout: String::new(),
+                stderr: missing.clone(),
+            };
+            assert!(missing_macos_arm64_node(&result, version));
+            assert!(!missing_macos_arm64_node(&result, "24.15.0"));
+            assert!(!missing_macos_arm64_node(
+                &CommandResult {
+                    status: 0,
+                    ..result
+                },
+                version
+            ));
+        }
+        for stderr in [
+            "Failed to download SHASUMS256.txt: timeout",
+            "PGP signature verification failed for node-v14.21.3-darwin-arm64.tar.gz",
+            "Hash mismatch for node-v14.21.3-darwin-arm64.tar.gz",
+            "Hash not found for node-v14.21.3-linux-arm64.tar.gz in SHASUMS256.txt",
+        ] {
+            let result = CommandResult {
+                status: 1,
+                stdout: String::new(),
+                stderr: stderr.to_owned(),
+            };
+            assert!(!missing_macos_arm64_node(&result, "14.21.3"));
+        }
+    }
+
+    #[test]
+    fn x64_node_install_uses_requested_version_and_fixed_bootstrap_registry() {
+        let root = tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("curl"), "").unwrap();
+        let runner = NodeInstallRunner {
+            native: CommandResult {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            commands: Mutex::new(Vec::new()),
+        };
+        let mut prompt = NoopPrompt;
+        let home = root.path().join("home/.vite-plus");
+        let context = AppContext {
+            npm_registry: "https://registry.example/npm/".to_owned(),
+            runner: &runner,
+            prompt: &mut prompt,
+            home: HomePaths {
+                home: root.path().join("home"),
+                temp_root: root.path().to_path_buf(),
+            },
+            environment: BTreeMap::from([(OsString::from("PATH"), bin.as_os_str().to_os_string())]),
+        };
+        let environment = vite_environment(&context, &home);
+        install_node_x64(
+            &context,
+            &home,
+            &environment,
+            "1.2.3",
+            "12.22.12",
+            root.path(),
+        )
+        .unwrap();
+        let commands = runner.commands.lock().unwrap();
+        assert_eq!(commands.len(), 4);
+        assert!(commands[0].args.iter().any(|arg| arg == "https://registry.npmmirror.com/@voidzero-dev/vite-plus-cli-darwin-x64/-/vite-plus-cli-darwin-x64-1.2.3.tgz"));
+        assert_eq!(
+            commands[3].args[2..],
+            ["env", "install", "12.22.12"].map(OsString::from)
+        );
+        for command in commands.iter() {
+            assert!(command.clear_env);
+            for key in ["NPM_CONFIG_REGISTRY", "npm_config_registry"] {
+                assert_eq!(
+                    command.env.get(&OsString::from(key)),
+                    Some(&OsString::from(PACKAGE_REGISTRY))
+                );
+            }
+        }
     }
 
     #[test]
@@ -1441,6 +1619,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1488,6 +1667,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1544,6 +1724,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1576,6 +1757,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1612,6 +1794,52 @@ mod tests {
     }
 
     #[test]
+    fn vite_calls_get_official_registry_without_changing_node_mirror() {
+        let root = tempdir().unwrap();
+        let runner = GlobalRunner::default();
+        let mut prompt = NoopPrompt;
+        let context = AppContext {
+            npm_registry: "https://registry.npmjs.org/".to_owned(),
+            runner: &runner,
+            prompt: &mut prompt,
+            home: HomePaths {
+                home: root.path().join("home"),
+                temp_root: root.path().to_path_buf(),
+            },
+            environment: BTreeMap::from([
+                (OsString::from("PATH"), OsString::from("/usr/bin")),
+                (
+                    OsString::from("HTTPS_PROXY"),
+                    OsString::from("http://127.0.0.1:7890"),
+                ),
+                (OsString::from("UNRELATED"), OsString::from("ignored")),
+            ]),
+        };
+
+        let environment = vite_environment(&context, Path::new("/work/.vite-plus"));
+
+        assert_eq!(
+            environment.get(&OsString::from("NPM_CONFIG_REGISTRY")),
+            Some(&OsString::from("https://registry.npmjs.org/"))
+        );
+        assert_eq!(
+            environment.get(&OsString::from("npm_config_registry")),
+            Some(&OsString::from("https://registry.npmjs.org/"))
+        );
+        assert_eq!(
+            environment.get(&OsString::from("VP_NODE_DIST_MIRROR")),
+            Some(&OsString::from(NODE_MIRROR))
+        );
+        assert!(environment.contains_key(&OsString::from("HTTPS_PROXY")));
+        assert!(!environment.contains_key(&OsString::from("UNRELATED")));
+        assert!(
+            environment
+                .get(&OsString::from("PATH"))
+                .is_some_and(|path| path.to_string_lossy().starts_with("/work/.vite-plus/bin"))
+        );
+    }
+
+    #[test]
     fn configuration_restore_only_replaces_the_expected_managed_shell_content() {
         let root = tempdir().unwrap();
         let home = root.path().join("home");
@@ -1621,6 +1849,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1655,6 +1884,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1681,6 +1911,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1732,6 +1963,7 @@ mod tests {
         let runner = GlobalRunner::default();
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1777,6 +2009,7 @@ mod tests {
         let mut environment = BTreeMap::new();
         environment.insert(OsString::from("PATH"), OsString::from("/usr/bin"));
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1905,8 +2138,38 @@ mod tests {
 
     struct InstallerRunner;
 
+    struct NodeInstallRunner {
+        native: CommandResult,
+        commands: Mutex<Vec<CommandSpec>>,
+    }
+
+    impl Runner for NodeInstallRunner {
+        fn run(&self, command: &CommandSpec) -> Result<CommandResult> {
+            self.commands.lock().unwrap().push(command.clone());
+            if command.program.file_name().is_some_and(|name| name == "vp") {
+                return Ok(self.native.clone());
+            }
+            Ok(CommandResult {
+                status: 0,
+                stdout: if command.args.last().is_some_and(|arg| arg == "--version") {
+                    "vp 1.2.3".to_owned()
+                } else {
+                    String::new()
+                },
+                stderr: String::new(),
+            })
+        }
+    }
+
     impl Runner for InstallerRunner {
         fn run(&self, command: &CommandSpec) -> Result<CommandResult> {
+            assert!(command.clear_env);
+            for key in ["NPM_CONFIG_REGISTRY", "npm_config_registry"] {
+                assert_eq!(
+                    command.env.get(&OsString::from(key)),
+                    Some(&OsString::from(PACKAGE_REGISTRY))
+                );
+            }
             match command
                 .program
                 .file_name()
