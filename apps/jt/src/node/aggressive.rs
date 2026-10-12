@@ -852,6 +852,7 @@ fn install_node(
     {
         return install_node_x64(
             context,
+            vp,
             home,
             environment,
             vp_version,
@@ -871,6 +872,7 @@ fn missing_macos_arm64_node(result: &CommandResult, version: &str) -> bool {
 
 fn install_node_x64(
     context: &AppContext<'_>,
+    vp: &Path,
     home: &Path,
     environment: &BTreeMap<OsString, OsString>,
     version: &str,
@@ -925,6 +927,17 @@ fn install_node_x64(
         .runner
         .run(&unpack)?
         .require_success("unpack matching x64 Vite+ CLI", &[])?;
+    // Reuse completed setup so the temporary CLI cannot replace the canonical installation.
+    let setup_marker = fs::canonicalize(vp)
+        .map_err(|error| {
+            AppError::io("resolve canonical Vite+ CLI", Some(vp.to_path_buf()), error)
+        })?
+        .with_file_name(".vp-setup-complete");
+    if setup_marker.is_file() {
+        fs::copy(&setup_marker, unpacked.join(".vp-setup-complete")).map_err(|error| {
+            AppError::io("reuse completed Vite+ setup", Some(setup_marker), error)
+        })?;
+    }
     let x64_vp = unpacked.join("vp");
     let mut inspect = CommandSpec::new(
         "arch",
@@ -1529,6 +1542,14 @@ mod tests {
         };
         let mut prompt = NoopPrompt;
         let home = root.path().join("home/.vite-plus");
+        let vp = home.join("current/bin/vp");
+        fs::create_dir_all(vp.parent().unwrap()).unwrap();
+        fs::write(&vp, "native CLI").unwrap();
+        fs::write(
+            vp.with_file_name(".vp-setup-complete"),
+            "completed native setup",
+        )
+        .unwrap();
         let context = AppContext {
             npm_registry: "https://registry.example/npm/".to_owned(),
             runner: &runner,
@@ -1542,6 +1563,7 @@ mod tests {
         let environment = vite_environment(&context, &home);
         install_node_x64(
             &context,
+            &vp,
             &home,
             &environment,
             "1.2.3",
@@ -1549,6 +1571,11 @@ mod tests {
             root.path(),
         )
         .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("vite-plus-x64/.vp-setup-complete")).unwrap(),
+            "completed native setup"
+        );
+        assert_eq!(fs::read_to_string(&vp).unwrap(), "native CLI");
         let commands = runner.commands.lock().unwrap();
         assert_eq!(commands.len(), 4);
         assert!(commands[0].args.iter().any(|arg| arg == "https://registry.npmmirror.com/@voidzero-dev/vite-plus-cli-darwin-x64/-/vite-plus-cli-darwin-x64-1.2.3.tgz"));
