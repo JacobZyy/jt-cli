@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.0.5](https://github.com/JacobZyy/jt-cli/compare/v3.0.4...v3.0.5) (2026-10-12)
+
+
+### Features
+
+* **node:** configure npm registries and unify runtime installation ([b9afa04](https://github.com/JacobZyy/jt-cli/commit/b9afa04959a9b8b904e176dba897de26e574b77f))
+* optimize Codex worktree environments and safe migration ([7290093](https://github.com/JacobZyy/jt-cli/commit/7290093a7e99933a1fc3fc143a754b2e1ce8d893))
+
+
+### Bug Fixes
+
+* **node:** preserve native Vite+ during architecture fallback ([2b5a219](https://github.com/JacobZyy/jt-cli/commit/2b5a2192473480ee0a455f439ff0090e93806c10))
+
 ## [3.0.4](https://github.com/JacobZyy/jt-cli/compare/v3.0.3...v3.0.4) (2026-10-08)
 
 ## [3.0.3](https://github.com/JacobZyy/jt-cli/compare/v3.0.2...v3.0.3) (2026-09-29)
