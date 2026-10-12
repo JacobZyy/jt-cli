@@ -1519,6 +1519,7 @@ mod tests {
         };
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -1561,6 +1562,7 @@ mod tests {
             };
             let mut prompt = NoopPrompt;
             let context = AppContext {
+                npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
                 runner: &runner,
                 prompt: &mut prompt,
                 home: HomePaths {
@@ -1588,6 +1590,7 @@ mod tests {
         };
         let mut prompt = NoopPrompt;
         let context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {

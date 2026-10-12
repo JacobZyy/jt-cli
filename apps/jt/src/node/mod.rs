@@ -34,7 +34,24 @@ impl RunSummary {
     }
 }
 
-pub fn init() -> u8 {
+pub fn parse_npm_registry(value: &str) -> std::result::Result<String, String> {
+    let url = url::Url::parse(value).map_err(|_| "npm registry must be an absolute HTTP(S) URL")?;
+    if !(value.starts_with("http://") || value.starts_with("https://"))
+        || value.contains('\\')
+        || !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || value.chars().any(char::is_whitespace)
+    {
+        return Err("npm registry must be an HTTP(S) URL without credentials, query, fragment or whitespace".to_owned());
+    }
+    Ok(format!("{}/", url.as_str().trim_end_matches('/')))
+}
+
+pub fn init(npm_registry: &str) -> u8 {
     if !std::io::stdin().is_terminal() {
         eprintln!("error: jt node init 仅支持交互运行");
         return 1;
@@ -51,6 +68,7 @@ pub fn init() -> u8 {
     let runner = SystemRunner;
     let mut prompt = TerminalPrompter::default();
     let mut context = AppContext {
+        npm_registry: npm_registry.to_owned(),
         runner: &runner,
         prompt: &mut prompt,
         home,
@@ -75,7 +93,7 @@ fn run(context: &mut AppContext<'_>) -> Result<RunSummary> {
     context.prompt.intro("jt node init")?;
     context.prompt.note(
         "激进模式计划",
-        "安装 Vite+ 与 Node/pnpm 版本集合\n配置 nrm 与 shell loader\n迁移可重建 globals\nfresh 探测后再次确认，才清理旧环境",
+        &format!("安装 Vite+ 与 Node/pnpm 版本集合\nnpm registry: {}\n配置 nrm 与 shell loader\n迁移可重建 globals\nfresh 探测后再次确认，才清理旧环境", context.npm_registry),
     )?;
     if !context
         .prompt
@@ -114,7 +132,7 @@ fn run_aggressive(context: &mut AppContext<'_>) -> Result<RunSummary> {
         ),
     });
 
-    println!("阶段 2/4：配置 nrm taobao/zz 与 Vite+ shell block。");
+    println!("阶段 2/4：配置 nrm registry/zz 与 Vite+ shell block。");
     if let Err(error) = aggressive::configure(context, &install) {
         return Ok(aggressive_failure(
             stages,
@@ -127,7 +145,7 @@ fn run_aggressive(context: &mut AppContext<'_>) -> Result<RunSummary> {
     stages.push(StageReport {
         name: "配置 nrm 与 shell".to_owned(),
         status: StageStatus::Completed,
-        detail: "nrm taobao/zz 与 Vite+ shell block 已配置".to_owned(),
+        detail: "nrm registry/zz 与 Vite+ shell block 已配置".to_owned(),
     });
 
     println!("阶段 3/4：fresh 探测旧 globals；单次批量 vp install -g。");
@@ -510,6 +528,7 @@ mod tests {
         let runner = NeverRunner::default();
         let mut prompt = CancelPrompt;
         let mut context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {
@@ -533,6 +552,7 @@ mod tests {
         let runner = NeverRunner::default();
         let mut prompt = PanicPrompt;
         let mut context = AppContext {
+            npm_registry: crate::node::model::PACKAGE_REGISTRY.to_owned(),
             runner: &runner,
             prompt: &mut prompt,
             home: HomePaths {

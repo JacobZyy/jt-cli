@@ -520,13 +520,15 @@ Initialize global Node/pnpm environment through Vite+:
 
 ```bash
 jt node init
+# Use the official npm registry instead of the default npmmirror:
+jt node init --npmregister https://registry.npmjs.org
 ```
 
-This interactive command supports macOS/Linux on x86_64 and ARM64. macOS Apple Silicon needs Rosetta 2 for the Node 14 x64 runtime. It:
+This interactive command supports macOS/Linux on x86_64 and ARM64. Every Node version is installed through `vp env install`. On macOS Apple Silicon, a missing arm64 archive triggers installation through a matching x64 Vite+ CLI and requires Rosetta 2. It:
 
 1. Installs or reuses Vite+, then prepares Node `14.21.3`, `16.19.0`, `20.11.0`, `22.21.0`, and `24.15.0`.
 2. Installs default pnpm, prewarms pnpm `7.4.1`, `9.7.0`, and `10.12.4`, then installs nrm.
-3. Configures npm mirror, nrm `taobao`/`zz`, and Vite+ shell loaders.
+3. Configures npm registry, nrm sources, and Vite+ shell loaders. `--npmregister URL` defaults to `https://registry.npmmirror.com/`. Existing nrm sources are reused by URL; new URLs use `jt`. Built-in source overrides are preserved, and the `zz` registry remains configured. The URL must be HTTP(S), without credentials, query, fragment, or whitespace. This controls package installation, migration, and pnpm prewarming. Vite+ itself is always downloaded from npmmirror; Node binaries use their independent download mirror.
 4. Migrates globals whose npm inventory proves an npmjs/npmmirror registry source to Vite+.
 5. Freshly scans old nvm/fnm/Homebrew/pnpm/Bun state. It shows every cleanup action and asks again before deleting anything.
 

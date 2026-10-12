@@ -147,7 +147,11 @@ enum NodeCommand {
         name = "init",
         about = "Initialize global Node/pnpm environment with Vite+"
     )]
-    Init,
+    Init {
+        /// npm registry URL (independent of the Node binary download mirror).
+        #[arg(long, value_name = "URL", default_value = "https://registry.npmmirror.com/", value_parser = node::parse_npm_registry)]
+        npmregister: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -281,8 +285,8 @@ fn main() -> ExitCode {
             command: RepoCommand::Cicd,
         } => repo_cicd(),
         Commands::Node {
-            command: NodeCommand::Init,
-        } => node_init(),
+            command: NodeCommand::Init { npmregister },
+        } => node_init(&npmregister),
         Commands::NlabApi { command } => run_nlab_api(command),
         Commands::Cli {
             command: CliCommand::Bootstrap,
@@ -372,8 +376,8 @@ fn repo_cicd() -> ExitCode {
     }
 }
 
-fn node_init() -> ExitCode {
-    ExitCode::from(node::init())
+fn node_init(npmregister: &str) -> ExitCode {
+    ExitCode::from(node::init(npmregister))
 }
 
 fn cli_bootstrap() -> ExitCode {
@@ -410,5 +414,71 @@ fn icon_download(selector: &OsString, output_directory: Option<&OsString>) -> Ex
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod node_registry_tests {
+    use super::*;
+
+    #[test]
+    fn node_registry_cli_defaults_and_normalizes() {
+        for (args, expected) in [
+            (
+                vec!["jt", "node", "init"],
+                "https://registry.npmmirror.com/",
+            ),
+            (
+                vec![
+                    "jt",
+                    "node",
+                    "init",
+                    "--npmregister",
+                    "https://registry.npmjs.org",
+                ],
+                "https://registry.npmjs.org/",
+            ),
+            (
+                vec![
+                    "jt",
+                    "node",
+                    "init",
+                    "--npmregister",
+                    "https://packages.example/npm",
+                ],
+                "https://packages.example/npm/",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Node {
+                command: NodeCommand::Init { npmregister },
+            } = cli.command
+            else {
+                panic!("expected node init")
+            };
+            assert_eq!(npmregister, expected);
+        }
+    }
+
+    #[test]
+    fn node_registry_cli_rejects_invalid_urls_before_execution() {
+        for value in [
+            "",
+            "registry.npmjs.org",
+            "https:foo",
+            "file:///tmp/npm",
+            "https://",
+            "https://user:pass@example.com",
+            "https://example.com?q=1",
+            "https://example.com/#fragment",
+            "https://example.com/a b",
+            "https://example.com\\evil",
+        ] {
+            assert!(
+                Cli::try_parse_from(["jt", "node", "init", "--npmregister", value]).is_err(),
+                "accepted {value:?}"
+            );
+        }
+        assert!(Cli::try_parse_from(["jt", "node", "init", "--npmregister"]).is_err());
     }
 }

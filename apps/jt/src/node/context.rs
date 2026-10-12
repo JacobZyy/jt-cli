@@ -7,6 +7,7 @@ use crate::node::{
 };
 
 pub struct AppContext<'a> {
+    pub npm_registry: String,
     pub runner: &'a dyn Runner,
     pub prompt: &'a mut dyn Prompter,
     pub home: HomePaths,
