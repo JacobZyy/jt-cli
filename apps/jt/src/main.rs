@@ -137,7 +137,32 @@ enum RepoCommand {
 #[command(disable_help_subcommand = true)]
 enum CodexCommand {
     #[command(about = "Create environment.toml in the current project without running setup")]
-    Init,
+    Init {
+        #[arg(
+            long,
+            conflicts_with = "update",
+            help = "Write a candidate for review without replacing existing configuration"
+        )]
+        check: bool,
+        #[arg(
+            long,
+            conflicts_with = "check",
+            help = "Update an unchanged managed template, preserving a recovery copy"
+        )]
+        update: bool,
+        #[arg(
+            long,
+            help = "Reduce Cargo debug and incremental output in generated build/test actions"
+        )]
+        lightweight: bool,
+    },
+    #[command(
+        about = "Inventory worktrees or check completion evidence before native Codex archival"
+    )]
+    Worktrees {
+        #[arg(long, value_name = "EVIDENCE_JSON")]
+        check: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -279,8 +304,16 @@ fn main() -> ExitCode {
 
     match cli.command {
         Commands::Codex {
-            command: CodexCommand::Init,
-        } => ExitCode::from(codex::run()),
+            command:
+                CodexCommand::Init {
+                    check,
+                    update,
+                    lightweight,
+                },
+        } => ExitCode::from(codex::run(check, update, lightweight)),
+        Commands::Codex {
+            command: CodexCommand::Worktrees { check },
+        } => ExitCode::from(codex::recycle::run(check.as_deref())),
         Commands::Repo {
             command: RepoCommand::Cicd,
         } => repo_cicd(),
