@@ -58,6 +58,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Test CLI
+        run: cargo +stable test --locked
+
+      - name: Test Codex dependency setup
+        run: node --test apps/jt/src/codex/dependencies.test.mjs
+
       - name: Check workspaces
         run: pnpm check
 
