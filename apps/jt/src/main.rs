@@ -1,4 +1,3 @@
-mod ai_hook;
 mod cli;
 mod codex;
 mod icon;
@@ -32,8 +31,6 @@ Examples:
   jt cli bootstrap
   jt ghostty install
   jt zed-conf
-  jt ai-hook
-  jt ai-hook --checks vitest,eslint --agents codex
   jt code unused [PATH]
   jt unused [PATH]
   jt call-graph [PATH]
@@ -86,8 +83,6 @@ enum Commands {
         about = "Write live Zed config to current Git repository"
     )]
     ZedConf,
-    #[command(name = "ai-hook", about = "Configure project AI hooks")]
-    AiHook(ai_hook::AiHookArgs),
     #[command(name = "code", about = "Analyze project source code")]
     Code {
         #[command(subcommand)]
@@ -262,7 +257,6 @@ fn main() -> ExitCode {
             command: GhosttyCommand::Install,
         } => ghostty_install(),
         Commands::ZedConf => ExitCode::from(zed::run()),
-        Commands::AiHook(args) => ExitCode::from(ai_hook::run(args)),
         Commands::Code {
             command: CodeCommand::Unused(args),
         } => ExitCode::from(unused::run(args)),

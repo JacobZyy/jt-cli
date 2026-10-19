@@ -267,98 +267,19 @@ The graph follows Graphy's split between language analysis, a renderer-independe
 and an interactive focused view. It does not invent edges for unresolved reflection or string-based
 dispatch; those gaps remain diagnostics rather than false exact calls.
 
-Configure project-local AI-edit hooks:
-
-```bash
-jt ai-hook
-```
-
-The questionnaire selects checks (`Vitest`, `ESLint`) and agent terminals (`Codex`). Re-running shows
-the installed selection; deselecting a check removes its maintained runner. Automation can provide
-the final selection without a TTY:
-
-```bash
-jt ai-hook --checks vitest,eslint --agents codex
-```
-
-Run inside a Git repository whose root `package.json` directly declares `tsx` and each selected
-tool. The command installs nothing. Workspace-package-only tooling is unsupported. `jt vitest` is a
-reserved placeholder; old `jt vitest ai-hook` arguments are removed.
-
-Installation writes maintained TypeScript runtime under `.codex/hooks/jt-ai-hook/`, then merges one
-handler into each `.codex/hooks.json` stage. `PreToolUse` fingerprints candidate patches.
-`PostToolUse` records content changes. `Stop` discovers direct `.ts` plugins under
-`stop/runner/`, sorts them, and executes all concurrently. Built-in `vitest.ts` and `eslint.ts`
-runners can be attached independently; custom runner files remain untouched. Existing unrelated
-handlers remain, including handlers sharing a group with migrated entries. Old `jt-vitest` and
-`nlab-eslint` handlers are replaced, preventing duplicate execution. Known legacy files bearing
-their ownership markers are removed; unmarked, custom, and symlinked files remain. Empty legacy
-directories are removed. Re-running is idempotent.
-Review and trust project hooks with `/hooks`. Runtime does not call `jt`.
-
-The Stop entry launches each tool through asynchronous child processes with `shell: false`. Both
-runners receive `isInAIHook=true` and `NO_COLOR=1`; process, environment, exit state, Vite server,
-and logger state stay isolated. One slow runner does not delay starting another.
-
-Vitest runs `related` once over all AI-edited files with its native `agent` reporter. Coverage is
-limited to edited files matching resolved project `coverage.include` and not matching
-`coverage.exclude`; no match disables coverage. Provider, thresholds, and `skipFull` stay project
-owned. A temporary `coverage-summary.json` is parsed into one Markdown table, then deleted. Raw
-coverage output never reaches the model. ESLint checks only supported existing edited files and
-returns at most 50 error diagnostics.
-
-All runners finish before one combined result is produced. Success stays model-silent. Failures use
-stable runner order and combine ESLint diagnostics with Vitest test/coverage sections. Coverage-only
-failure returns the table and concise threshold conclusions. First failure blocks for repair; retry
-continues once to prevent a Stop loop. Bounded details remain in `/tmp/jt-ai-hook-<repo>.jsonl`.
-
-Inspect those local traces in the web console:
-
-```bash
-pnpm install
-pnpm --filter ai-hook-console dev
-```
-
-Open `http://localhost:3000`. The console lists sessions with status, trigger counts, context,
-and code paths. Each detail page renders hook messages as Markdown, shows the session transcript,
-and reconstructs `apply_patch` diffs from Codex session JSONL. It reads `/tmp/jt-ai-hook-*.jsonl`,
-`~/.codex/sessions`, and `~/.codex/archived_sessions` without modifying them. Set
-`AI_HOOK_LOG_DIR` or `CODEX_HOME` to use different local directories.
-
-On macOS, install the production server as a login service:
-
-```bash
-pnpm --filter ai-hook-console service:install
-```
-
-The LaunchAgent listens only on `127.0.0.1:3100`, starts at login, and restarts after failure.
-After changing console code, rebuild and restart it with one command:
-
-```bash
-pnpm --filter ai-hook-console service:restart
-```
-
-Use `service:status` to inspect it or `service:uninstall` to remove the LaunchAgent. Runtime logs
-are stored in `~/Library/Logs/jt-ai-hook-console.log` and
-`~/Library/Logs/jt-ai-hook-console.error.log`.
+AI edit hook capabilities are now maintained by `nlab`.
 
 The repository is both a Cargo workspace and a pnpm/Turborepo monorepo:
 
 ```text
 apps/jt                    jt Rust binary and owned assets/templates
-apps/ai-hook-console       Next.js App Router console
 apps/unused-graph-inspector Nuxt graph inspection app
-packages/ai-hook-core      AI-hook and Codex JSONL reader
-packages/ui                shared UI components and theme
 ```
 
 Turborepo's experimental Cargo workspace support discovers `jt` through
 `cargo metadata`. `pnpm build`, `pnpm check`, `pnpm lint`, and `pnpm test` therefore orchestrate both
 Node packages and Rust crates from one task graph. Cargo and pnpm keep their own manifests and
 lockfiles as ecosystem dependency sources.
-
-Session data can contain private code and conversation text. Keep this console bound to a trusted
-local environment unless authentication is added.
 
 API contract generation is now provided by `nlab api`. Existing `.nlab` configuration and generated artifacts remain in use.
 
