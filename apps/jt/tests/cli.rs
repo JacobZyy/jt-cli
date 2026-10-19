@@ -22,14 +22,6 @@ fn init_git(path: &Path) {
     );
 }
 
-fn write_ai_hook_package(path: &Path) {
-    fs::write(
-        path.join("package.json"),
-        r#"{"devDependencies":{"eslint":"^9.0.0","tsx":"^4.0.0","vitest":"^4.0.0"}}"#,
-    )
-    .unwrap();
-}
-
 #[test]
 fn help_lists_new_commands_only() {
     let output = jt().arg("--help").output().unwrap();
@@ -43,13 +35,11 @@ fn help_lists_new_commands_only() {
     assert!(stdout.contains("jt cli bootstrap"));
     assert!(stdout.contains("jt ghostty install"));
     assert!(stdout.contains("jt zed-conf"));
-    assert!(stdout.contains("jt ai-hook"));
-    assert!(stdout.contains("jt ai-hook --checks vitest,eslint --agents codex"));
+    assert!(!stdout.contains("ai-hook"));
     assert!(stdout.contains("jt code unused [PATH]"));
     assert!(stdout.contains("jt unused [PATH]"));
     assert!(stdout.contains("jt call-graph [PATH]"));
     assert!(stdout.contains("jt vitest"));
-    assert!(!stdout.contains("jt vitest ai-hook"));
     assert!(stdout.contains("jt upgrade"));
     assert!(stdout.contains("completions"));
     assert!(
@@ -1670,454 +1660,50 @@ fn no_arguments_prints_help_and_exits_two() {
 }
 
 #[test]
-fn ai_hook_rejects_invalid_argument_shapes_and_old_command_without_mutation() {
+fn removed_ai_hook_command_preserves_project_files() {
     let project = tempdir().unwrap();
-    for args in [
-        &["ai-hook", "--checks", "vitest"][..],
-        &["ai-hook", "--agents", "codex"][..],
-        &["ai-hook", "--unknown"][..],
-        &["vitest", "ai-hook", "--codex"][..],
+    let files = [
+        (".codex/hooks.json", "{\"hooks\":{\"Stop\":[]}}\n"),
+        (
+            ".codex/hooks/jt-ai-hook/stop-entry.ts",
+            "// jt-ai-hook\nconsole.log('keep');\n",
+        ),
+        ("hook-log.jsonl", "{\"status\":\"passed\"}\n"),
+    ];
+    for (relative, contents) in files {
+        write_file(project.path(), relative, contents);
+    }
+
+    for arguments in [
+        &["ai-hook"][..],
+        &["ai-hook", "--help"][..],
+        &["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"][..],
     ] {
         let output = jt()
-            .args(args)
+            .args(arguments)
+            .env("JT_AI_HOOK_LOG", project.path().join("hook-log.jsonl"))
             .current_dir(project.path())
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
-    }
-    assert!(!project.path().join(".codex").exists());
-}
-
-#[test]
-fn ai_hook_requires_git_without_mutation() {
-    let project = tempdir().unwrap();
-    write_ai_hook_package(project.path());
-
-    let output = jt()
-        .args(["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not inside a Git repository"));
-    assert!(!project.path().join(".codex").exists());
-}
-
-#[test]
-fn ai_hook_requires_selected_dependency_without_mutation() {
-    let project = tempdir().unwrap();
-    init_git(project.path());
-    fs::write(
-        project.path().join("package.json"),
-        r#"{"devDependencies":{"tsx":"^4.0.0"}}"#,
-    )
-    .unwrap();
-
-    let output = jt()
-        .args(["ai-hook", "--checks", "vitest", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("does not declare vitest"));
-    assert!(!project.path().join(".codex").exists());
-}
-
-#[test]
-fn ai_hook_requires_tsx_without_mutation() {
-    let project = tempdir().unwrap();
-    init_git(project.path());
-    fs::write(
-        project.path().join("package.json"),
-        r#"{"devDependencies":{"vitest":"^4.0.0"}}"#,
-    )
-    .unwrap();
-
-    let output = jt()
-        .args(["ai-hook", "--checks", "vitest", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("does not declare tsx"));
-    assert!(!project.path().join(".codex").exists());
-}
-
-#[test]
-fn ai_hook_requires_tty_without_flags_and_vitest_is_placeholder() {
-    let project = tempdir().unwrap();
-    init_git(project.path());
-
-    let output = jt()
-        .arg("ai-hook")
-        .current_dir(project.path())
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal required"));
-    assert!(!project.path().join(".codex").exists());
-
-    let vitest = jt().arg("vitest").output().unwrap();
-    assert!(vitest.status.success());
-    assert!(String::from_utf8_lossy(&vitest.stdout).contains("not implemented yet"));
-}
-
-#[test]
-fn ai_hook_install_migrates_old_hooks_preserves_unrelated_hooks_and_is_byte_stable() {
-    let project = tempdir().unwrap();
-    init_git(project.path());
-    write_ai_hook_package(project.path());
-    let nested = project.path().join("packages/demo");
-    fs::create_dir_all(&nested).unwrap();
-    let hook_dir = project.path().join(".codex/hooks/jt-ai-hook");
-    fs::create_dir_all(hook_dir.join("stop/runner")).unwrap();
-    fs::write(
-        hook_dir.join("stop/runner/vitest.ts"),
-        "// jt-ai-hook\n// stale owned template\n",
-    )
-    .unwrap();
-    let old_vitest_dir = project.path().join(".codex/hooks/jt-vitest");
-    fs::create_dir_all(&old_vitest_dir).unwrap();
-    fs::write(old_vitest_dir.join("stop.ts"), "// jt-vitest-ai-hook\n").unwrap();
-    fs::write(old_vitest_dir.join("runtime.ts"), "// custom runtime\n").unwrap();
-    fs::write(old_vitest_dir.join("custom.ts"), "// custom hook\n").unwrap();
-    let old_eslint_dir = project.path().join(".codex/hooks/nlab-eslint");
-    fs::create_dir_all(&old_eslint_dir).unwrap();
-    fs::write(old_eslint_dir.join("stop.ts"), "// nlab-eslint-ai-hook\n").unwrap();
-    let old_eslint_leaf = project.path().join(".codex/hooks/nlab-eslint-stop.mjs");
-    fs::write(&old_eslint_leaf, "// nlab-eslint-ai-hook\n").unwrap();
-    fs::write(
-        project.path().join(".codex/hooks.json"),
-        r#"{
-  "project": {"keep": true},
-  "hooks": {
-    "Start": [{"hooks": [{"type": "command", "command": "echo start"}]}],
-    "PreToolUse": [
-      {"matcher": "keep", "hooks": [{"type": "command", "command": "echo pre"}]},
-      {"matcher": "old", "hooks": [{"type": "command", "command": "pnpm exec tsx .codex/hooks/jt-vitest/pre-tool-use.ts codex", "timeout": 1}]}
-    ],
-    "PostToolUse": [
-      {"matcher": "old", "hooks": [
-        {"type": "command", "command": "pnpm exec tsx .codex/hooks/jt-vitest/post-tool-use.ts codex", "timeout": 1},
-        {"type": "command", "command": "echo post-keep"}
-      ]}
-    ],
-    "Stop": [
-      {"matcher": "keep", "hooks": [
-        {"type": "command", "command": "echo stop"},
-        {"type": "command", "command": "pnpm exec tsx .codex/hooks/jt-ai-hook/custom.ts codex"}
-      ]},
-      {"hooks": [{"type": "command", "command": "pnpm exec tsx .codex/hooks/jt-vitest/stop.ts codex", "timeout": 1}]},
-      {"hooks": [{"type": "command", "command": "pnpm exec tsx .codex/hooks/nlab-eslint/stop.ts codex", "timeout": 1}]}
-    ]
-  }
-}
-"#,
-    )
-    .unwrap();
-
-    let first = jt()
-        .args(["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"])
-        .current_dir(&nested)
-        .output()
-        .unwrap();
-    assert!(first.status.success());
-    assert!(String::from_utf8_lossy(&first.stdout).contains("/hooks"));
-
-    let path = project.path().join(".codex/hooks.json");
-    let first_bytes = fs::read(&path).unwrap();
-    let installed_text = String::from_utf8(first_bytes.clone()).unwrap();
-    assert!(
-        installed_text.find("\"project\"").unwrap() < installed_text.find("\"hooks\"").unwrap()
-    );
-    assert!(installed_text.contains("\"matcher\": \"keep\",\n        \"hooks\""));
-    assert!(
-        installed_text.contains("\"type\": \"command\",\n            \"command\": \"echo start\"")
-    );
-    let installed: serde_json::Value = serde_json::from_slice(&first_bytes).unwrap();
-    assert!(!installed_text.contains(".codex/hooks/jt-vitest/"));
-    assert!(!installed_text.contains(".codex/hooks/nlab-eslint/"));
-    assert_eq!(installed["project"]["keep"], true);
-    assert_eq!(
-        installed["hooks"]["Start"][0]["hooks"][0]["command"],
-        "echo start"
-    );
-    let pre = installed["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(pre.len(), 2);
-    assert_eq!(pre[0]["hooks"][0]["command"], "echo pre");
-    assert_eq!(
-        installed["hooks"]["PostToolUse"].as_array().unwrap().len(),
-        2
-    );
-    assert_eq!(
-        installed["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
-        "echo post-keep"
-    );
-    let stop = installed["hooks"]["Stop"].as_array().unwrap();
-    assert_eq!(stop[0]["matcher"], "keep");
-    assert_eq!(stop[0]["hooks"][0]["command"], "echo stop");
-    assert_eq!(
-        stop[0]["hooks"][1]["command"],
-        "pnpm exec tsx .codex/hooks/jt-ai-hook/custom.ts codex"
-    );
-    let owned = &stop[1]["hooks"][0];
-    assert_eq!(
-        owned,
-        &serde_json::json!({
-            "command": "pnpm --dir \"$(git rev-parse --show-toplevel)\" exec tsx .codex/hooks/jt-ai-hook/stop-entry.ts codex",
-            "statusMessage": "Running AI checks",
-            "timeout": 150,
-            "type": "command"
-        })
-    );
-    for (event, file, matcher) in [
-        ("PreToolUse", "pre-tool-use.ts", Some("Edit|Write")),
-        ("PostToolUse", "post-tool-use.ts", Some("Edit|Write")),
-        ("Stop", "stop-entry.ts", None),
-    ] {
-        let group = installed["hooks"][event]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|group| {
-                group["hooks"][0]["command"]
-                    .as_str()
-                    .is_some_and(|command| {
-                        command.contains(&format!(".codex/hooks/jt-ai-hook/{file}"))
-                    })
-            })
-            .unwrap();
-        assert_eq!(
-            group.get("matcher").and_then(|value| value.as_str()),
-            matcher
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand 'ai-hook'")
         );
     }
-    for file in [
-        "files.ts",
-        "post-tool-use.ts",
-        "pre-tool-use.ts",
-        "protocol.ts",
-        "runtime.ts",
-        "stop-entry.ts",
-        "stop/process.ts",
-        "stop/types.ts",
-        "stop/support/vitest-coverage.ts",
-        "stop/runner/eslint.ts",
-        "stop/runner/vitest.ts",
-    ] {
-        let source = fs::read_to_string(hook_dir.join(file)).unwrap();
-        assert!(source.contains("jt-ai-hook"));
+
+    for (relative, contents) in files {
+        assert_eq!(
+            fs::read_to_string(project.path().join(relative)).unwrap(),
+            contents
+        );
     }
-    let vitest_source = fs::read_to_string(hook_dir.join("stop/runner/vitest.ts")).unwrap();
-    for expected in [
-        "--reporter=agent",
-        "--coverage.enabled",
-        "--coverage.enabled=false",
-        "--coverage.include=",
-        "--coverage.reporter=json-summary",
-        "--coverage.reportsDirectory=",
-        "--coverage.reportOnFailure",
-        "coverage-summary.json",
-        "| File | Statements | Branches | Functions | Lines |",
-        "formatFailureReport",
-        "isCoverageOnlyFailure",
-        "All files ${metric}",
-        "selectCoverageFiles",
-    ] {
-        assert!(vitest_source.contains(expected), "missing {expected}");
-    }
-    assert!(!vitest_source.contains("--coverage.reporter=text"));
-    assert!(!vitest_source.contains("--coverage.skipFull"));
-    assert!(!vitest_source.contains("stale owned template"));
-    assert!(vitest_source.contains("isInAIHook: 'true'"));
-    assert!(!old_vitest_dir.join("stop.ts").exists());
-    assert_eq!(
-        fs::read_to_string(old_vitest_dir.join("runtime.ts")).unwrap(),
-        "// custom runtime\n"
-    );
-    assert_eq!(
-        fs::read_to_string(old_vitest_dir.join("custom.ts")).unwrap(),
-        "// custom hook\n"
-    );
-    assert!(!old_eslint_dir.exists());
-    assert!(!old_eslint_leaf.exists());
-    let coverage_source =
-        fs::read_to_string(hook_dir.join("stop/support/vitest-coverage.ts")).unwrap();
-    for expected in [
-        "resolveConfig",
-        "coverage.include",
-        "coverage.exclude",
-        "coverage.skipFull",
-        "picomatch",
-    ] {
-        assert!(coverage_source.contains(expected), "missing {expected}");
-    }
-    let stop_source = fs::read_to_string(hook_dir.join("stop-entry.ts")).unwrap();
-    assert!(stop_source.contains("Promise.allSettled"));
-    assert!(stop_source.contains("stop/runner"));
-    assert!(stop_source.contains("entry.isFile()"));
-    let process_source = fs::read_to_string(hook_dir.join("stop/process.ts")).unwrap();
-    assert!(process_source.contains("spawn(command, args"));
-    assert!(process_source.contains("shell: false"));
-    assert!(!process_source.contains("spawnSync"));
-    let eslint_source = fs::read_to_string(hook_dir.join("stop/runner/eslint.ts")).unwrap();
-    assert!(eslint_source.contains("isInAIHook: 'true'"));
-    for unexpected in [
-        "Related Vitest suites and coverage passed.",
-        "Related Vitest suites passed; no AI-edited files matched project coverage rules.",
-    ] {
-        assert!(!stop_source.contains(unexpected), "unexpected {unexpected}");
-    }
-
-    let second = jt()
-        .args(["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"])
-        .current_dir(&nested)
-        .output()
-        .unwrap();
-    assert!(second.status.success());
-    assert!(String::from_utf8_lossy(&second.stdout).contains("already configured"));
-    assert_eq!(fs::read(path).unwrap(), first_bytes);
 }
 
 #[test]
-fn ai_hook_check_selection_detaches_owned_runner_and_preserves_custom_runner() {
-    let project = tempdir().unwrap();
-    init_git(project.path());
-    write_ai_hook_package(project.path());
-    let install = jt()
-        .args(["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-    assert!(install.status.success());
-
-    let runners = project.path().join(".codex/hooks/jt-ai-hook/stop/runner");
-    fs::write(
-        runners.join("custom.ts"),
-        "export async function run() { return { status: 'passed' } }\n",
-    )
-    .unwrap();
-    let detach = jt()
-        .args(["ai-hook", "--checks", "vitest", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
-    assert!(detach.status.success());
-    assert!(runners.join("vitest.ts").is_file());
-    assert!(!runners.join("eslint.ts").exists());
-    assert!(runners.join("custom.ts").is_file());
-    let config = fs::read_to_string(project.path().join(".codex/hooks.json")).unwrap();
-    assert_eq!(config.matches("stop-entry.ts codex").count(), 1);
-}
-
-#[test]
-fn ai_hook_refuses_to_replace_unowned_runner() {
-    let project = tempdir().unwrap();
-    init_git(project.path());
-    write_ai_hook_package(project.path());
-    let hook_dir = project.path().join(".codex/hooks/jt-ai-hook/stop/runner");
-    fs::create_dir_all(&hook_dir).unwrap();
-    let path = hook_dir.join("eslint.ts");
-    fs::write(&path, "custom eslint runner\n").unwrap();
-
-    let output = jt()
-        .args(["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unowned"));
-    assert_eq!(fs::read_to_string(path).unwrap(), "custom eslint runner\n");
-    assert!(!project.path().join(".codex/hooks.json").exists());
-}
-
-#[test]
-fn ai_hook_rejects_invalid_existing_json_without_mutation() {
-    let project = tempdir().unwrap();
-    init_git(project.path());
-    write_ai_hook_package(project.path());
-    fs::create_dir(project.path().join(".codex")).unwrap();
-    let legacy = project.path().join(".codex/hooks/jt-vitest/stop.ts");
-    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-    let legacy_original = b"// jt-vitest-ai-hook\n";
-    fs::write(&legacy, legacy_original).unwrap();
-    let path = project.path().join(".codex/hooks.json");
-    let original = b"{not json\n";
-    fs::write(&path, original).unwrap();
-
-    let output = jt()
-        .args(["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid"));
-    assert_eq!(fs::read(path).unwrap(), original);
-    assert_eq!(fs::read(legacy).unwrap(), legacy_original);
-}
-
-#[cfg(unix)]
-#[test]
-fn ai_hook_rejects_symlinked_file_without_mutating_target() {
-    use std::os::unix::fs::symlink;
-
-    let project = tempdir().unwrap();
-    let external = tempdir().unwrap();
-    init_git(project.path());
-    write_ai_hook_package(project.path());
-    fs::create_dir(project.path().join(".codex")).unwrap();
-    let target = external.path().join("hooks.json");
-    let original = b"{\"external\":true}\n";
-    fs::write(&target, original).unwrap();
-    let link = project.path().join(".codex/hooks.json");
-    symlink(&target, &link).unwrap();
-
-    let output = jt()
-        .args(["ai-hook", "--checks", "vitest,eslint", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("symlinked file"));
-    assert_eq!(fs::read(target).unwrap(), original);
-    assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
-}
-
-#[cfg(unix)]
-#[test]
-fn ai_hook_legacy_cleanup_preserves_symlinked_file_and_target() {
-    use std::os::unix::fs::symlink;
-
-    let project = tempdir().unwrap();
-    let external = tempdir().unwrap();
-    init_git(project.path());
-    write_ai_hook_package(project.path());
-    let old_dir = project.path().join(".codex/hooks/jt-vitest");
-    fs::create_dir_all(&old_dir).unwrap();
-    let target = external.path().join("stop.ts");
-    let original = b"// jt-vitest-ai-hook\n";
-    fs::write(&target, original).unwrap();
-    let link = old_dir.join("stop.ts");
-    symlink(&target, &link).unwrap();
-
-    let output = jt()
-        .args(["ai-hook", "--checks", "vitest", "--agents", "codex"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-
+fn vitest_is_placeholder() {
+    let output = jt().arg("vitest").output().unwrap();
     assert!(output.status.success());
-    assert_eq!(fs::read(target).unwrap(), original);
-    assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("not implemented yet"));
 }
 
 #[test]

@@ -77,7 +77,7 @@ SQLite 只管理投递及处理中的任务，不成为第二套可搜索的记�
 
 Agent 规则与必要配置资源放入 `apps/jt/templates/harness/memo/`。复用现有 Clap、Serde、rusqlite、SHA-256 和临时目录能力；HTTP 与 PostgreSQL 使用成熟 Rust 客户端，版本需满足仓库 Rust 1.85 的要求。
 
-`jt ai-hook` 已有 Hook 配置所有权逻辑，后续自动安装应在该边界复用，不创建第二个竞争修改 Codex 配置的安装器。当前先完成手工调用的记忆闭环。
+Hook 配置安装与所有权管理已归入 `nlab`，后续自动安装应复用其管理边界，不在 `jt` 中创建竞争修改 Codex 配置的安装器。当前先完成手工调用的记忆闭环。
 
 ## 迁移及验证顺序
 
