@@ -2,7 +2,6 @@ mod ai_hook;
 mod cli;
 mod codex;
 mod icon;
-mod nlab_api_cli;
 mod node;
 mod release;
 mod unused;
@@ -30,7 +29,6 @@ Examples:
   jt repo cicd
   jt node init
   jt codex init
-  jt nlab-api generate --help
   jt cli bootstrap
   jt ghostty install
   jt zed-conf
@@ -69,14 +67,6 @@ enum Commands {
     Node {
         #[command(subcommand)]
         command: NodeCommand,
-    },
-    #[command(
-        name = "nlab-api",
-        about = "Generate frontend contracts from NLab Java APIs"
-    )]
-    NlabApi {
-        #[command(subcommand)]
-        command: NlabApiCommand,
     },
     #[command(
         name = "cli",
@@ -181,52 +171,6 @@ enum NodeCommand {
 
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
-enum NlabApiCommand {
-    #[command(
-        name = "init",
-        about = "Inspect and configure a frontend project for nlab-api generation"
-    )]
-    Init(nlab_api::InitArgs),
-    #[command(
-        name = "generate",
-        about = "Generate frontend APIs with automatic cross-repository discovery",
-        after_long_help = "Only code-verified enum primary values generate enum definitions. Unverified comment candidates and auxiliary properties remain scalar."
-    )]
-    Generate(nlab_api::GenerateArgs),
-    #[command(
-        name = "discover",
-        about = "Discover backend services and refresh their source repositories"
-    )]
-    Discover(nlab_api::DiscoverArgs),
-    #[command(name = "config", about = "Configure the project-local nlab-api runner")]
-    Config(nlab_api::ConfigArgs),
-    #[command(
-        name = "routes",
-        about = "Resolve placeholder paths through ZGateway",
-        hide = true
-    )]
-    Routes(nlab_api::RoutesArgs),
-    #[command(
-        name = "migrate",
-        about = "Map old generated APIs to a new snapshot",
-        hide = true
-    )]
-    Migrate(nlab_api::MigrateArgs),
-    #[command(
-        name = "mock",
-        about = "Generate semantic mock JSON and native Whistle rules"
-    )]
-    Mock(nlab_api::MockArgs),
-    #[command(
-        name = "accept",
-        about = "Promote a verified pending contract snapshot",
-        hide = true
-    )]
-    Accept(nlab_api::AcceptArgs),
-}
-
-#[derive(Debug, Subcommand)]
-#[command(disable_help_subcommand = true)]
 enum CliCommand {
     #[command(
         name = "bootstrap",
@@ -291,16 +235,7 @@ enum CompletionShell {
 }
 
 fn main() -> ExitCode {
-    let arguments = env::args_os().collect::<Vec<_>>();
-    match nlab_api_cli::forward_if_standalone(&arguments) {
-        Ok(Some(status)) => return ExitCode::from(status),
-        Ok(None) => {}
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::FAILURE;
-        }
-    }
-    let cli = Cli::parse_from(&arguments);
+    let cli = Cli::parse();
 
     match cli.command {
         Commands::Codex {
@@ -320,7 +255,6 @@ fn main() -> ExitCode {
         Commands::Node {
             command: NodeCommand::Init { npmregister },
         } => node_init(&npmregister),
-        Commands::NlabApi { command } => run_nlab_api(command),
         Commands::Cli {
             command: CliCommand::Bootstrap,
         } => cli_bootstrap(),
@@ -341,19 +275,6 @@ fn main() -> ExitCode {
         Commands::Upgrade(args) => upgrade(args),
         Commands::Icon(args) => icon_download(&args.selector, args.directory.as_ref()),
         Commands::Completions(args) => completions(args.shell),
-    }
-}
-
-fn run_nlab_api(command: NlabApiCommand) -> ExitCode {
-    match command {
-        NlabApiCommand::Init(args) => ExitCode::from(nlab_api::init(args)),
-        NlabApiCommand::Generate(args) => ExitCode::from(nlab_api::generate(args)),
-        NlabApiCommand::Discover(args) => ExitCode::from(nlab_api::discover(args)),
-        NlabApiCommand::Config(args) => ExitCode::from(nlab_api::configure(args)),
-        NlabApiCommand::Routes(args) => ExitCode::from(nlab_api::routes(args)),
-        NlabApiCommand::Migrate(args) => ExitCode::from(nlab_api::migrate(args)),
-        NlabApiCommand::Mock(args) => ExitCode::from(nlab_api::mock(args)),
-        NlabApiCommand::Accept(args) => ExitCode::from(nlab_api::accept(args)),
     }
 }
 
