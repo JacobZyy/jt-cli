@@ -121,7 +121,9 @@ enum RepoCommand {
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
 enum CodexCommand {
-    #[command(about = "Create environment.toml in the current project without running setup")]
+    #[command(
+        about = "Create or overwrite environment.toml, backing up existing configuration without running setup"
+    )]
     Init {
         #[arg(
             long,
@@ -132,7 +134,7 @@ enum CodexCommand {
         #[arg(
             long,
             conflicts_with = "check",
-            help = "Update an unchanged managed template, preserving a recovery copy"
+            help = "Overwrite existing configuration with a recovery copy (same as the default)"
         )]
         update: bool,
         #[arg(
@@ -234,13 +236,10 @@ fn main() -> ExitCode {
 
     match cli.command {
         Commands::Codex {
-            command:
-                CodexCommand::Init {
-                    check,
-                    update,
-                    lightweight,
-                },
-        } => ExitCode::from(codex::run(check, update, lightweight)),
+            command: CodexCommand::Init {
+                check, lightweight, ..
+            },
+        } => ExitCode::from(codex::run(check, lightweight)),
         Commands::Codex {
             command: CodexCommand::Worktrees { check },
         } => ExitCode::from(codex::recycle::run(check.as_deref())),

@@ -37,7 +37,6 @@ fi
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
-    Preserve,
     Check,
     Update,
 }
@@ -45,20 +44,13 @@ pub enum Mode {
 #[derive(Debug, Eq, PartialEq)]
 pub enum Outcome {
     Created,
-    Preserved,
     Current,
     Preview { candidate: PathBuf, managed: bool },
     Updated { backup: PathBuf },
-    Protected { candidate: PathBuf },
 }
 
 pub fn managed(body: &str) -> String {
     format!("{HEADER}{:x}\n{body}", Sha256::digest(body.as_bytes()))
-}
-
-pub fn preserve_existing(root: &Path) -> Result<bool, String> {
-    inspect(root)?;
-    Ok(root.join(ENVIRONMENT).is_file())
 }
 
 pub fn apply(root: &Path, rendered: &str, mode: Mode) -> Result<Outcome, String> {
@@ -78,9 +70,6 @@ fn apply_before_update(
         Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
     };
-    if current.is_some() && mode == Mode::Preserve {
-        return Ok(Outcome::Preserved);
-    }
     if current.as_deref() == Some(rendered.as_bytes()) {
         return Ok(Outcome::Current);
     }
@@ -97,17 +86,12 @@ fn apply_before_update(
         write_new(&path, rendered.as_bytes(), None)?;
         return Ok(Outcome::Created);
     };
-    let managed = std::str::from_utf8(&current)
-        .is_ok_and(|content| integrity_matches(content) || legacy_matches(root, content));
     if mode == Mode::Check {
+        let managed = std::str::from_utf8(&current)
+            .is_ok_and(|content| integrity_matches(content) || legacy_matches(root, content));
         return Ok(Outcome::Preview {
             candidate: candidate(root, rendered)?,
             managed,
-        });
-    }
-    if !managed {
-        return Ok(Outcome::Protected {
-            candidate: candidate(root, rendered)?,
         });
     }
     before_update();
@@ -335,16 +319,16 @@ mod tests {
     }
 
     #[test]
-    fn preserves_existing_configuration_without_parsing_or_installing() {
+    fn overwrites_existing_configuration_with_a_recovery_copy_without_installing() {
         let root = tempdir().unwrap();
         let path = root.path().join(ENVIRONMENT);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "custom unknown syntax").unwrap();
-        assert_eq!(
-            apply(root.path(), "new", Mode::Preserve).unwrap(),
-            Outcome::Preserved
-        );
-        assert_eq!(fs::read_to_string(path).unwrap(), "custom unknown syntax");
+        let Outcome::Updated { backup } = apply(root.path(), "new", Mode::Update).unwrap() else {
+            panic!("expected update");
+        };
+        assert_eq!(fs::read_to_string(path).unwrap(), "new");
+        assert_eq!(fs::read_to_string(backup).unwrap(), "custom unknown syntax");
         assert!(!root.path().join("node_modules").exists());
     }
 
@@ -361,24 +345,32 @@ mod tests {
             legacy(root.path(), "echo custom\n", ""),
         ] {
             fs::write(&path, &custom).unwrap();
-            let Outcome::Protected { candidate } =
-                apply(root.path(), &rendered, Mode::Update).unwrap()
+            let Outcome::Preview { candidate, managed } =
+                apply(root.path(), &rendered, Mode::Check).unwrap()
             else {
-                panic!("custom configuration was not protected");
+                panic!("expected preview");
             };
+            assert!(!managed);
             assert_eq!(fs::read_to_string(&path).unwrap(), custom);
             assert_eq!(fs::read_to_string(&candidate).unwrap(), rendered);
             fs::write(&candidate, "reviewed custom candidate").unwrap();
-            let Outcome::Protected { candidate: second } =
-                apply(root.path(), &rendered, Mode::Update).unwrap()
+            let Outcome::Preview {
+                candidate: second, ..
+            } = apply(root.path(), &rendered, Mode::Check).unwrap()
             else {
-                panic!("custom configuration was not protected");
+                panic!("expected preview");
             };
             assert_ne!(candidate, second);
             assert_eq!(
                 fs::read_to_string(candidate).unwrap(),
                 "reviewed custom candidate"
             );
+            let Outcome::Updated { backup } = apply(root.path(), &rendered, Mode::Update).unwrap()
+            else {
+                panic!("expected update");
+            };
+            assert_eq!(fs::read_to_string(&path).unwrap(), rendered);
+            assert_eq!(fs::read_to_string(backup).unwrap(), custom);
         }
     }
 
@@ -388,7 +380,7 @@ mod tests {
         let old = managed("version = 1\nname = \"before\"\n");
         let new = managed("version = 1\nname = \"after\"\n");
         assert_eq!(
-            apply(root.path(), &old, Mode::Preserve).unwrap(),
+            apply(root.path(), &old, Mode::Update).unwrap(),
             Outcome::Created
         );
         let path = root.path().join(ENVIRONMENT);
@@ -447,7 +439,7 @@ mod tests {
     fn concurrent_change_aborts_before_replacement() {
         let root = tempdir().unwrap();
         let old = managed("old\n");
-        apply(root.path(), &old, Mode::Preserve).unwrap();
+        apply(root.path(), &old, Mode::Update).unwrap();
         let path = root.path().join(ENVIRONMENT);
         let error = apply_before_update(root.path(), &managed("next\n"), Mode::Update, || {
             fs::write(&path, "concurrent customization").unwrap();
@@ -464,7 +456,7 @@ mod tests {
     fn concurrent_destination_creation_is_preserved_with_recovery_snapshot() {
         let root = tempdir().unwrap();
         let old = managed("old\n");
-        apply(root.path(), &old, Mode::Preserve).unwrap();
+        apply(root.path(), &old, Mode::Update).unwrap();
         let path = root.path().join(ENVIRONMENT);
         let error = replace_before_publish(root.path(), old.as_bytes(), b"new", || {
             fs::write(&path, "concurrent destination").unwrap();
@@ -508,7 +500,7 @@ mod tests {
         let outside = tempdir().unwrap();
         let target = outside.path().join("custom.toml");
         fs::write(&target, "outside").unwrap();
-        apply(root.path(), &managed("old\n"), Mode::Preserve).unwrap();
+        apply(root.path(), &managed("old\n"), Mode::Update).unwrap();
         let path = root.path().join(ENVIRONMENT);
         assert!(
             apply_before_update(root.path(), &managed("next\n"), Mode::Update, || {
