@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.2](https://github.com/JacobZyy/jt-cli/compare/v4.0.1...v4.0.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* **codex:** overwrite environment configuration by default ([#125](https://github.com/JacobZyy/jt-cli/issues/125)) ([354901f](https://github.com/JacobZyy/jt-cli/commit/354901fce512dbd6548fe4e39e9cd5ccf431c73c))
+
 ## [4.0.1](https://github.com/JacobZyy/jt-cli/compare/v4.0.0...v4.0.1) (2026-10-20)
 
 
