@@ -20,41 +20,23 @@ if git rev-parse --show-toplevel >/dev/null 2>&1; then
 fi
 "#;
 
-pub fn run(check: bool, update: bool, lightweight: bool) -> u8 {
-    let mode = if check {
-        Mode::Check
-    } else if update {
-        Mode::Update
-    } else {
-        Mode::Preserve
-    };
+pub fn run(check: bool, lightweight: bool) -> u8 {
+    let mode = if check { Mode::Check } else { Mode::Update };
     let result = std::env::current_dir()
         .map_err(|error| error.to_string())
-        .and_then(|root| {
-            if mode == Mode::Preserve && migration::preserve_existing(&root)? {
-                return Ok(Outcome::Preserved);
-            }
-            migration::apply(&root, &render_with_options(&root, lightweight)?, mode)
-        });
+        .and_then(|root| migration::apply(&root, &render_with_options(&root, lightweight)?, mode));
     match result {
         Ok(Outcome::Created) => {
             println!("created {ENVIRONMENT}; setup runs when Codex creates a worktree")
         }
-        Ok(Outcome::Preserved) => {
-            println!("preserved existing {ENVIRONMENT}; use --check to review an update")
-        }
         Ok(Outcome::Current) => println!("current {ENVIRONMENT}; no changes made"),
         Ok(Outcome::Preview { candidate, managed }) => println!(
-            "candidate: {}; managed template: {managed}; review before --update",
+            "candidate: {}; managed template: {managed}; rerun without --check to apply",
             candidate.display()
         ),
         Ok(Outcome::Updated { backup }) => {
             println!("updated {ENVIRONMENT}; restore from {}", backup.display())
         }
-        Ok(Outcome::Protected { candidate }) => println!(
-            "preserved custom {ENVIRONMENT}; review candidate {} and apply changes manually",
-            candidate.display()
-        ),
         Err(error) => {
             eprintln!("error: {error}");
             return 1;
@@ -65,12 +47,9 @@ pub fn run(check: bool, update: bool, lightweight: bool) -> u8 {
 
 #[cfg(test)]
 fn init(root: &Path) -> Result<bool, String> {
-    if migration::preserve_existing(root)? {
-        return Ok(false);
-    }
     Ok(matches!(
-        migration::apply(root, &render(root)?, Mode::Preserve)?,
-        Outcome::Created
+        migration::apply(root, &render(root)?, Mode::Update)?,
+        Outcome::Created | Outcome::Updated { .. }
     ))
 }
 
@@ -256,7 +235,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn generates_only_available_actions_and_preserves_existing_configuration() {
+    fn generates_only_available_actions_and_overwrites_existing_configuration() {
         let project = tempdir().unwrap();
         fs::write(project.path().join("package.json"), r#"{"scripts":{"dev":"vite", "test:unit:run":"vitest run", "type-check":"vue-tsc", "unused":"ignored"}}"#).unwrap();
         fs::write(project.path().join("pnpm-lock.yaml"), "").unwrap();
@@ -273,8 +252,11 @@ mod tests {
         assert!(!init(project.path()).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
         fs::write(&path, "custom configuration, even unknown syntax\n").unwrap();
+        assert!(init(project.path()).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        fs::write(&path, "custom configuration, even unknown syntax\n").unwrap();
         fs::write(project.path().join("package.json"), "invalid").unwrap();
-        assert!(!init(project.path()).unwrap());
+        assert!(init(project.path()).is_err());
         assert_eq!(
             fs::read_to_string(path).unwrap(),
             "custom configuration, even unknown syntax\n"

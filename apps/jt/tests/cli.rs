@@ -58,7 +58,7 @@ fn codex_init_creates_configuration_without_executing_package_scripts() {
         r#"{"scripts":{"dev":"exit 99","postinstall":"exit 99"}}"#,
     )
     .unwrap();
-    for message in ["created", "preserved existing"] {
+    for message in ["created", "current"] {
         let output = jt()
             .args(["codex", "init"])
             .current_dir(project.path())
@@ -75,6 +75,35 @@ fn codex_init_creates_configuration_without_executing_package_scripts() {
         fs::read_to_string(project.path().join(".codex/environments/environment.toml")).unwrap();
     assert!(content.contains("npm run dev"));
     assert!(!content.contains("Unit tests"));
+    let environment = project.path().join(".codex/environments/environment.toml");
+    let custom = b"custom configuration, even invalid UTF-8: \xff\n";
+    fs::write(&environment, custom).unwrap();
+    let preview = jt()
+        .args(["codex", "init", "--check"])
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+    assert!(preview.status.success());
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("candidate:"));
+    assert_eq!(fs::read(&environment).unwrap(), custom);
+    for option in [None, Some("--update")] {
+        fs::write(&environment, custom).unwrap();
+        let output = jt()
+            .args(["codex", "init"])
+            .args(option)
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let (_, backup) = stdout.split_once("; restore from ").unwrap();
+        assert_eq!(fs::read(backup.trim()).unwrap(), custom);
+        assert_eq!(fs::read_to_string(&environment).unwrap(), content);
+    }
     assert!(!project.path().join("node_modules").exists());
 }
 
