@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.1](https://github.com/JacobZyy/jt-cli/compare/v4.0.0...v4.0.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **codex:** rebuild index when source snapshot is unavailable ([bad8175](https://github.com/JacobZyy/jt-cli/commit/bad81759dc82997bc882357a203619d123cc3410))
+
 ## [4.0.0](https://github.com/JacobZyy/jt-cli/compare/v3.0.5...v4.0.0) (2026-10-20)
 
 
