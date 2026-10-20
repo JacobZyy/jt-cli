@@ -33,7 +33,10 @@ if command -v codegraph >/dev/null 2>&1; then
           signature="$(cksum "$source"; if [ -f "$source-wal" ]; then cksum "$source-wal"; fi)"
           if [ ! -f "$cache/codegraph.db" ] || [ ! -f "$cache/source-signature" ] || [ "$signature" != "$(cat "$cache/source-signature")" ]; then
             snapshot_dir="$(mktemp -d "$cache/snapshot.XXXXXX")"
-            (cd "$snapshot_dir" && sqlite3 -readonly "$source" -cmd '.timeout 10000' '.backup snapshot.db')
+            if ! (cd "$snapshot_dir" && sqlite3 -readonly "$source" -cmd '.timeout 10000' '.backup snapshot.db'); then
+              printf '%s\n' 'CodeGraph: source snapshot unavailable; rebuilding the local index.' >&2
+              exit 0
+            fi
             sqlite3 "$snapshot_dir/snapshot.db" 'PRAGMA journal_mode=DELETE;' >/dev/null
             mv "$snapshot_dir/snapshot.db" "$cache/codegraph.db"
             printf '%s\n' "$signature" > "$snapshot_dir/source-signature"
@@ -48,7 +51,10 @@ if command -v codegraph >/dev/null 2>&1; then
           fi
         else
           # Concurrent snapshot preparation or interrupted cache lock: own backup.
-          (cd "$copy_dir" && sqlite3 -readonly "$source" -cmd '.timeout 10000' '.backup codegraph.db')
+          if ! (cd "$copy_dir" && sqlite3 -readonly "$source" -cmd '.timeout 10000' '.backup codegraph.db'); then
+            printf '%s\n' 'CodeGraph: source snapshot unavailable; rebuilding the local index.' >&2
+            exit 0
+          fi
           sqlite3 "$copy_dir/codegraph.db" 'PRAGMA journal_mode=DELETE;' >/dev/null
         fi
         # Publish without overwriting an index created by another setup process.

@@ -247,6 +247,9 @@ fn quote(value: &str) -> String {
         .replace('\u{7f}', "\\u007f")
 }
 
+#[cfg(all(test, unix))]
+mod codegraph_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

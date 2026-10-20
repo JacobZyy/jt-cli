@@ -69,7 +69,9 @@ WAL pages; setup caches one snapshot in the common Git directory and tries to cl
 file with copy-on-write. Unsupported filesystems use an independent ordinary copy. It never copies
 the live DB main file directly or copies daemon PID/socket/lock files. Existing worktree indexes
 are retained and incrementally synced. Shared DB symlinks/hard links are rejected. Projects that
-have not enabled CodeGraph are not indexed. CodeGraph must be on PATH; setup failures stop setup.
+have not enabled CodeGraph are not indexed. If the optional source snapshot cannot be backed up,
+setup reports the SQLite error and rebuilds the local index without modifying the source database.
+CodeGraph must be on PATH; index initialization, sync, and other setup failures still stop setup.
 Logical directory sizes from `du` do not measure physical copy-on-write savings.
 
 Inspect registered worktrees without deleting historical directories:
