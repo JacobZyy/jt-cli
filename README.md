@@ -267,7 +267,7 @@ The graph follows Graphy's split between language analysis, a renderer-independe
 and an interactive focused view. It does not invent edges for unresolved reflection or string-based
 dispatch; those gaps remain diagnostics rather than false exact calls.
 
-AI edit hook capabilities are now maintained by `nlab`.
+AI edit hook capabilities are now maintained by `nlab`. See the [jt 4 migration guide](apps/jt/MIGRATING.md) for removed commands and retained project data.
 
 The repository is both a Cargo workspace and a pnpm/Turborepo monorepo:
 
