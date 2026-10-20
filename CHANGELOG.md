@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.0.0](https://github.com/JacobZyy/jt-cli/compare/v3.0.5...v4.0.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove AI hooks in favor of nlab
+* remove nlab-api in favor of nlab api
+
+### Documentation
+
+* **jt:** document v4 migration ([254e4f7](https://github.com/JacobZyy/jt-cli/commit/254e4f7977816d9d2c75fe5c05f72b699e09d792))
+
+
+### Code Refactoring
+
+* remove AI hooks in favor of nlab ([a6185d3](https://github.com/JacobZyy/jt-cli/commit/a6185d3a4cef724c91014d251aa24b181e226d51))
+* remove nlab-api in favor of nlab api ([7e9cf6c](https://github.com/JacobZyy/jt-cli/commit/7e9cf6cfadfffeb3cb7f15d5fd59e13c6b59ec06))
+
 ## [3.0.5](https://github.com/JacobZyy/jt-cli/compare/v3.0.4...v3.0.5) (2026-10-12)
 
 
