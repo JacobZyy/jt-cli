@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.3](https://github.com/JacobZyy/jt-cli/compare/v4.0.2...v4.0.3) (2026-10-29)
+
+
+### Features
+
+* **codex:** inherit local worktree configuration through hook managers ([d09ad8d](https://github.com/JacobZyy/jt-cli/commit/d09ad8d0bf2b8431b7e418ea336841912782a852))
+
 ## [4.0.2](https://github.com/JacobZyy/jt-cli/compare/v4.0.1...v4.0.2) (2026-10-20)
 
 
