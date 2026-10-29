@@ -8,10 +8,41 @@ Create a Codex local environment from the current project directory:
 jt codex init
 ```
 
-Writes `.codex/environments/environment.toml` without running setup or installing dependencies.
-Commit this file so Codex can use it when creating worktrees. Existing files, including custom
+Writes `.codex/environments/environment.toml` and updates `.worktreeinclude` without running setup
+or installing project dependencies. Commit both files so new worktrees receive the setup and
+local configuration copy rules. Existing environment files, including custom
 configuration, are automatically backed up and overwritten; identical content is left unchanged.
-Symlinked configuration paths are rejected. No AGENTS.md files or lifecycle hooks are written.
+Symlinked configuration paths are rejected. No AGENTS.md files are written.
+`jt` must be available on PATH when the generated setup runs.
+
+Initialization also extends the project's existing Lefthook or simple-git-hooks configuration with
+a `post-checkout` task and runs that manager's installer from the primary worktree. Existing business
+hooks and local overrides are preserved. If no configuration exists, a declared manager dependency
+selects the manager. JT does not add dependencies. Conflicting managers, unavailable executables,
+foreign installed hooks, or failed installation are reported; automatic native Git inheritance is
+enabled only after installation is verified. Commit the updated manager configuration so later
+manager reinstalls retain the task.
+Nonempty Lefthook YAML flow mappings and ESM default re-exports from another file require a
+supported local configuration form first; JT reports the unsupported form without rewriting it.
+
+`.worktreeinclude` remains the only copy list. Defaults select `.env.local`, `.env.*.local`,
+`.nlab/*.local.json`, `.codex/config.toml`, `.codex/hooks.json`, `.claude/settings.local.json`,
+`CLAUDE.local.md`, `AGENTS.override.md`, and the selected manager's local override files. Custom
+entries remain intact. JT does not select entire configuration directories, locks, logs, reports,
+or indexes. Codex uses its native copy support; generated setup fills missing configuration before
+dependency preparation. Ordinary `git worktree add` uses the manager's `post-checkout` task, which
+only handles initial linked-worktree checkout and never installs dependencies or indexes.
+
+Missing files are copied once from the same repository's primary worktree. Existing target
+configuration takes precedence; each worktree can then change independently. JT's copy logic also
+preserves valid legacy NLab settings and existing Lefthook override aliases. Codex's native copy
+list only protects exact existing paths; it cannot express priority between alternate filenames.
+JT never deletes existing configuration or guesses which files Codex copied. For an old worktree,
+`git worktree add --no-checkout`, or creation with hooks disabled, fill missing configuration explicitly:
+
+```bash
+jt codex inherit
+```
 
 Optionally preview an update without replacing the existing configuration:
 
@@ -23,7 +54,8 @@ jt codex init --check
 existing file is an unchanged managed template. Rerun `jt codex init` to apply the update; `--update`
 is also accepted and behaves the same as the default. Before replacement, the original bytes are
 saved in the reported `environment.toml.backup-*/environment.toml` path; copy that file back to restore.
-Neither command runs setup. Candidate and recovery files should stay out of commits.
+Neither command runs setup. `--check` does not update the copy list or manager configuration and
+does not install hooks. Candidate and recovery files should stay out of commits.
 
 Node projects support npm and pnpm. `packageManager` selects the manager when declared; otherwise
 the lockfile selects it (npm when neither exists). Unsupported or ambiguous lockfiles fail before
@@ -46,8 +78,8 @@ Root and local package installation lifecycle scripts always run normal installa
 because arbitrary ignored generated outputs cannot be proven valid. Ignored local package directories
 whose full layout is unknown also use normal installation without a reusable stamp. Existing
 unverified dependencies are not deleted to make cloning possible. Run the generated setup once in
-the primary environment to establish an installation baseline; merely running `jt codex init`
-never installs anything. Actions use only nonempty scripts present in
+the primary environment to establish an installation baseline; `jt codex init` only installs the
+selected Git hook manager's hooks. Actions use only nonempty scripts present in
 `package.json`: Dev (`dev`, then `start`), Unit tests (`test:unit:run`, `test:unit`, then `test`),
 and Type check (`type-check`, `typecheck`, then `type:check`). Test scripts and arguments are preserved.
 

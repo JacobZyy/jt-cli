@@ -122,7 +122,7 @@ enum RepoCommand {
 #[command(disable_help_subcommand = true)]
 enum CodexCommand {
     #[command(
-        about = "Create or overwrite environment.toml, backing up existing configuration without running setup"
+        about = "Generate environment and local configuration inheritance; configure the project's Git hook manager"
     )]
     Init {
         #[arg(
@@ -142,6 +142,11 @@ enum CodexCommand {
             help = "Reduce Cargo debug and incremental output in generated build/test actions"
         )]
         lightweight: bool,
+    },
+    #[command(about = "Fill missing local configuration from the primary worktree")]
+    Inherit {
+        #[arg(long, num_args = 3, value_names = ["OLD_HEAD", "NEW_HEAD", "CHECKOUT_FLAG"])]
+        post_checkout: Vec<String>,
     },
     #[command(
         about = "Inventory worktrees or check completion evidence before native Codex archival"
@@ -240,6 +245,9 @@ fn main() -> ExitCode {
                 check, lightweight, ..
             },
         } => ExitCode::from(codex::run(check, lightweight)),
+        Commands::Codex {
+            command: CodexCommand::Inherit { post_checkout },
+        } => ExitCode::from(codex::inherit_local(&post_checkout)),
         Commands::Codex {
             command: CodexCommand::Worktrees { check },
         } => ExitCode::from(codex::recycle::run(check.as_deref())),
