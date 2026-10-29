@@ -54,6 +54,7 @@ impl Fixture {
             .unwrap();
         let bin = directory.path().join("bin");
         fs::create_dir(&bin).unwrap();
+        write_executable(&bin.join("jt"), "#!/bin/sh\n[ \"$*\" = 'codex inherit' ]\n");
         write_executable(
             &bin.join("codegraph"),
             "#!/bin/sh\nprintf '%s\\n' \"$1\" >> codegraph-actions\nexit \"${JT_TEST_CODEGRAPH_EXIT:-0}\"\n",

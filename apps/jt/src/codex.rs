@@ -4,6 +4,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+mod hooks;
+mod inherit;
 mod migration;
 pub mod recycle;
 
@@ -24,7 +26,17 @@ pub fn run(check: bool, lightweight: bool) -> u8 {
     let mode = if check { Mode::Check } else { Mode::Update };
     let result = std::env::current_dir()
         .map_err(|error| error.to_string())
-        .and_then(|root| migration::apply(&root, &render_with_options(&root, lightweight)?, mode));
+        .and_then(|root| {
+            let outcome = migration::apply(&root, &render_with_options(&root, lightweight)?, mode)?;
+            if !check {
+                inherit::update_manifest(&root, &hooks::local_overrides(&root)?)?;
+                let report = hooks::configure(&root)?;
+                for message in report.messages {
+                    println!("{message}");
+                }
+            }
+            Ok(outcome)
+        });
     match result {
         Ok(Outcome::Created) => {
             println!("created {ENVIRONMENT}; setup runs when Codex creates a worktree")
@@ -45,6 +57,31 @@ pub fn run(check: bool, lightweight: bool) -> u8 {
     0
 }
 
+pub fn inherit_local(post_checkout: &[String]) -> u8 {
+    let checkout = (!post_checkout.is_empty()).then_some(post_checkout);
+    match std::env::current_dir()
+        .map_err(|error| error.to_string())
+        .and_then(|root| inherit::copy(&root, checkout))
+    {
+        Ok(copied) => {
+            if checkout.is_none() || copied > 0 {
+                println!("inherited {copied} missing local configuration files");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!(
+                "error: local configuration inheritance failed: {error}; run jt codex inherit to retry"
+            );
+            1
+        }
+    }
+}
+
+pub(super) fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 #[cfg(test)]
 fn init(root: &Path) -> Result<bool, String> {
     Ok(matches!(
@@ -63,7 +100,7 @@ fn render_with_options(root: &Path, lightweight: bool) -> Result<String, String>
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("project");
-    let mut setup = String::from("set -eu\n");
+    let mut setup = String::from("set -eu\njt codex inherit\n");
     let mut actions = String::new();
     match fs::read(root.join("package.json")) {
         Ok(bytes) => {
@@ -380,6 +417,9 @@ mod tests {
         database.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE evidence (value TEXT); INSERT INTO evidence VALUES ('original');").unwrap();
         let bin = directory.path().join("bin");
         fs::create_dir(&bin).unwrap();
+        let jt = bin.join("jt");
+        fs::write(&jt, "#!/bin/sh\n[ \"$*\" = 'codex inherit' ]\n").unwrap();
+        fs::set_permissions(&jt, fs::Permissions::from_mode(0o755)).unwrap();
         let codegraph = bin.join("codegraph");
         fs::write(
             &codegraph,
