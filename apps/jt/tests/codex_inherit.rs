@@ -409,6 +409,7 @@ fn upgraded_simple_hook_inherits_on_checkout_without_jt_and_preserves_business_s
     fs::create_dir(&primary).unwrap();
     let primary = fs::canonicalize(primary).unwrap();
     repository(&primary);
+    let old_head = git(&primary, &["rev-parse", "HEAD"]);
     let hooks = primary.join(".git/hooks");
     git(
         &primary,
@@ -452,7 +453,8 @@ fs.writeFileSync(path.join(hooks, 'post-checkout'), '#!/bin/sh\n# SKIP_SIMPLE_GI
     let command = configuration["simple-git-hooks"]["post-checkout"]
         .as_str()
         .unwrap();
-    assert!(command.contains("node \".codex/scripts/worktree-inherit.mjs\" --post-checkout"));
+    assert!(command.contains("node "));
+    assert!(command.contains(".codex/scripts/worktree-inherit.mjs"));
     assert!(!command.contains("jt codex inherit"));
     successful(jt(&primary, &["codex", "init", "--update"]));
     assert_eq!(
@@ -522,6 +524,60 @@ fs.writeFileSync(path.join(hooks, 'post-checkout'), '#!/bin/sh\n# SKIP_SIMPLE_GI
         expected_arguments
     );
     assert!(target.join(".nlab/nlab-api.local.json").is_file());
+
+    fs::remove_file(target.join(".nlab/nlab-api.local.json")).unwrap();
+    successful(
+        Command::new(path.join("git"))
+            .args(["switch", "--detach", old_head.trim()])
+            .env("PATH", &path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(&target)
+            .output()
+            .unwrap(),
+    );
+    assert!(!target.join(".codex/scripts/worktree-inherit.mjs").exists());
+    assert!(!target.join(".nlab/nlab-api.local.json").exists());
+    assert_eq!(
+        fs::read_to_string(target.join("business-arguments")).unwrap(),
+        format!("{}\n{}\n1\n", head.trim(), old_head.trim())
+    );
+
+    let old_target = fixture.path().join("old linked project");
+    successful(
+        Command::new(path.join("git"))
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                old_target.to_str().unwrap(),
+                old_head.trim(),
+            ])
+            .env("PATH", &path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(&primary)
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        primary
+            .join(".codex/scripts/worktree-inherit.mjs")
+            .is_file()
+    );
+    assert!(
+        !old_target
+            .join(".codex/scripts/worktree-inherit.mjs")
+            .exists()
+    );
+    assert_eq!(
+        fs::read_to_string(old_target.join(".nlab/nlab-api.local.json")).unwrap(),
+        "{\"version\":1,\"backend\":{\"repoPath\":\"/backend\"}}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(old_target.join("business-arguments")).unwrap(),
+        format!("{zero}\n{}\n1\n", old_head.trim())
+    );
 }
 
 #[test]

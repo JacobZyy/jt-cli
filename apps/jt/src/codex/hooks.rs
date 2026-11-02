@@ -12,7 +12,22 @@ use serde_json::{Value, json};
 use super::shell_quote;
 
 const TASK: &str = "jt-worktree-inherit";
-const COMMAND: &str = r#"node ".codex/scripts/worktree-inherit.mjs" --post-checkout"#;
+const COMMAND: &str = r#"node --input-type=module -e 'import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+const args = process.argv.slice(1);
+if (args.length !== 4 || args[0] !== "--post-checkout" || ![40, 64].includes(args[1].length) || !/^0+$/.test(args[1]) || args[3] !== "1") process.exit(0);
+let script = path.resolve(".codex/scripts/worktree-inherit.mjs");
+if (!fs.existsSync(script)) {
+  const env = { ...process.env };
+  for (const variable of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]) delete env[variable];
+  const primary = execFileSync("git", ["worktree", "list", "--porcelain", "-z"], { env, encoding: "utf8" }).split("\0")[0];
+  if (!primary.startsWith("worktree ")) throw new Error("cannot locate primary worktree");
+  script = path.join(primary.slice("worktree ".length), ".codex/scripts/worktree-inherit.mjs");
+}
+process.argv.splice(1, 0, script);
+await import(pathToFileURL(script).href);' -- --post-checkout"#;
 const JS_BEGIN: &str = "// JT_WORKTREE_INHERIT_BEGIN";
 const JS_END: &str = "// JT_WORKTREE_INHERIT_END";
 const JS_HELPER: &str = "__jtWorktreeInherit";
@@ -1187,8 +1202,9 @@ mod tests {
         let migrated = chain_command(&legacy, COMMAND).unwrap();
         assert!(!migrated.contains("jt codex inherit"));
         assert_eq!(chain_command(&migrated, COMMAND).unwrap(), migrated);
+        let old_head = "0".repeat(40);
         let output = Command::new("sh")
-            .args(["-c", &migrated, "post-checkout", "old", "new", "1"])
+            .args(["-c", &migrated, "post-checkout", &old_head, "new", "1"])
             .current_dir(root)
             .output()
             .unwrap();
@@ -1200,7 +1216,32 @@ mod tests {
         let arguments: Value =
             serde_json::from_slice(&fs::read(root.join("inherit-arguments.json")).unwrap())
                 .unwrap();
-        assert_eq!(arguments, json!(["--post-checkout", "old", "new", "1"]));
+        assert_eq!(arguments, json!(["--post-checkout", old_head, "new", "1"]));
+    }
+
+    #[test]
+    fn non_creation_checkout_does_not_load_missing_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        for (old_head, flag) in [("a".repeat(40), "1"), ("0".repeat(40), "0")] {
+            let output = Command::new("sh")
+                .args([
+                    "-c",
+                    &format!("{COMMAND} \"$@\""),
+                    "post-checkout",
+                    &old_head,
+                    "new",
+                    flag,
+                ])
+                .current_dir(temporary.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stdout.is_empty());
+        }
     }
 
     #[test]
