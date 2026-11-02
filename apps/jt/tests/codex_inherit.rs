@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -50,6 +50,30 @@ fn repository(root: &Path) {
     write(root, "README.md", "fixture\n");
     git(root, &["add", "README.md"]);
     git(root, &["commit", "-qm", "fixture"]);
+}
+
+#[cfg(unix)]
+fn runtime_path(root: &Path) -> PathBuf {
+    use std::os::unix::fs::symlink;
+
+    let bin = root.join("runtime-bin");
+    fs::create_dir(&bin).unwrap();
+    let current_path = std::env::var_os("PATH").unwrap();
+    for name in ["node", "git", "sh"] {
+        let executable = std::env::split_paths(&current_path)
+            .map(|directory| directory.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| panic!("{name} must be installed for runtime integration tests"));
+        symlink(fs::canonicalize(executable).unwrap(), bin.join(name)).unwrap();
+    }
+    successful(
+        Command::new(bin.join("sh"))
+            .args(["-c", "! command -v jt >/dev/null 2>&1"])
+            .env("PATH", &bin)
+            .output()
+            .unwrap(),
+    );
+    bin
 }
 
 #[cfg(unix)]
@@ -136,10 +160,21 @@ fn init_without_hook_manager_preserves_custom_manifest_and_reports_disabled() {
             .join(".codex/environments/environment.toml")
             .is_file()
     );
+    assert!(
+        root.path()
+            .join(".codex/scripts/worktree-inherit.mjs")
+            .is_file()
+    );
+    let runtime =
+        fs::read_to_string(root.path().join(".codex/scripts/worktree-inherit.mjs")).unwrap();
     successful(jt(root.path(), &["codex", "init"]));
     assert_eq!(
         fs::read_to_string(root.path().join(".worktreeinclude")).unwrap(),
         manifest
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join(".codex/scripts/worktree-inherit.mjs")).unwrap(),
+        runtime
     );
     assert!(!root.path().join("package.json").exists());
     assert!(!root.path().join("lefthook.yml").exists());
@@ -175,6 +210,30 @@ fn init_check_does_not_change_manifest_or_hook_configuration() {
         "custom environment\n"
     );
     assert!(!root.path().join(".git/hooks/post-checkout").exists());
+    assert!(
+        !root
+            .path()
+            .join(".codex/scripts/worktree-inherit.mjs")
+            .exists()
+    );
+}
+
+#[test]
+fn initializing_linked_worktree_writes_portable_runtime_to_both_checkouts() {
+    let fixture = tempdir().unwrap();
+    let primary = fixture.path().join("primary");
+    let target = fixture.path().join("linked");
+    fs::create_dir(&primary).unwrap();
+    repository(&primary);
+    linked_worktree(&primary, &target);
+
+    successful(jt(&target, &["codex", "init"]));
+    let runtime = fs::read_to_string(target.join(".codex/scripts/worktree-inherit.mjs")).unwrap();
+    assert!(!runtime.is_empty());
+    assert_eq!(
+        fs::read_to_string(primary.join(".codex/scripts/worktree-inherit.mjs")).unwrap(),
+        runtime
+    );
 }
 
 #[test]
@@ -199,6 +258,7 @@ fn explicit_inherit_fills_missing_configuration_once_and_preserves_target_values
             "add",
             ".worktreeinclude",
             ".codex/environments/environment.toml",
+            ".codex/scripts/worktree-inherit.mjs",
         ],
     );
     git(&primary, &["commit", "-qm", "configuration"]);
@@ -284,7 +344,7 @@ fn checkout_inheritance_ignores_branch_switches_and_primary_checkout() {
 
 #[cfg(unix)]
 #[test]
-fn generated_codex_setup_inherits_missing_configuration() {
+fn generated_codex_setup_inherits_missing_configuration_without_jt() {
     let fixture = tempdir().unwrap();
     let primary = fixture.path().join("primary");
     let target = fixture.path().join("target");
@@ -292,16 +352,23 @@ fn generated_codex_setup_inherits_missing_configuration() {
     repository(&primary);
     successful(jt(&primary, &["codex", "init"]));
     write(&primary, ".env.local", "TOKEN=setup\n");
+    write(
+        &primary,
+        ".nlab/nlab-api.local.json",
+        "{\"version\":1,\"backend\":{\"repoPath\":\"/backend\"}}\n",
+    );
     git(
         &primary,
         &[
             "add",
             ".worktreeinclude",
             ".codex/environments/environment.toml",
+            ".codex/scripts/worktree-inherit.mjs",
         ],
     );
     git(&primary, &["commit", "-qm", "configuration"]);
     linked_worktree(&primary, &target);
+    write(&target, ".env.local", "TOKEN=target\n");
     let environment =
         fs::read_to_string(target.join(".codex/environments/environment.toml")).unwrap();
     let script = environment
@@ -311,24 +378,150 @@ fn generated_codex_setup_inherits_missing_configuration() {
         .split_once("'''\n")
         .unwrap()
         .0;
-    let binary_directory = Path::new(env!("CARGO_BIN_EXE_jt")).parent().unwrap();
-    let path = std::env::join_paths(std::iter::once(binary_directory.to_path_buf()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))
-    .unwrap();
+    let path = runtime_path(fixture.path());
 
     successful(
-        Command::new("sh")
+        Command::new(path.join("sh"))
             .args(["-c", script])
-            .env("PATH", path)
+            .env("PATH", &path)
             .current_dir(&target)
             .output()
             .unwrap(),
     );
     assert_eq!(
         fs::read_to_string(target.join(".env.local")).unwrap(),
-        "TOKEN=setup\n"
+        "TOKEN=target\n"
     );
+    assert_eq!(
+        fs::read_to_string(target.join(".nlab/nlab-api.local.json")).unwrap(),
+        "{\"version\":1,\"backend\":{\"repoPath\":\"/backend\"}}\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn upgraded_simple_hook_inherits_on_checkout_without_jt_and_preserves_business_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempdir().unwrap();
+    let primary = fixture.path().join("primary project");
+    let target = fixture.path().join("linked project");
+    fs::create_dir(&primary).unwrap();
+    let primary = fs::canonicalize(primary).unwrap();
+    repository(&primary);
+    let hooks = primary.join(".git/hooks");
+    git(
+        &primary,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let business = "printf '%s\\n' \"$@\" > business-arguments\nexit \"${BUSINESS_EXIT:-0}\"";
+    let legacy = format!(
+        "# jt-worktree-inherit original={}\njt codex inherit --post-checkout \"$@\"",
+        serde_json::to_string(business).unwrap()
+    );
+    write(
+        &primary,
+        "package.json",
+        &serde_json::json!({"simple-git-hooks": {"post-checkout": legacy}}).to_string(),
+    );
+    write(
+        &primary,
+        "node_modules/.bin/simple-git-hooks",
+        r#"#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const hooks = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'hooks'], { encoding: 'utf8' }).trim();
+const config = JSON.parse(fs.readFileSync('package.json', 'utf8'))['simple-git-hooks'];
+fs.writeFileSync(path.join(hooks, 'post-checkout'), '#!/bin/sh\n# SKIP_SIMPLE_GIT_HOOKS\n' + config['post-checkout'] + '\n', { mode: 0o755 });
+"#,
+    );
+    fs::set_permissions(
+        primary.join("node_modules/.bin/simple-git-hooks"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let output = successful(jt(&primary, &["codex", "init", "--update"]));
+    assert!(
+        output.contains("enabled native Git local configuration inheritance"),
+        "{output}"
+    );
+    let package = fs::read_to_string(primary.join("package.json")).unwrap();
+    let configuration: serde_json::Value = serde_json::from_str(&package).unwrap();
+    let command = configuration["simple-git-hooks"]["post-checkout"]
+        .as_str()
+        .unwrap();
+    assert!(command.contains("node \".codex/scripts/worktree-inherit.mjs\" --post-checkout"));
+    assert!(!command.contains("jt codex inherit"));
+    successful(jt(&primary, &["codex", "init", "--update"]));
+    assert_eq!(
+        fs::read_to_string(primary.join("package.json")).unwrap(),
+        package
+    );
+    write(
+        &primary,
+        ".nlab/nlab-api.local.json",
+        "{\"version\":1,\"backend\":{\"repoPath\":\"/backend\"}}\n",
+    );
+    git(
+        &primary,
+        &[
+            "add",
+            "package.json",
+            ".worktreeinclude",
+            ".codex/environments/environment.toml",
+            ".codex/scripts/worktree-inherit.mjs",
+        ],
+    );
+    git(&primary, &["commit", "-qm", "portable hook configuration"]);
+    let path = runtime_path(fixture.path());
+    successful(
+        Command::new(path.join("git"))
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                target.to_str().unwrap(),
+                "HEAD",
+            ])
+            .env("PATH", &path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(&primary)
+            .output()
+            .unwrap(),
+    );
+    let head = git(&primary, &["rev-parse", "HEAD"]);
+    let zero = "0".repeat(40);
+    let expected_arguments = format!("{zero}\n{}\n1\n", head.trim());
+    assert_eq!(
+        fs::read_to_string(target.join("business-arguments")).unwrap(),
+        expected_arguments
+    );
+    assert_eq!(
+        fs::read_to_string(target.join(".nlab/nlab-api.local.json")).unwrap(),
+        "{\"version\":1,\"backend\":{\"repoPath\":\"/backend\"}}\n"
+    );
+
+    fs::remove_file(target.join(".nlab/nlab-api.local.json")).unwrap();
+    let failed_business = Command::new(hooks.join("post-checkout"))
+        .args([zero.as_str(), head.trim(), "1"])
+        .env("PATH", &path)
+        .env("BUSINESS_EXIT", "23")
+        .current_dir(&target)
+        .output()
+        .unwrap();
+    assert_eq!(
+        failed_business.status.code(),
+        Some(23),
+        "{failed_business:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(target.join("business-arguments")).unwrap(),
+        expected_arguments
+    );
+    assert!(target.join(".nlab/nlab-api.local.json").is_file());
 }
 
 #[test]
@@ -340,7 +533,9 @@ fn generated_node_setup_inherits_before_dependency_preparation() {
     let environment =
         fs::read_to_string(root.path().join(".codex/environments/environment.toml")).unwrap();
     assert!(
-        environment.find("codex inherit").unwrap()
+        environment
+            .find("node \".codex/scripts/worktree-inherit.mjs\"")
+            .unwrap()
             < environment.find("node --input-type=module").unwrap()
     );
     assert!(!root.path().join("node_modules").exists());

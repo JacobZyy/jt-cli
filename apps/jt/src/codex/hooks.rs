@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use super::shell_quote;
 
 const TASK: &str = "jt-worktree-inherit";
+const COMMAND: &str = r#"node ".codex/scripts/worktree-inherit.mjs" --post-checkout"#;
 const JS_BEGIN: &str = "// JT_WORKTREE_INHERIT_BEGIN";
 const JS_END: &str = "// JT_WORKTREE_INHERIT_END";
 const JS_HELPER: &str = "__jtWorktreeInherit";
@@ -138,7 +139,7 @@ pub fn configure(root: &Path) -> Result<Report, String> {
     if let Some(reason) = foreign_hooks(&hooks, manager)? {
         return Ok(disabled(&reason));
     }
-    let command = "jt codex inherit --post-checkout";
+    let command = COMMAND;
     let config = match manager {
         Manager::Simple => update_simple(&primary, &package, command)?,
         Manager::Lefthook => update_lefthook(&primary, command)?,
@@ -295,7 +296,7 @@ fn lefthook_configured(root: &Path) -> bool {
             .any(|name| root.join(name).is_file())
 }
 
-fn primary(root: &Path) -> Result<Option<PathBuf>, String> {
+pub(super) fn primary(root: &Path) -> Result<Option<PathBuf>, String> {
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain", "-z"])
         .current_dir(root)
@@ -1052,7 +1053,7 @@ fn update_yaml(source: &str, run: &str) -> Result<String, String> {
     Ok(source)
 }
 
-fn ensure_regular(root: &Path, path: &Path) -> Result<(), String> {
+pub(super) fn ensure_regular(root: &Path, path: &Path) -> Result<(), String> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| "hook config must be inside project")?;
@@ -1082,7 +1083,7 @@ fn ensure_regular(root: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
+pub(super) fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
     let current = match fs::read(path) {
         Ok(current) => Some(current),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -1172,6 +1173,37 @@ mod tests {
     }
 
     #[test]
+    fn shell_chain_migrates_legacy_command_and_preserves_business_status() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join(".codex/scripts")).unwrap();
+        fs::write(
+            root.join(".codex/scripts/worktree-inherit.mjs"),
+            "import fs from 'node:fs';\nfs.writeFileSync('inherit-arguments.json', JSON.stringify(process.argv.slice(2)));\nprocess.exitCode = 23;\n",
+        )
+        .unwrap();
+        let original = "printf '%s\\n' business > business.log; exit 17";
+        let legacy = chain_command(original, "jt codex inherit --post-checkout").unwrap();
+        let migrated = chain_command(&legacy, COMMAND).unwrap();
+        assert!(!migrated.contains("jt codex inherit"));
+        assert_eq!(chain_command(&migrated, COMMAND).unwrap(), migrated);
+        let output = Command::new("sh")
+            .args(["-c", &migrated, "post-checkout", "old", "new", "1"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(17));
+        assert_eq!(
+            fs::read_to_string(root.join("business.log")).unwrap(),
+            "business\n"
+        );
+        let arguments: Value =
+            serde_json::from_slice(&fs::read(root.join("inherit-arguments.json")).unwrap())
+                .unwrap();
+        assert_eq!(arguments, json!(["--post-checkout", "old", "new", "1"]));
+    }
+
+    #[test]
     fn javascript_preserves_dynamic_source_and_updates_idempotently() {
         for (file, source) in [
             (
@@ -1188,17 +1220,17 @@ mod tests {
             ),
         ] {
             let path = Path::new(file);
-            let first =
+            let legacy =
                 update_javascript(source, path, "jt codex inherit --post-checkout").unwrap();
-            let repeated =
-                update_javascript(&first, path, "jt codex inherit --post-checkout").unwrap();
+            let first = update_javascript(&legacy, path, COMMAND).unwrap();
+            let repeated = update_javascript(&first, path, COMMAND).unwrap();
             assert_eq!(first, repeated, "{file}");
+            assert!(!first.contains("jt codex inherit"));
             assert!(first.contains("process.env.HOOK"));
             assert_eq!(first.matches(JS_BEGIN).count(), 1);
             assert!(first.contains("\\\"$@\\\""));
             let with_suffix = format!("{first}// custom later addition\n");
-            let updated =
-                update_javascript(&with_suffix, path, "jt codex inherit --post-checkout").unwrap();
+            let updated = update_javascript(&with_suffix, path, COMMAND).unwrap();
             assert!(updated.contains("// custom later addition\n"));
             assert!(!updated.contains("additionfunction"));
         }
@@ -1206,17 +1238,17 @@ mod tests {
 
     #[test]
     fn lefthook_updates_named_task_without_changing_other_commands_or_jobs() {
-        let run = "jt codex inherit --post-checkout \"{1}\" \"{2}\" \"{3}\"";
+        let run = format!("{COMMAND} \"{{1}}\" \"{{2}}\" \"{{3}}\"");
         for source in [
             "pre-commit:\n  commands:\n    lint:\n      run: echo lint\n",
             "post-checkout:\n  jobs:\n    - name: business\n      run: echo business\n",
             "post-checkout:\n  commands:\n    business:\n      run: echo business\n",
-            "post-checkout:\n  commands:\n    jt-worktree-inherit:\n      run: obsolete\n    business:\n      run: echo business\n",
+            "post-checkout:\n  commands:\n    jt-worktree-inherit:\n      run: 'jt codex inherit --post-checkout \"{1}\" \"{2}\" \"{3}\"'\n    business:\n      run: echo business\n",
             "post-checkout:\n  commands: {}\n",
             "post-checkout: # retain post comment\n  commands: {} # retain commands comment\n",
         ] {
-            let first = update_yaml(source, run).unwrap();
-            assert_eq!(first, update_yaml(&first, run).unwrap());
+            let first = update_yaml(source, &run).unwrap();
+            assert_eq!(first, update_yaml(&first, &run).unwrap());
             assert_eq!(first.matches("jt-worktree-inherit:").count(), 1);
             if source.contains("echo business") {
                 assert!(first.contains("echo business"));
@@ -1225,11 +1257,11 @@ mod tests {
                 assert!(first.contains("# retain post comment"));
                 assert!(first.contains("# retain commands comment"));
             }
-            assert!(!first.contains("obsolete"));
+            assert!(!first.contains("jt codex inherit"));
         }
         let toml = "[post-checkout.commands.business]\nrun = \"echo business\"\n";
-        let first = update_toml(toml, run).unwrap();
-        assert_eq!(first, update_toml(&first, run).unwrap());
+        let first = update_toml(toml, &run).unwrap();
+        assert_eq!(first, update_toml(&first, &run).unwrap());
         assert!(first.contains(toml));
         let jsonc = "{\n// business comment\n\"post-checkout\": {\"jobs\": [{\"run\": \"echo business\"}]}\n}";
         let value = json!({"run":run});
@@ -1260,7 +1292,7 @@ mod tests {
         fs::write(root.join("package.json"), package.to_string()).unwrap();
         let inactive = fs::read(root.join("simple-git-hooks.json")).unwrap();
         assert_eq!(
-            update_simple(root, &package, "jt codex inherit --post-checkout").unwrap(),
+            update_simple(root, &package, COMMAND).unwrap(),
             root.join(".simple-git-hooks.json")
         );
         assert_eq!(
