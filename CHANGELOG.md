@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.0.4](https://github.com/JacobZyy/jt-cli/compare/v4.0.3...v4.0.4) (2026-11-02)
+
+
+### Bug Fixes
+
+* **codex:** bootstrap inheritance across older worktree commits ([fe82da2](https://github.com/JacobZyy/jt-cli/commit/fe82da2403e576e4f35d952629770762ea60451e))
+* **codex:** make generated worktree inheritance standalone ([ba34305](https://github.com/JacobZyy/jt-cli/commit/ba343052693eed57d555bd546771b0b219232f72))
+
 ## [4.0.3](https://github.com/JacobZyy/jt-cli/compare/v4.0.2...v4.0.3) (2026-10-29)
 
 
