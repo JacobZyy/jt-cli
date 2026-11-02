@@ -36,6 +36,11 @@ or indexes. Codex uses its native copy support; generated setup fills missing co
 dependency preparation. Matching uses Git's native exclude rules. Ordinary `git worktree add`
 uses the manager's `post-checkout` task, which
 only handles initial linked-worktree checkout and never installs dependencies or indexes.
+The hook checks the checkout event before loading the runtime. When an older target commit lacks
+the script, it loads the primary worktree's copy while keeping the target working directory.
+Switching branches remains a no-op for inheritance, including switches to commits without the script.
+Lefthook loads configuration from the target commit, so branches that need automatic inheritance
+must contain the upgraded task configuration. A branch without that task needs explicit inheritance.
 
 Missing files are copied once from the same repository's primary worktree. Existing target
 configuration takes precedence; each worktree can then change independently. JT's copy logic also
