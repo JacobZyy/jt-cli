@@ -8,12 +8,15 @@ Create a Codex local environment from the current project directory:
 jt codex init
 ```
 
-Writes `.codex/environments/environment.toml` and updates `.worktreeinclude` without running setup
-or installing project dependencies. Commit both files so new worktrees receive the setup and
-local configuration copy rules. Existing environment files, including custom
+Writes `.codex/environments/environment.toml`, `.codex/scripts/worktree-inherit.mjs`, and
+`.worktreeinclude` without running setup or installing project dependencies. Commit all three
+files so new worktrees receive the setup, standalone runtime, and local configuration copy rules.
+Existing environment files, including custom
 configuration, are automatically backed up and overwritten; identical content is left unchanged.
 Symlinked configuration paths are rejected. No AGENTS.md files are written.
-`jt` must be available on PATH when the generated setup runs.
+`jt` is only needed to generate or update these files. Generated setup and Git hooks run the
+checked-in script with Node.js and Git; teammates do not need `jt` or extra npm packages.
+Node.js is required for inheritance in all projects, including projects that only use Cargo.
 
 Initialization also extends the project's existing Lefthook or simple-git-hooks configuration with
 a `post-checkout` task and runs that manager's installer from the primary worktree. Existing business
@@ -30,7 +33,8 @@ supported local configuration form first; JT reports the unsupported form withou
 `CLAUDE.local.md`, `AGENTS.override.md`, and the selected manager's local override files. Custom
 entries remain intact. JT does not select entire configuration directories, locks, logs, reports,
 or indexes. Codex uses its native copy support; generated setup fills missing configuration before
-dependency preparation. Ordinary `git worktree add` uses the manager's `post-checkout` task, which
+dependency preparation. Matching uses Git's native exclude rules. Ordinary `git worktree add`
+uses the manager's `post-checkout` task, which
 only handles initial linked-worktree checkout and never installs dependencies or indexes.
 
 Missing files are copied once from the same repository's primary worktree. Existing target
@@ -41,8 +45,12 @@ JT never deletes existing configuration or guesses which files Codex copied. For
 `git worktree add --no-checkout`, or creation with hooks disabled, fill missing configuration explicitly:
 
 ```bash
-jt codex inherit
+node .codex/scripts/worktree-inherit.mjs
 ```
+
+For a worktree created with `--no-checkout`, run the script from the primary worktree using its
+absolute path while keeping the new worktree as the working directory. `jt codex inherit` remains
+an optional shortcut and executes the same standalone runtime.
 
 Optionally preview an update without replacing the existing configuration:
 
@@ -54,8 +62,10 @@ jt codex init --check
 existing file is an unchanged managed template. Rerun `jt codex init` to apply the update; `--update`
 is also accepted and behaves the same as the default. Before replacement, the original bytes are
 saved in the reported `environment.toml.backup-*/environment.toml` path; copy that file back to restore.
-Neither command runs setup. `--check` does not update the copy list or manager configuration and
-does not install hooks. Candidate and recovery files should stay out of commits.
+Neither command runs setup. `--check` does not update the runtime, copy list, or manager
+configuration and does not install hooks. Candidate and recovery files should stay out of commits.
+Rerun `jt codex init --update` in an existing project to replace older generated `jt codex inherit`
+calls with the standalone script. Existing business hooks and their exit status are preserved.
 
 Node projects support npm and pnpm. `packageManager` selects the manager when declared; otherwise
 the lockfile selects it (npm when neither exists). Unsupported or ambiguous lockfiles fail before

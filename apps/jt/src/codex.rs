@@ -12,6 +12,7 @@ pub mod recycle;
 use migration::{ENVIRONMENT, Mode, Outcome};
 
 const CODEGRAPH_SETUP: &str = include_str!("codex/codegraph.sh");
+const INHERIT_SCRIPT: &str = ".codex/scripts/worktree-inherit.mjs";
 const ROOTS: &str = r#"worktree_root="$(pwd -P)"
 main_worktree_root="$worktree_root"
 git_common_dir="$worktree_root/.codex/cache"
@@ -29,6 +30,10 @@ pub fn run(check: bool, lightweight: bool) -> u8 {
         .and_then(|root| {
             let outcome = migration::apply(&root, &render_with_options(&root, lightweight)?, mode)?;
             if !check {
+                write_inherit_script(&root)?;
+                if let Some(primary) = hooks::primary(&root)? {
+                    write_inherit_script(&primary)?;
+                }
                 inherit::update_manifest(&root, &hooks::local_overrides(&root)?)?;
                 let report = hooks::configure(&root)?;
                 for message in report.messages {
@@ -41,7 +46,7 @@ pub fn run(check: bool, lightweight: bool) -> u8 {
         Ok(Outcome::Created) => {
             println!("created {ENVIRONMENT}; setup runs when Codex creates a worktree")
         }
-        Ok(Outcome::Current) => println!("current {ENVIRONMENT}; no changes made"),
+        Ok(Outcome::Current) => println!("current {ENVIRONMENT}"),
         Ok(Outcome::Preview { candidate, managed }) => println!(
             "candidate: {}; managed template: {managed}; rerun without --check to apply",
             candidate.display()
@@ -55,6 +60,12 @@ pub fn run(check: bool, lightweight: bool) -> u8 {
         }
     }
     0
+}
+
+fn write_inherit_script(root: &Path) -> Result<(), String> {
+    let path = root.join(INHERIT_SCRIPT);
+    hooks::ensure_regular(root, &path)?;
+    hooks::write_if_changed(&path, inherit::SCRIPT)
 }
 
 pub fn inherit_local(post_checkout: &[String]) -> u8 {
@@ -100,7 +111,7 @@ fn render_with_options(root: &Path, lightweight: bool) -> Result<String, String>
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("project");
-    let mut setup = String::from("set -eu\njt codex inherit\n");
+    let mut setup = format!("set -eu\nnode \"{INHERIT_SCRIPT}\"\n");
     let mut actions = String::new();
     match fs::read(root.join("package.json")) {
         Ok(bytes) => {
@@ -417,9 +428,8 @@ mod tests {
         database.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE evidence (value TEXT); INSERT INTO evidence VALUES ('original');").unwrap();
         let bin = directory.path().join("bin");
         fs::create_dir(&bin).unwrap();
-        let jt = bin.join("jt");
-        fs::write(&jt, "#!/bin/sh\n[ \"$*\" = 'codex inherit' ]\n").unwrap();
-        fs::set_permissions(&jt, fs::Permissions::from_mode(0o755)).unwrap();
+        inherit::update_manifest(&primary, &[]).unwrap();
+        write_inherit_script(&worktree).unwrap();
         let codegraph = bin.join("codegraph");
         fs::write(
             &codegraph,

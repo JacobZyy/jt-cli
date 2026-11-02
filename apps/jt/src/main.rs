@@ -122,7 +122,7 @@ enum RepoCommand {
 #[command(disable_help_subcommand = true)]
 enum CodexCommand {
     #[command(
-        about = "Generate environment and local configuration inheritance; configure the project's Git hook manager"
+        about = "Generate standalone Codex environment and inheritance scripts; configure the project's Git hook manager"
     )]
     Init {
         #[arg(
